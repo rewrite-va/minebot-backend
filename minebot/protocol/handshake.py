@@ -98,3 +98,11 @@ def parse_login_clientbound(packet_id: int, data: bytes):
 async def send_login_acknowledged(conn: Connection) -> None:
     packet_id = REGISTRY.id_for(STATE_LOGIN, "serverbound", "SERVERBOUND_LOGIN_ACKNOWLEDGED")
     await conn.send_packet(packet_id, b"")
+
+
+async def send_key(conn: Connection, encrypted_shared_secret: bytes, encrypted_challenge: bytes) -> None:
+    writer = ByteWriter()
+    writer.write_byte_array(encrypted_shared_secret)
+    writer.write_byte_array(encrypted_challenge)
+    packet_id = REGISTRY.id_for(STATE_LOGIN, "serverbound", "SERVERBOUND_KEY")
+    await conn.send_packet(packet_id, writer.getvalue())

@@ -1,15 +1,23 @@
 """Drives the connection from a fresh TCP socket through LOGIN to the start
 of CONFIGURATION.
 
-Encryption (the ClientboundHello -> ServerboundKey exchange) is only
-required in online mode. That branch is not implemented yet — see
-FINDINGS.md and minebot/auth/base.py. Against an offline-mode server this
-completes end-to-end.
+Encryption (the ClientboundHello -> ServerboundKey exchange) only happens if
+the server is online-mode. See minebot/auth/encryption.py for the algorithm
+details (server-hash computation, RSA wrapping, AES/CFB8 cipher setup).
 """
 
 from __future__ import annotations
 
+import logging
+
 from minebot.auth.base import Authenticator
+from minebot.auth.encryption import (
+    compute_server_hash,
+    encrypt_with_server_key,
+    generate_shared_secret,
+    load_server_public_key,
+    make_cfb8_cipher,
+)
 from minebot.net.connection import Connection
 from minebot.protocol.handshake import (
     ClientIntent,
@@ -20,11 +28,13 @@ from minebot.protocol.handshake import (
     parse_login_clientbound,
     send_handshake,
     send_hello,
+    send_key,
     send_login_acknowledged,
 )
 from minebot.protocol.registry import REGISTRY
 
 PROTOCOL_VERSION = REGISTRY.protocol_version
+log = logging.getLogger("minebot.login_flow")
 
 
 class LoginError(Exception):
@@ -39,24 +49,15 @@ async def perform_login(conn: Connection, host: str, port: int, authenticator: A
 
     while True:
         raw = await conn.read_packet()
+        log.debug("got LOGIN packet id=%d data_len=%d", raw.packet_id, len(raw.data))
         parsed = parse_login_clientbound(raw.packet_id, raw.data)
 
         if isinstance(parsed, LoginDisconnect):
             raise LoginError(f"disconnected during login: {parsed.reason}")
 
         if isinstance(parsed, ClientboundHello):
-            # Online-mode encryption handshake. Requires: RSA-encrypt a
-            # fresh AES secret + the server's challenge with parsed.public_key,
-            # send ServerboundKeyPacket, switch the Connection to AES/CFB8
-            # both ways, then call authenticator.join_server(server_hash)
-            # using Mojang's server-hash algorithm (sha1 of serverId +
-            # secret + publicKey, mojang's quirky signed-hex digest) before
-            # the server will let us proceed. None of this is built yet.
-            raise NotImplementedError(
-                "server requested the online-mode encryption handshake; "
-                "MicrosoftAuthenticator / encryption is not implemented yet "
-                "(see FINDINGS.md)"
-            )
+            await _do_encryption_handshake(conn, parsed, authenticator)
+            continue
 
         if isinstance(parsed, LoginCompression):
             conn.enable_compression(parsed.threshold)
@@ -70,3 +71,22 @@ async def perform_login(conn: Connection, host: str, port: int, authenticator: A
             # Unhandled packet (custom query, cookie request, ...). Not
             # needed for the MVP path against a vanilla server; ignore.
             continue
+
+
+async def _do_encryption_handshake(conn: Connection, hello: ClientboundHello, authenticator: Authenticator) -> None:
+    public_key = load_server_public_key(hello.public_key)
+    shared_secret = generate_shared_secret()
+
+    log.debug("received ClientboundHello: should_authenticate=%s", hello.should_authenticate)
+
+    if hello.should_authenticate:
+        server_hash = compute_server_hash(hello.server_id, shared_secret, hello.public_key)
+        await authenticator.join_server(server_hash)
+        log.info("sessionserver join succeeded")
+
+    encrypted_secret = encrypt_with_server_key(public_key, shared_secret)
+    encrypted_challenge = encrypt_with_server_key(public_key, hello.challenge)
+    await send_key(conn, encrypted_secret, encrypted_challenge)
+
+    encryptor, decryptor = make_cfb8_cipher(shared_secret)
+    conn.set_encryption(decryptor, encryptor)
