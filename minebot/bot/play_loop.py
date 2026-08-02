@@ -108,8 +108,9 @@ async def run_play_loop(
         position_sync = parse_player_position(raw.packet_id, raw.data)
         if position_sync is not None:
             log.info(
-                "position sync: (%.1f, %.1f, %.1f) yaw=%.1f",
+                "position sync: (%.4f, %.4f, %.4f) yaw=%.2f teleport_id=%d relatives=%s",
                 position_sync.x, position_sync.y, position_sync.z, position_sync.yaw,
+                position_sync.teleport_id, bin(position_sync.relatives),
             )
             movement.sync_from_position_packet(position_sync)
             await send_accept_teleportation(conn, position_sync.teleport_id)

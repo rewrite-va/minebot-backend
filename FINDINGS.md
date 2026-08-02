@@ -1070,9 +1070,44 @@ pathfinding module): given a 3-step staircase and a target standing at the
 bottom, the bot's tracked Y actually descends step by step toward the
 target instead of getting stuck trying to fall through solid ground still
 under its own earlier column -- the exact bug reported from live testing.
-**Not yet verified live** against the real server -- next session should
-`!follow` across real uneven terrain (stairs, ledges, a hole) and confirm
-the same fix holds up outside synthetic fixtures.
+**Attempted live verification -- found a blocker unrelated to pathfinding
+itself.** Connected to the real server and issued `!follow`: A* correctly
+found a real path (3 waypoints) and each follow tick computed a sensible,
+small move toward the next waypoint. But **every single move packet we
+sent was rejected**: the server responded with a fresh
+`ClientboundPlayerPositionPacket` snapping us back to the exact position we
+started at, every tick, with a freshly incrementing `teleport_id` (2, 3, 4,
+5, ... one higher each time) -- confirmed with exact (not rounded) float
+values and the packet's `relatives` bitmask (`0b0`, i.e. a fully-absolute
+resync, not a relative nudge). This happened immediately, from the very
+first follow tick, well within the documented ~10-block/tick server-side
+velocity tolerance (`ServerGamePacketListenerImpl.handleMovePlayer`, see
+above) that should easily allow a walk-speed step -- so this isn't the same
+"implausible jump" mechanism the gravity fix addressed.
+
+This means the *previous* live-tested success ("gravity fix works... server
+accepting each step, no reset") must have differed in some way that
+happened to avoid whatever's rejecting movement now -- worth checking
+whether that earlier test ever actually sent combined X/Z *and* Y movement
+in the same packet, versus only Y changing while already at the target's
+column. Suspect this is real server-side anti-cheat (this is a live
+third-party server, not a vanilla reference instance) requiring a more
+complete client movement pattern than a single absolute position+rotation
+packet per tick -- common anti-cheat plugins (NoCheatPlus/AAC-style) can
+require consistent packet cadence, sprint/sneak state, or rotation-then-
+position ordering that a minimal bot client doesn't replicate. Not
+confirmed; needs dedicated investigation, not more blind guessing against
+a server we can't inspect server-side.
+
+Added slightly better diagnostics for this in `bot/play_loop.py`'s
+position-sync log line (exact float precision, `teleport_id`, `relatives`
+bitmask) to make the next investigation session faster. Next steps for
+that session: (1) test whether *any* movement (plain `!forward`, no
+pathfinding/follow involved at all) is also rejected the same way, to
+isolate whether this is follow/pathfinding-specific or affects all
+movement; (2) check this server's plugin list/anti-cheat if there's any
+way to find out; (3) compare packet cadence/content against a real
+vanilla client capture if one becomes available.
 
 ## Tooling: uv, not raw venv/pip
 
