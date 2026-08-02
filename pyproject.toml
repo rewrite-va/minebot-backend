@@ -1,0 +1,19 @@
+[project]
+name = "minebot"
+version = "0.1.0"
+description = "Python Minecraft bot, protocol implemented from scratch for 26.1.2 (protocol 775)"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["minebot*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
