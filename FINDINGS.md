@@ -319,6 +319,164 @@ in `tests/test_configuration_flow.py` and `tests/test_keepalive.py`.
   independent way to check whether a username has actually propagated on
   Mojang's backend, decoupled from our own OAuth chain.
 
+## Movement + follow-player
+
+Implemented `!forward`/`!backward`/`!left`/`!right(distance=1.0)`,
+`!follow` (or `!follow("name")`), and `!stop` (cancels an active follow).
+
+Every command handler's signature is `(conn, sender, *args)` --
+`run_play_loop` now calls `commands.dispatch(text, conn, sender)` where
+`sender` is the speaking player's UUID (from `PlayerChatMessage.sender`) for
+player chat, or `None` for system chat. `!follow` uses this: with no
+argument it targets whoever typed the command (via `EntityTracker.find_by_uuid`
+on the sender directly, no name lookup needed at all); `!follow("name")`
+still works by resolving the name through the tab-list mapping
+(`EntityTracker.name_to_uuid`) first. Following by UUID directly (rather
+than requiring a name) is strictly more robust, since it works even for
+players not yet seen in a `ClientboundPlayerInfoUpdatePacket`.
+
+### Verified live, with two real bugs found and one fixed
+
+Tested against the real target server: sign-in (using the cached refresh
+token -- see below), login, `!follow` typed by another player, and the bot
+visibly followed. Two issues surfaced:
+
+1. **Movement looked jerky** -- `FOLLOW_STEP_INTERVAL_SECONDS` was 0.5s with
+   a flat 1.0-block step, i.e. ~2 blocks/sec in visibly discrete jumps.
+   Fixed: tick interval down to 0.15s, step distance scaled to match
+   vanilla's real walk speed (`4.317 blocks/sec * interval`) instead of a
+   fixed distance, so it now moves in smaller, more frequent increments that
+   read as continuous walking rather than teleport-stepping.
+2. **Y-axis / no jumping** -- our follow logic only ever moves in the (x, z)
+   plane; `self.y` is never touched after the initial position sync. When
+   the user walked to a lower Y level, the bot kept following in x/z at its
+   old Y and visibly floated in the air; walking to a higher Y (a 1-block
+   step-up) produced no jump attempt at all, since we have no concept of
+   ground height or block collision. **Not fixed this session** -- see
+   "Why this needs real pathfinding" below for why it's not a quick patch.
+
+### Why this needs real pathfinding (mineflayer-pathfinder), not a quick fix
+
+Checked how mindcraft actually handles this: it doesn't implement
+follow/movement logic itself at all. `skills.followPlayer()` /
+`skills.goToPlayer()` (`src/agent/library/skills.js`) are thin wrappers
+around `bot.pathfinder.setGoal(new pf.goals.GoalFollow(player, distance), true)`
+-- the entire pathfinding/physics subsystem is `mineflayer-pathfinder`, a
+separately-maintained library, not something mindcraft wrote.
+
+Pulled `mineflayer-pathfinder@2.4.5`'s actual source to gauge real porting
+effort: core logic is ~2300 lines across `astar.js` (125, generic A* --
+portable as-is, no block data needed), `heap.js` (81, binary heap for the
+open set), `goals.js` (492, goal definitions like `GoalFollow`/`GoalNear`),
+`movements.js` (663, **the actual blocker** -- computes neighbor
+moves/costs by querying real block state: is this solid, diggable, a
+liquid, dangerous (lava/cobweb), climbable, etc., which requires both (a)
+parsed chunk/block data, which we don't have -- `ClientboundLevelChunkWithLightPacket`
+is entirely unparsed right now -- and (b) a block-registry data source
+(block properties by ID/state) equivalent to Node's `minecraft-data`
+package, which doesn't exist for `26.1.2` either, though the raw registry
+IDs are in `CLIENTBOUND_REGISTRY_DATA`, which we currently only drain, not
+decode), and `physics.js`/`move.js` (~140, jump/fall/step timing based on
+real per-tick velocity simulation).
+
+`astar.js` and `goals.js` are genuinely portable now with no new
+dependencies. The real prerequisite work, in order, is:
+1. Parse `ClientboundLevelChunkWithLightPacket`'s paletted-container block
+   format (a bit-packed per-section block-state array with a small local
+   palette -- a well-documented but nontrivial encoding) -- OR, as a
+   cheaper first step, just decode the packet's **heightmaps**
+   (`Map<Heightmap.Types, long[]>`, already precomputed server-side per
+   (x,z) column) to answer "what's the ground height here" without needing
+   full block-type data at all. Good enough for basic walk/step-up/fall
+   movement; not enough for real A* around obstacles (needs full block
+   solidity, not just height).
+2. A minimal block-registry lookup (from `CLIENTBOUND_REGISTRY_DATA`) if/when
+   full `movements.js`-equivalent cost modeling is wanted.
+3. Port `physics.js`/`move.js`'s jump-timing logic against our own tick loop.
+4. Port `movements.js`'s neighbor/cost model once (1)+(2) exist.
+5. Port `astar.js`+`heap.js`+`goals.js` (already portable, just needs (4)
+   to call into).
+
+Decided to land the tick-rate fix now (self-contained, already done above)
+and treat the chunk-parsing foundation as its own dedicated follow-up
+rather than half-wiring jump physics on top of no block data.
+
+### Our own position: ClientboundPlayerPositionPacket
+
+Field layout: `id: varint` (a teleport id, echoed back), then
+`PositionMoveRotation` = `position: Vec3(f64,f64,f64)`,
+`deltaMovement: Vec3(f64,f64,f64)` (present on the wire but unused by us),
+`yRot/xRot: f32`, then `relatives: Set<Relative>` as a **raw i32 bitmask**
+(not a varint -- `Relative.SET_STREAM_CODEC` uses `ByteBufCodecs.INT`), bit N
+= `Relative` enum ordinal N (`X=0, Y=1, Z=2, Y_ROT=3, X_ROT=4, ...`). Each
+axis is either an absolute value or an offset added to our last known
+value, per whether its bit is set -- in practice vanilla servers send an
+all-absolute sync on spawn/teleport. We must reply with
+`ServerboundAcceptTeleportationPacket(id: varint)`, echoing the same id, or
+the server disconnects us for not acknowledging the teleport (same
+"unacknowledged packet" pattern as the CONFIGURATION-phase keepalive bug
+above -- always check whether a clientbound sync/state-change packet
+expects an ack).
+
+Movement is sent via `ServerboundMovePlayerPacket.PosRot`
+(`x,y,z: f64, yRot,xRot: f32, flags: u8` where bit0=onGround,
+bit1=horizontalCollision) with our tracked position updated locally first
+-- the server trusts client-reported positions within reason (anti-cheat
+notwithstanding) rather than us waiting for a round-trip confirmation per
+step.
+
+Yaw-to-direction math is standard vanilla convention: yaw 0 faces +Z, and
+walking "forward" moves along `(-sin(yaw), cos(yaw))` in the (x, z) plane;
+this hasn't changed across versions and is the same math every Minecraft
+bot library uses.
+
+### Tracking other entities/players: minebot/protocol/entities.py
+
+`!follow` needs another player's live position. Building this required
+more than one packet:
+
+- `ClientboundAddEntityPacket`: gives `(entity_id, uuid, x, y, z)`. We
+  deliberately do **not** decode the `type` field (a registry-ID varint) --
+  matching purely on `uuid` avoids needing to parse
+  `CLIENTBOUND_REGISTRY_DATA` (currently just drained, not interpreted) to
+  know which registry ID corresponds to "player."
+- `ClientboundRemoveEntitiesPacket`: varint-prefixed list of entity ids to
+  drop from tracking.
+- `ClientboundTeleportEntityPacket` / `ClientboundEntityPositionSyncPacket`:
+  both share an `(id: varint, PositionMoveRotation, ...)` prefix giving an
+  absolute position -- simpler than the delta-based move packets below.
+- `ClientboundMoveEntityPacket.Pos`/`.PosRot`: relative position updates
+  using the classic **fixed-point delta encoding** unchanged since ~1.8:
+  `xa/ya/za: i16`, each unit = 1/4096 of a block. Must be accumulated onto
+  the entity's last known absolute position (from AddEntity or a
+  teleport/sync packet), not treated as absolute.
+- `ClientboundPlayerInfoUpdatePacket`: the trickiest one -- gives
+  username<->UUID (needed to resolve a name typed in `!follow("name")` to
+  an entity). Its wire format is `actions: EnumSet<Action>` as a
+  **fixed-size bitset** (`ceil(8 actions / 8) = 1 byte`, LSB-first per
+  `BitSet.valueOf`), then a varint-prefixed entry list where **each entry's
+  field layout depends on which actions are active** (every active action
+  contributes one field, in the action enum's declared order, not
+  necessarily UUID-then-name-then-whatever). We parse `ADD_PLAYER`'s
+  `(name: string, GameProfileProperties)` pair for the name, but must still
+  correctly consume every other active action's bytes (latency varint,
+  listed bool, a nullable chat-session record with a nested nullable
+  `ProfilePublicKey.Data`, a nullable NBT Component for display name, etc.)
+  or the next entry's fields desync. Two bugs caught during this: (1) a
+  `ProfilePublicKey.Data`'s `expiresAt` is a **plain i64 epoch-millis**
+  (`FriendlyByteBuf.readInstant` = `Instant.ofEpochMilli(readLong())`), not
+  i64-seconds+i32-nanos as commonly assumed from other serialization
+  formats; (2) `readNullable`'s wire shape is a plain bool prefix (true =
+  value follows), which is easy to get right but easy to forget to apply
+  consistently across every nullable sub-field.
+
+`EntityTracker` (in `minebot/protocol/entities.py`) holds `by_id: {entity_id
+-> position}` and `name_to_uuid`, fed by `apply_entity_packet()` from the
+PLAY loop; `MovementController.follow()` (in `minebot/bot/movement.py`)
+runs a background `asyncio.Task` that polls the tracker every 0.5s and
+steps toward the target's last known position, stopping within ~2 blocks;
+`!stop` cancels that task.
+
 ## Tooling: uv, not raw venv/pip
 
 This project uses `uv` (Astral) for dependency management and running things
@@ -385,6 +543,13 @@ minebot/
                                 # enough to pull chat-component fields out. Extend this (don't write
                                 # a second parser) if a later packet needs full NBT (e.g. item
                                 # components, block entity data).
+    movement.py                 # our own position sync (ClientboundPlayerPositionPacket +
+                                 # ServerboundAcceptTeleportationPacket ack) and
+                                 # ServerboundMovePlayerPacket.PosRot sends — done, tested
+    entities.py                  # other-entity/player position tracking (AddEntity/RemoveEntities/
+                                  # TeleportEntity/EntityPositionSync/MoveEntity + PlayerInfoUpdate's
+                                  # name<->uuid mapping) — done, tested. See "Movement + follow-player"
+                                  # section above for the two Instant/nullable-parsing bugs caught here.
   net/
     types.py                # VarInt/UTF/UUID/byte-array encode-decode — done, tested
     connection.py            # framing + zlib compression + AES/CFB8 encryption — done, proven live
@@ -399,26 +564,34 @@ minebot/
     encryption.py               # server-hash computation (Java BigInteger-compatible, cross-checked),
                                  # RSA/AES crypto helpers, sessionserver joinServer call — done
   bot/
-    movement.py               # forward/backward/left/right command handlers — registered but each
-                               # raises NotImplementedError; blocked on PLAY-phase movement packets.
-                               # Handler signature is (conn, *args) to match play_loop's dispatch.
+    movement.py               # MovementController — done, tested: forward/backward/left/right
+                               # (yaw-relative walk, tracked position updated locally then sent via
+                               # ServerboundMovePlayerPacket.PosRot), follow(name) (background
+                               # asyncio.Task polling EntityTracker every 0.5s, walks toward the
+                               # target and stops within ~2 blocks), stop() (cancels an active follow).
     play_loop.py                # PLAY-phase main loop — done: reads packets forever, auto-answers
-                                 # keepalive + ping, feeds player/system chat text through the command
-                                 # registry (dispatch(text, conn)). Proven live: received and logged
-                                 # real chat messages from another player on the target server.
-                                 # Everything else (entity/chunk/inventory packets) ignored for now.
+                                 # keepalive + ping, syncs our position from ClientboundPlayerPosition
+                                 # (acking with ServerboundAcceptTeleportation), feeds player/system
+                                 # chat text through the command registry (dispatch(text, conn)), and
+                                 # feeds entity/player-list packets into the EntityTracker. Proven live:
+                                 # received and logged real chat messages from another player on the
+                                 # target server. Chunk/inventory packets still ignored for now.
   commands/
     parser.py                 # !name(args) regex grammar, mirrors mindcraft — done, tested
     registry.py                # name -> async handler dispatch — done, tested
   main.py                      # wires config -> auth -> connection -> login_flow -> configuration
-                                # -> play_loop. This is the full MVP path from prompt.txt (connect,
-                                # listen to chat, parse commands), proven end-to-end against the real
-                                # online-mode target server.
+                                # -> play_loop, constructing one EntityTracker + MovementController per
+                                # run. This is the full MVP path from prompt.txt (connect, listen to
+                                # chat, parse commands, move) plus follow-player, proven end-to-end
+                                # against the real online-mode target server (movement/follow verified
+                                # via unit tests with a recording fake connection, not yet re-run live
+                                # end-to-end after this pass -- worth doing before considering this
+                                # fully proven in production).
   config.py                    # BotConfig.from_env(), loads .env via python-dotenv first —
                                 # MINEBOT_HOST/PORT/USERNAME/ONLINE_MODE (see ".env" section above)
 tools/
   extract_packet_ids.py      # regenerate packets_775.json from a sources jar — done
-tests/                        # 48 tests, all passing (uv run pytest -q): varint/uuid/utf roundtrips,
+tests/                        # 68 tests, all passing (uv run pytest -q): varint/uuid/utf roundtrips,
                                # registry lookups + spot-checks against manually-read source, offline-UUID
                                # vs. known "Notch" reference value, command parser/registry, NBT reader
                                # (plain text + nested "extra" siblings), chat packet parsing (player chat
@@ -426,8 +599,12 @@ tests/                        # 48 tests, all passing (uv run pytest -q): varint
                                # keepalive/ping echo (both states), server-hash vs. real java.math.BigInteger
                                # output, RSA/AES roundtrips, full LOGIN flow for both offline and online mode
                                # (the latter with a real generated RSA keypair and a full AES/CFB8 cipher
-                               # switch mid-connection), CONFIGURATION phase incl. keepalive/ping, and the
-                               # PLAY loop — all against fake in-process servers except where noted above
+                               # switch mid-connection), CONFIGURATION phase incl. keepalive/ping, the PLAY
+                               # loop, movement packet (de)serialization, entity/player-info tracking (incl.
+                               # a regression test for correct positional field-skipping across multiple
+                               # active PlayerInfoUpdate actions), and MovementController's yaw math +
+                               # follow-loop behavior (via a RecordingConnection fake, no real socket needed)
+                               # — all against fake in-process servers except where noted above
 ```
 
 ### Outbound chat: why /say instead of real ServerboundChatPacket
@@ -442,11 +619,23 @@ outbound bot messages as `/say <message>` via `ServerboundChatCommandPacket`
 as a command/announcement rather than a normal player chat bubble under the
 bot's name. Revisit if a deployment needs real signed chat.
 
-**Not started:** movement/mining/placing/combat/inventory PLAY packets (only
-chat + keepalive/ping are wired up), and Docker/compose packaging. Auth
-token caching to disk (every run currently redoes the full device-code
-sign-in, which is correct but a bit disruptive) is a possible future
-convenience improvement, not a blocker.
+**Not started:** mining/placing/combat/inventory PLAY packets (chat,
+keepalive/ping, and basic movement/follow are wired up now), and
+Docker/compose packaging.
+
+### Auth token caching (minebot/auth/token_cache.py)
+
+The MSA refresh token is cached on disk at `~/.cache/minebot/msa_token.json`
+(0600 permissions) so repeat runs skip the interactive device-code sign-in
+-- matching how real launchers behave. `MicrosoftAuthenticator.get_profile()`
+tries `msa.refresh_msa_tokens()` against the cached refresh token first;
+if that fails (expired/revoked), it falls back to the normal device-code
+flow and re-caches the new refresh token afterward. Only the MSA refresh
+token is persisted, not the downstream Xbox/XSTS/Minecraft tokens -- those
+are cheap to re-derive each run (a handful of HTTP calls) and caching them
+too would mean tracking several more independent expiry clocks for little
+benefit. `MicrosoftAuthenticator(cache_path=...)` accepts a custom path,
+mainly so tests don't touch the real `~/.cache`.
 
 Check `git log` / current file state for what's actually been built since —
 this doc captures research findings, not a live progress tracker.

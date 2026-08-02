@@ -10,6 +10,7 @@ from minebot.commands.registry import CommandRegistry
 from minebot.config import BotConfig
 from minebot.net.connection import Connection
 from minebot.protocol.configuration import run_configuration_phase
+from minebot.protocol.entities import EntityTracker
 from minebot.protocol.login_flow import perform_login
 
 logging.basicConfig(level=logging.INFO)
@@ -40,13 +41,14 @@ async def run(config: BotConfig) -> None:
     log.info("configuration finished, entering play phase")
 
     registry = CommandRegistry()
-    movement = MovementController()
+    tracker = EntityTracker()
+    movement = MovementController(tracker)
     register_movement_commands(registry, movement)
 
-    # Movement/mining/placing/combat/inventory command handlers still raise
-    # NotImplementedError when invoked (see bot/movement.py) -- only chat
-    # receive, command parsing/dispatch, and keepalive are functional so far.
-    await run_play_loop(conn, registry)
+    # Mining/placing/combat/inventory command handlers are not implemented
+    # yet -- chat receive/dispatch, keepalive, and basic movement
+    # (forward/backward/left/right/follow/stop) are functional.
+    await run_play_loop(conn, registry, movement, tracker)
 
 
 def main() -> None:

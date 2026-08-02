@@ -2,10 +2,12 @@ import asyncio
 
 import pytest
 
+from minebot.bot.movement import MovementController
 from minebot.bot.play_loop import run_play_loop
 from minebot.commands.registry import CommandRegistry
 from minebot.net.connection import Connection
 from minebot.net.types import ByteReader, ByteWriter
+from minebot.protocol.entities import EntityTracker
 from minebot.protocol.registry import REGISTRY
 
 STATE = "play"
@@ -64,7 +66,7 @@ async def test_play_loop_answers_keepalive_and_dispatches_commands():
     results: dict = {}
     calls = []
 
-    async def ping_handler(conn):
+    async def ping_handler(conn, sender):
         calls.append("ping")
         from minebot.protocol.chat import send_say
 
@@ -78,12 +80,14 @@ async def test_play_loop_answers_keepalive_and_dispatches_commands():
 
     registry = CommandRegistry()
     registry.register("ping", ping_handler)
+    tracker = EntityTracker()
+    movement = MovementController(tracker)
 
     async with server:
         conn = await Connection.open(host, port)
 
         try:
-            await asyncio.wait_for(run_play_loop(conn, registry), timeout=1.0)
+            await asyncio.wait_for(run_play_loop(conn, registry, movement, tracker), timeout=1.0)
         except (asyncio.IncompleteReadError, ConnectionResetError, asyncio.TimeoutError):
             pass
 

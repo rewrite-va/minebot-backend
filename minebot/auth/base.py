@@ -11,12 +11,13 @@ import hashlib
 import logging
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 import httpx
 
-from minebot.auth import minecraft_services, msa, xbox
-from minebot.auth.msa import DeviceCodeCallback
+from minebot.auth import minecraft_services, msa, token_cache, xbox
+from minebot.auth.msa import DeviceCodeCallback, MsaAuthError
 
 log = logging.getLogger("minebot.auth")
 
@@ -81,24 +82,43 @@ class MicrosoftAuthenticator:
     call when the login encryption handshake asks for it (see
     minebot/auth/encryption.py, called from protocol/login_flow.py).
 
-    No token caching to disk yet: every run re-does the device-code flow,
-    which is disruptive (the user has to re-approve each time) but correct
-    and simple. Add a cache (e.g. matching prismarine-auth's per-token-type
-    JSON file cache) if this becomes annoying in practice.
+    Caches the MSA refresh token on disk (see minebot/auth/token_cache.py)
+    so repeat runs can skip the interactive device-code sign-in, matching
+    how real Minecraft launchers behave -- sign in once, then silently
+    refresh. Only the MSA refresh token is persisted; Xbox/XSTS/Minecraft
+    tokens are cheap to re-derive each run and aren't cached (see
+    token_cache.py's docstring for why).
     """
 
-    def __init__(self, on_device_code: DeviceCodeCallback | None = None):
+    def __init__(
+        self,
+        on_device_code: DeviceCodeCallback | None = None,
+        cache_path: Path = token_cache.DEFAULT_CACHE_PATH,
+    ):
         self._on_device_code = on_device_code
+        self._cache_path = cache_path
         self._client = httpx.AsyncClient(timeout=30.0)
         self._minecraft_access_token: str | None = None
         self._profile_id: uuid.UUID | None = None
 
-    async def get_profile(self) -> GameProfile:
-        msa_tokens = await (
+    async def _get_msa_tokens(self) -> msa.MsaTokens:
+        cached_refresh_token = token_cache.load_refresh_token(self._cache_path)
+        if cached_refresh_token is not None:
+            try:
+                log.info("found a cached sign-in, refreshing it (no browser step needed)")
+                return await msa.refresh_msa_tokens(self._client, cached_refresh_token)
+            except MsaAuthError:
+                log.info("cached sign-in is no longer valid, falling back to a fresh sign-in")
+
+        return await (
             msa.authenticate_device_code(self._client, self._on_device_code)
             if self._on_device_code
             else msa.authenticate_device_code(self._client)
         )
+
+    async def get_profile(self) -> GameProfile:
+        msa_tokens = await self._get_msa_tokens()
+        token_cache.save_refresh_token(msa_tokens.refresh_token, self._cache_path)
 
         signing_key = xbox.XboxSigningKey()
         device_token = await xbox.get_device_token(self._client, signing_key)
