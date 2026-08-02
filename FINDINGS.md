@@ -1243,11 +1243,18 @@ correct, collision-resolved behavior, not a bug) -- replaced with a test
 asserting the actual invariant that matters: no reported position is ever
 below the real floor for wherever (x, z) claims to be.
 
-**Not yet verified live** with this specific fix -- the previous live
-sessions found and diagnosed the bug this phase fixes, but this exact
-physics-simulation-based execution hasn't been tested against the real
-server yet. Next session should `!follow` across the same staircase/ledge
-terrain that exposed the original bug and confirm the fix holds.
+**Confirmed live.** Ran `!follow` continuously for 4+ minutes (~1300 follow
+ticks) across real varied terrain -- the bot climbed (observed
+`on_ground=False` mid-jump, e.g. y=105.25->106.25) and descended (y=102
+down to y=92 over multiple ledges/steps) repeatedly, with correct
+airborne/grounded transitions every step and no recurrence of the
+stuck-at-the-edge symptom (no repeated identical position + incrementing
+`teleport_id` spam anywhere in the log). A second, separate test session
+also ran cleanly; the only thing that looked like "stuck" on closer
+inspection was the bot correctly holding still because the target player
+had also stopped moving nearby, within `FOLLOW_STOP_DISTANCE` -- expected
+behavior, not a bug. User confirmed: "works." This closes out the
+axis-blending bug and the real-physics-simulation phase both.
 
 ## Tooling: uv, not raw venv/pip
 
