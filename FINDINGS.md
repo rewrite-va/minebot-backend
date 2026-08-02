@@ -1101,13 +1101,153 @@ a server we can't inspect server-side.
 
 Added slightly better diagnostics for this in `bot/play_loop.py`'s
 position-sync log line (exact float precision, `teleport_id`, `relatives`
-bitmask) to make the next investigation session faster. Next steps for
-that session: (1) test whether *any* movement (plain `!forward`, no
-pathfinding/follow involved at all) is also rejected the same way, to
-isolate whether this is follow/pathfinding-specific or affects all
-movement; (2) check this server's plugin list/anti-cheat if there's any
-way to find out; (3) compare packet cadence/content against a real
-vanilla client capture if one becomes available.
+bitmask) to make the next investigation session faster.
+
+**Update: root-caused, not anti-cheat.** A second live-testing round (user
+teleported the bot to an open area and re-tested `!follow`) showed
+horizontal-only following worked perfectly, but the bot got permanently
+stuck the instant it reached an edge where the target had dropped one
+block down -- ruling out a blanket anti-cheat rejection (plain walking was
+never rejected) and pointing at something specific to *diagonal Y-changing
+moves*. The user's own diagnosis, stated before any further investigation:
+"A* is trying to go to the center of each block surface... the line
+between a and b goes through the geometry of a, diagonal movement should
+only be allowed on horizontal movement, not on vertical." Confirmed exactly
+right: `MovementController`'s move execution interpolated (x, z) in a
+straight line while independently ramping y under the hand-rolled gravity
+model from the previous phase, in the *same* move packet -- for a diagonal
+waypoint that changes both axes at once (stepping down a ledge), this
+briefly reports a position that's horizontally still over the block being
+stepped off of while already claiming a lower y, i.e. reporting a position
+inside solid geometry that was never actually vacated. The server correctly
+rejected every such packet.
+
+Two increasingly-targeted patches were tried and both failed for
+instructive reasons before the real fix:
+1. "Never send x/z and y together" -- broke a test where the bot needs to
+   walk a long horizontal distance while also catching up in y (real
+   players do both concurrently, just not through an uncleared corner).
+2. "Only sequence horizontal-then-vertical for the tick that actually
+   crosses into the next column" -- correctly diagnosed as the right
+   *shape* of fix but the user stopped this line of patching directly:
+   "we are monkey fixing stuff, we need to implement physics simulation
+   same as mineflayer-pathfinder, that is proven to work." Considered
+   pivoting further to a real Minecraft client + a Fabric mod as the
+   actual movement executor (Python only doing chat/commands, the mod
+   handling all physics via the real game code) -- a genuinely strong
+   option -- but decided to finish the real physics port first since the
+   AABB primitive and collision-shape data were already most of the way
+   built (see next section for why this was the right call: it fully
+   fixed the live bug).
+
+## Steps (6): real per-tick physics simulation (minebot/physics/)
+
+Completed by porting `prismarine-physics@1.5.2` -- the actual physics
+engine mineflayer-pathfinder relies on for movement execution (its own
+`physics.js` is a thin wrapper that just calls
+`bot.physics.simulatePlayer(state, world)` every tick with control inputs).
+Real Minecraft never blends x/z/y into one straight-line-to-a-point move;
+every real client resolves collision as three separate swept-AABB checks
+per axis, every individual 20Hz game tick. Porting that exactly (rather
+than another hand-tuned approximation) is what actually fixed the live bug.
+
+### Real per-block collision shapes, not just solid/air
+
+`movements.js`'s own cost-model port (previous phase) only needed
+solid/liquid/climbable booleans, but real collision resolution needs the
+*actual* geometry (a slab is a half-height box, stairs are an L-shaped pair
+of boxes, not a full cube) to correctly step onto a half-block slab via
+`STEP_HEIGHT` while still blocking a full stair riser. Extended the same
+one-shot Fabric-mod dump used for the block registry (see "Step (1)+(2)"
+above) to also call each block state's real
+`state.getCollisionShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO).toAabbs()`
+and serialize the resulting box list (`block_registry.py`'s new `shapes`
+field, `(min_x, min_y, min_z, max_x, max_y, max_z)` in block-local 0-1
+coordinates). Verified against known geometry: air has zero boxes, stone is
+exactly `(0,0,0,1,1,1)`, an oak slab's bottom half is `(0,0,0,1,0.5,1)`,
+oak stairs decode to a real two-box L-shape. Regenerated
+`block_registry_775.json` with this data (same throwaway-dev-server,
+temporary-mod-hook, then-clean-up pattern as every other one-shot
+extraction this session -- VillagerHelper's repo stays clean afterward).
+
+### `minebot/physics/aabb.py`
+
+Direct port of `lib/aabb.js`: `compute_offset_{x,y,z}` answer "how far can
+this box actually move by the proposed offset before hitting that one,"
+clamping down when overlapping on the other two axes -- the swept-collision
+primitive everything else sweeps against. Verified against known collision
+scenarios (falling onto solid ground, walking into a wall from both
+directions, non-overlapping boxes are unaffected) rather than just a
+roundtrip test.
+
+### `minebot/physics/simulate.py`
+
+Ports `moveEntity`/`moveEntityWithHeading`/`simulatePlayer` from
+prismarine-physics's `index.js`, deliberately scoped down: walking,
+falling, jumping, step-height climbing (real per-block shapes, so a slab is
+climbable but a stair riser isn't treated as a full block), and ladders.
+Explicitly skipped -- water/lava movement, bubble columns, soul
+sand/honey-block speed modifiers, cobwebs, sneaking edge-detection,
+sprint-jump horizontal boost, potion effects, depth strider -- none of
+which matter yet for a bot that doesn't swim, fight, or use items; add them
+if a real use case needs them rather than porting unused branches
+speculatively. Unknown (unloaded-chunk) blocks are treated as having no
+collision at all, the same conservative tradeoff used everywhere else in
+this codebase for unknown terrain -- we have no better fallback, and
+treating unknown as solid would make the bot refuse to move at the edge of
+loaded terrain entirely.
+
+Verified against real scenarios, not just internal consistency: falling
+lands exactly on a real floor and gravity accelerates correctly tick over
+tick (matching the same constants cross-checked in the previous phase),
+walking on flat ground never leaves the ground, jumping onto a 1-block
+obstacle (too tall to auto-step) traces a real parabolic arc and lands on
+top, walking into a 2-tall wall never clips through it, and -- the first
+real exercise of the new per-block shape data -- climbing a real bottom-half
+oak slab via step-height alone, no jump input, using the actual registry
+geometry rather than a synthetic full-cube stand-in.
+
+### Wired into `MovementController`
+
+Replaced the entire hand-rolled Y-ramp/XZ-interpolation execution with
+`_simulate_toward`: each follow-loop tick, aims yaw at the current waypoint
+(or raw target once the path is exhausted), holds `forward=True` (and
+`jump=True` whenever the aim point is above us), and calls `simulate_tick`
+for exactly as many real 20Hz game ticks as the follow-loop's own interval
+spans (3, at `FOLLOW_STEP_INTERVAL_SECONDS=0.15`) -- mirroring
+mineflayer-pathfinder's own `physics.js` `getController` pattern. `on_ground`
+in the outgoing move packet now comes directly from the simulation's own
+real collision result, not a heuristic. `sync_from_position_packet`
+resyncs the physics state's position and resets velocity/on_ground
+whenever a server-authoritative position arrives (teleport, join, respawn),
+since simulated motion from before that point reflects nothing the server
+actually agreed to.
+
+One subtle, easy-to-get-backwards bug caught before it shipped: matching
+minebot's own yaw convention (0=+z, "forward" = `(-sin(yaw), cos(yaw))`)
+against prismarine-physics's internal convention (`yaw = Math.PI -
+entity.yaw` before computing its own forward vector) requires feeding the
+physics state `atan2(-direction_x, -direction_z)` when aiming at a point --
+the more intuitive-looking `atan2(direction_x, direction_z)` is exactly
+backwards and would make the bot walk directly away from wherever it's
+aiming. Verified numerically (not assumed) before wiring it in.
+
+Test suite updated accordingly: removed the now-obsolete
+`_step_toward_target_height` tests (that method no longer exists; its
+gravity/terminal-velocity/step-height behavior is now covered by
+`test_physics_simulate.py` against the real port) and the
+`test_follow_never_changes_xz_and_y_in_the_same_move_packet_for_a_waypoint`
+test, which encoded the *wrong* invariant (real physics legitimately
+changes x/z and y in the same tick when walking off a ledge -- that's
+correct, collision-resolved behavior, not a bug) -- replaced with a test
+asserting the actual invariant that matters: no reported position is ever
+below the real floor for wherever (x, z) claims to be.
+
+**Not yet verified live** with this specific fix -- the previous live
+sessions found and diagnosed the bug this phase fixes, but this exact
+physics-simulation-based execution hasn't been tested against the real
+server yet. Next session should `!follow` across the same staircase/ledge
+terrain that exposed the original bug and confirm the fix holds.
 
 ## Tooling: uv, not raw venv/pip
 

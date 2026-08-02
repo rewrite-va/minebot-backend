@@ -253,26 +253,33 @@ async def test_follow_adjusts_y_even_when_already_within_stop_distance():
     # a ledge just above/below us) must still adjust Y -- the horizontal
     # "close enough, stop moving" check must not also gate the Y-tracking,
     # or we'd never notice a pure vertical difference once already close.
+    # Uses a real one-block step (climbable via step-height, no jump arc
+    # needed) so real physics has solid ground to act on.
+    ground = flat_ground(-10, 10, -10, 10, ground_y=0)
+    ground[(0, 0)] = 1  # target's column is one block higher
+    blocks = build_world(ground)
+
     tracker = EntityTracker()
     target_uuid = uuid.uuid4()
     # Right next to us horizontally (well within FOLLOW_STOP_DISTANCE), but
-    # 3 blocks higher.
-    tracker.handle_add_entity(1, target_uuid, 0.5, 3.0, 0.0)
+    # one block higher.
+    tracker.handle_add_entity(1, target_uuid, 0.5, 2.0, 0.5)
     tracker.handle_player_info([PlayerListEntry(profile_id=target_uuid, name="Alex")])
 
-    movement = MovementController(tracker, ChunkBlockCache())
+    movement = MovementController(tracker, blocks)
     movement.sync_from_position_packet(
-        PlayerPositionSync(teleport_id=1, x=0.0, y=0.0, z=0.0, yaw=0.0, pitch=0.0, relatives=0)
+        PlayerPositionSync(teleport_id=1, x=0.5, y=1.0, z=-1.5, yaw=0.0, pitch=0.0, relatives=0)
     )
     conn = RecordingConnection()
 
     await movement.follow(conn, None, "Alex")
-    await asyncio.sleep(0.3)
+    for _ in range(20):
+        await asyncio.sleep(FOLLOW_STEP_INTERVAL_SECONDS)
     movement.stop_follow()
 
     assert len(conn.sent) > 0
     result = _last_move(conn)
-    assert result["y"] > 0.0  # moved up toward the target, not stuck at 0
+    assert result["y"] > 1.0  # moved up toward the target, not stuck at the start
 
 
 @pytest.mark.asyncio
@@ -303,93 +310,6 @@ async def test_mark_position_stale_clears_has_position_and_stops_follow():
 
     with pytest.raises(RuntimeError):
         await movement.forward(conn, None)
-
-
-def test_step_toward_target_height_climbing_is_capped_at_step_height():
-    from minebot.bot.movement import FOLLOW_MAX_UPWARD_STEP
-
-    movement = MovementController(EntityTracker(), ChunkBlockCache())
-    movement.y = 0.0
-
-    # Target far above -- should rise by at most one step-height per call,
-    # not jump straight there (a normal walking step-up, not a teleport).
-    movement._step_toward_target_height(10.0)
-    assert movement.y == pytest.approx(FOLLOW_MAX_UPWARD_STEP)
-    assert movement._vertical_velocity == 0.0
-
-
-def test_step_toward_target_height_climbing_within_step_height_snaps_exactly():
-    movement = MovementController(EntityTracker(), ChunkBlockCache())
-    movement.y = 0.0
-
-    movement._step_toward_target_height(0.3)  # less than the 0.6 step cap
-    assert movement.y == pytest.approx(0.3)
-
-
-def test_step_toward_target_height_falling_accelerates():
-    # Regression test for the real bug found live: a flat-rate ramp toward
-    # a lower Y (no accumulated velocity) reads to the server as an
-    # implausible jump and gets corrected back every tick. Falling must
-    # instead build up speed like a real client's own gravity simulation
-    # (LivingEntity.DEFAULT_BASE_GRAVITY = 0.08 blocks/tick^2), so
-    # consecutive calls should fall progressively *farther* per call, not a
-    # constant amount.
-    movement = MovementController(EntityTracker(), ChunkBlockCache())
-    movement.y = 100.0
-
-    movement._step_toward_target_height(-1000.0)  # far below -- stay falling
-    first_drop = 100.0 - movement.y
-
-    movement._step_toward_target_height(-1000.0)
-    second_drop = (100.0 - first_drop) - movement.y
-
-    assert first_drop > 0.0
-    assert second_drop > first_drop  # accelerating, not constant speed
-    assert movement._vertical_velocity < 0.0  # still falling
-
-
-def test_step_toward_target_height_falling_approaches_terminal_velocity():
-    # Cross-checked against mineflayer's own physics engine
-    # (prismarine-physics): air drag (1 - 0.02 per tick) is applied to
-    # vertical velocity after gravity every tick, giving a bounded terminal
-    # fall speed (gravity / (1 - airdrag) = 0.08 / 0.02 = 4.0 blocks/tick at
-    # the limit) rather than unbounded linear acceleration -- matters on
-    # long falls, where a naive "just keep subtracting gravity" model would
-    # eventually report implausibly fast speeds.
-    movement = MovementController(EntityTracker(), ChunkBlockCache())
-    movement.y = 10_000_000.0  # far enough to fall for a long time uninterrupted
-
-    for _ in range(2000):
-        movement._step_toward_target_height(-100_000_000.0)
-
-    # Should be close to the theoretical terminal velocity, and in
-    # particular nowhere near what unbounded linear acceleration would give
-    # (0.08 * 2000 * ticks-per-step, orders of magnitude larger).
-    assert movement._vertical_velocity == pytest.approx(-4.0, abs=0.1)
-
-
-def test_step_toward_target_height_falling_lands_exactly_on_target():
-    movement = MovementController(EntityTracker(), ChunkBlockCache())
-    movement.y = 10.0
-
-    # Small drop, well within what even the first tick of falling covers --
-    # should land exactly on the target and reset velocity, not overshoot.
-    movement._step_toward_target_height(9.99)
-    assert movement.y == pytest.approx(9.99)
-    assert movement._vertical_velocity == 0.0
-
-
-def test_step_toward_target_height_switching_from_fall_to_climb_resets_velocity():
-    movement = MovementController(EntityTracker(), ChunkBlockCache())
-    movement.y = 100.0
-
-    movement._step_toward_target_height(-1000.0)
-    assert movement._vertical_velocity < 0.0
-
-    # Target is now above us (e.g. we landed and the target went back up
-    # stairs) -- climbing must not carry over leftover fall velocity.
-    movement._step_toward_target_height(movement.y + 5.0)
-    assert movement._vertical_velocity == 0.0
 
 
 @pytest.mark.asyncio
@@ -452,3 +372,46 @@ async def test_follow_falls_back_to_raw_target_position_when_blocks_unknown():
     assert len(conn.sent) > 0
     result = _last_move(conn)
     assert result["x"] > 0.0  # moved toward the target, not frozen in place
+
+
+@pytest.mark.asyncio
+async def test_follow_never_reports_a_position_below_the_real_floor():
+    # Regression test for the real bug found via live testing: earlier
+    # naive movement execution (straight-line x/z interpolation blended
+    # with an independent gravity-ramped y) could report a position that
+    # was horizontally still over solid ground while claiming a y below
+    # that ground's surface -- clipping through geometry that was never
+    # actually vacated. Real per-tick physics (minebot/physics/simulate.py)
+    # resolves collision every tick, so this must never happen: every move
+    # packet's y must be at or above the real floor height for wherever
+    # (x, z) claims to be.
+    ground = flat_ground(-10, 10, -10, 10, ground_y=3)
+    ground[(2, 2)] = 2  # a single step down, diagonally adjacent
+    blocks = build_world(ground)
+
+    tracker = EntityTracker()
+    target_uuid = uuid.uuid4()
+    tracker.handle_add_entity(1, target_uuid, 2.5, 3.0, 2.5)
+    tracker.handle_player_info([PlayerListEntry(profile_id=target_uuid, name="Alex")])
+
+    movement = MovementController(tracker, blocks)
+    movement.sync_from_position_packet(
+        PlayerPositionSync(teleport_id=1, x=0.5, y=4.0, z=0.5, yaw=0.0, pitch=0.0, relatives=0)
+    )
+    conn = RecordingConnection()
+
+    await movement.follow(conn, None, "Alex")
+    for _ in range(30):
+        await asyncio.sleep(FOLLOW_STEP_INTERVAL_SECONDS)
+    movement.stop_follow()
+
+    assert len(conn.sent) > 0
+
+    move_id = REGISTRY.id_for(STATE, "serverbound", "SERVERBOUND_MOVE_PLAYER_POS_ROT")
+    for packet_id, data in conn.sent:
+        if packet_id != move_id:
+            continue
+        reader = ByteReader(data)
+        x, y, z = reader.read_f64(), reader.read_f64(), reader.read_f64()
+        floor_y = 3 if (math.floor(x), math.floor(z)) != (2, 2) else 2
+        assert y >= floor_y - 1e-6, f"reported y={y} below the real floor ({floor_y}) at ({x}, {z})"

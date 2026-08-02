@@ -33,31 +33,24 @@ wherever the server actually says they're standing (this is a real bug we
 hit in live testing: the bot initially teleported up to the roof instead
 of matching the target's indoor Y).
 
-Falling physics (found necessary via live testing -- see FINDINGS.md
-"Why the bot got stuck on stairs"): movement authority in vanilla is
-client-side -- the real client simulates its own gravity/collision each
-tick and reports the already-resolved position; the server
-(ServerGamePacketListenerImpl.handleMovePlayer, read from the decompiled
-source) only rejects a reported position when it deviates too far from
-*its own tracked expectation* of the player's velocity, which itself is
-built up from the player's own prior reported deltas. Jumping straight
-toward a lower target Y (no accumulated falling velocity) reads to the
-server as "moved too quickly" and gets silently corrected back every
-tick -- which is exactly what live testing showed (the bot never actually
-descended a staircase; the server kept resetting it). Fixed by tracking a
-real vertical velocity that accelerates under vanilla's actual gravity
-constant (LivingEntity.DEFAULT_BASE_GRAVITY = 0.08 blocks per 20Hz game
-tick, i.e. -0.08 blocks/tick^2 added to velocity every tick) while falling,
-so our reported per-tick position deltas look like genuine falling motion
-to the server instead of an arbitrary jump. Climbing upward by a small
-amount (e.g. a single stair step) doesn't need this: vanilla's own player
-step-up height (LivingEntity.maxUpStep / Attributes.STEP_HEIGHT) is 0.6
-blocks, handled as ordinary walking collision response, not gravity/jump
-physics -- so small upward Y changes are still just clamped to a flat
-per-tick cap, only the downward (falling) case needs real acceleration.
-This is still not full physics: no actual jump impulse (we can't gain
-upward velocity the way pressing space does), and the server may still
-reject movement in ways we haven't seen yet.
+Real physics simulation (minebot/physics/ -- a port of
+prismarine-physics@1.5.2, the actual engine mineflayer-pathfinder relies on
+for movement execution): earlier phases of this session tried
+hand-rolled approximations of vanilla physics (a flat per-tick Y ramp, then
+a gravity-accelerated Y ramp blended with straight-line x/z interpolation).
+Both were eventually caught by live testing producing subtly-wrong
+positions the server rejected -- most concretely, a diagonal move that
+changes both (x, z) and y at once (stepping down a ledge) would, under
+straight-line-plus-independent-Y-ramp execution, briefly claim a position
+that's horizontally *inside* the block being stepped off of, before
+vertical collision was actually resolved. Real Minecraft (and mineflayer)
+never blends axes like that: every real client resolves horizontal and
+vertical collision as separate swept-AABB checks each individual 20Hz game
+tick. `minebot/physics/simulate.py` ports that real per-tick collision
+resolution (gravity, jump impulse, step-height climbing, ladders) against
+real per-block collision shapes from block_registry.py, so the position we
+report each follow tick is the same kind of already-resolved, physically
+consistent state a real client would produce -- not an approximation of one.
 
 Path planning (minebot/pathfinding/ -- a port of mineflayer-pathfinder's
 astar.js/movements.js/goals.js, walk+climb+parkour moves only, no
@@ -71,6 +64,16 @@ while the pathfinder does. Falls back to the previous raw-target-following
 behavior when we don't have block data for the relevant area yet (e.g. we
 haven't received those chunks) or when no path is found, rather than
 freezing -- following imperfectly is better than not moving at all.
+
+Movement execution: each follow-loop tick feeds simple look-and-walk
+control inputs (forward=True, jump=True whenever the aim point is above
+us) into the physics simulation for however many real 20Hz game ticks the
+follow-loop's own tick interval spans, then reports the resulting
+position/on_ground state -- the same pattern mineflayer-pathfinder's own
+physics.js uses (its getController), just without the full sprint-jump/
+parkour-timing logic mineflayer's move.js adds on top (not needed yet;
+this session's pathfinding port already excludes parkour execution for
+the same reason -- see pathfinding/movements.py).
 """
 
 from __future__ import annotations
@@ -86,6 +89,7 @@ from minebot.pathfinding.astar import AStar
 from minebot.pathfinding.goals import GoalNear
 from minebot.pathfinding.move import Move as PathMove
 from minebot.pathfinding.movements import Movements
+from minebot.physics.simulate import PlayerPhysicsState, simulate_tick
 from minebot.protocol.chunk_blocks import ChunkBlockCache
 from minebot.protocol.entities import EntityTracker
 from minebot.protocol.movement import PlayerPositionSync, REL_X, REL_X_ROT, REL_Y, REL_Y_ROT, REL_Z, send_move_player_pos_rot
@@ -94,32 +98,8 @@ log = logging.getLogger("minebot.movement")
 
 FOLLOW_STEP_INTERVAL_SECONDS = 0.15
 FOLLOW_STOP_DISTANCE = 2.0
-# Vanilla walk speed is ~4.317 blocks/sec; matching that at our tick rate
-# (rather than a fixed 1.0 block/tick, which at the old 500ms tick was
-# already ~2 blocks/sec and would be far too fast at this faster tick)
-# keeps movement looking like walking instead of teleport-stepping.
-_WALK_SPEED_BLOCKS_PER_SECOND = 4.317
-FOLLOW_STEP_DISTANCE = _WALK_SPEED_BLOCKS_PER_SECOND * FOLLOW_STEP_INTERVAL_SECONDS
-
-# Vanilla's real per-game-tick gravity constant (LivingEntity.DEFAULT_BASE_GRAVITY,
-# confirmed in the decompiled source, and independently cross-checked
-# against mineflayer's own physics engine, prismarine-physics -- both give
-# exactly 0.08), applied at the real 20Hz game tick rate (50ms/tick)
-# regardless of our own slower follow-loop tick rate. AIR_DRAG (also
-# cross-checked against prismarine-physics: `airdrag: 1 - 0.02`) is
-# applied multiplicatively to vertical velocity every tick *after* gravity,
-# giving falling a terminal velocity instead of unbounded linear
-# acceleration -- matters for longer drops, not just short stair-height ones.
-_GRAVITY_PER_GAME_TICK = 0.08
-_AIR_DRAG_PER_GAME_TICK = 1.0 - 0.02
-_GAME_TICK_SECONDS = 0.05
+_GAME_TICK_SECONDS = 0.05  # real vanilla tick rate (20Hz), independent of our own follow-loop tick rate
 _GAME_TICKS_PER_FOLLOW_STEP = FOLLOW_STEP_INTERVAL_SECONDS / _GAME_TICK_SECONDS
-
-# Vanilla's player step-up height (LivingEntity.maxUpStep / Attributes.STEP_HEIGHT):
-# climbing up to this much in one step is just normal walking collision
-# response, not jump physics -- used as the flat per-tick cap for the
-# upward case, which doesn't need gravity simulation.
-FOLLOW_MAX_UPWARD_STEP = 0.6
 
 # How long A* is allowed to spend per invocation -- generous relative to
 # the follow loop's own tick rate (FOLLOW_STEP_INTERVAL_SECONDS) since a
@@ -144,18 +124,19 @@ class MovementController:
         self.pitch = 0.0
         self.has_position = False
         self._follow_task: asyncio.Task | None = None
-        # Accumulated downward speed while following into a fall (blocks
-        # per game tick, negative while falling); reset to 0 whenever we're
-        # not currently falling. See module docstring for why this needs to
-        # exist at all -- the server rejects a sudden Y jump that isn't
-        # backed by an accelerating velocity like a real client would report.
-        self._vertical_velocity = 0.0
         # Current planned path (list of pathfinding.move.Move waypoints,
         # nearest-first) and the target position it was computed for, so we
         # know when it's gone stale enough to recompute (see
         # FOLLOW_REPLAN_DISTANCE) rather than re-running A* every tick.
         self._current_path: list[PathMove] = []
         self._path_computed_for: tuple[float, float, float] | None = None
+        # Real per-tick physics state (minebot/physics/simulate.py), kept
+        # in sync with x/y/z/yaw on every position update. on_ground and
+        # vel_x/y/z persist across follow ticks -- they're exactly the
+        # "accumulated real motion" state a real client would have, which
+        # is what makes our reported positions look physically consistent
+        # to the server instead of an arbitrary jump each tick.
+        self._physics = PlayerPhysicsState(x=0.0, y=0.0, z=0.0, yaw=0.0)
 
     def sync_from_position_packet(self, sync: PlayerPositionSync) -> None:
         self.x = sync.x if not (sync.relatives & REL_X) else self.x + sync.x
@@ -164,6 +145,15 @@ class MovementController:
         self.yaw = sync.yaw if not (sync.relatives & REL_Y_ROT) else self.yaw + sync.yaw
         self.pitch = sync.pitch if not (sync.relatives & REL_X_ROT) else self.pitch + sync.pitch
         self.has_position = True
+        # A server-authoritative sync always wins over whatever the
+        # physics simulation had accumulated -- resync position and reset
+        # velocity/on_ground rather than carrying over simulated motion
+        # from before a teleport/join, which wouldn't reflect anything the
+        # server actually agreed to.
+        self._physics.x, self._physics.y, self._physics.z = self.x, self.y, self.z
+        self._physics.yaw = math.pi - math.radians(self.yaw)
+        self._physics.vel_x = self._physics.vel_y = self._physics.vel_z = 0.0
+        self._physics.on_ground = False
 
     def mark_position_stale(self) -> None:
         """Call on respawn: our tracked x/y/z is from wherever we died, not
@@ -173,7 +163,6 @@ class MovementController:
         would just spam movement packets against stale state.
         """
         self.has_position = False
-        self._vertical_velocity = 0.0
         self._current_path = []
         self._path_computed_for = None
         self.stop_follow()
@@ -306,87 +295,76 @@ class MovementController:
 
             self._maybe_replan_path(target.x, target.y, target.z)
             waypoint = self._next_waypoint()
-            aim_x, aim_y, aim_z = (waypoint.x, waypoint.y, waypoint.z) if waypoint is not None else (target.x, target.y, target.z)
+            if waypoint is not None:
+                aim_x, aim_y, aim_z = waypoint.x + 0.5, waypoint.y, waypoint.z + 0.5
+            else:
+                aim_x, aim_y, aim_z = target.x, target.y, target.z
 
-            delta_x = aim_x - self.x
-            delta_z = aim_z - self.z
-            distance = math.hypot(delta_x, delta_z)
-            # Only the raw target position (not a waypoint) should ever
-            # stop horizontal movement -- stopping short of an intermediate
-            # waypoint would leave us stuck mid-path.
+            distance = math.hypot(aim_x - self.x, aim_z - self.z)
             stop_distance = FOLLOW_STOP_DISTANCE if waypoint is None else 0.0
-
             log.debug(
                 "follow tick: self=(%.2f,%.2f,%.2f) aim=(%.2f,%.2f,%.2f) target=(%.2f,%.2f,%.2f) distance=%.2f",
                 self.x, self.y, self.z, aim_x, aim_y, aim_z, target.x, target.y, target.z, distance,
             )
+            if distance <= stop_distance and abs(aim_y - self.y) < 0.1:
+                continue  # already there -- nothing to simulate this tick
 
-            moved_horizontally = distance > stop_distance
-            if moved_horizontally:
-                step = min(FOLLOW_STEP_DISTANCE, distance - stop_distance)
-                direction_x = delta_x / distance
-                direction_z = delta_z / distance
-                self.x += direction_x * step
-                self.z += direction_z * step
-                self.yaw = math.degrees(math.atan2(-direction_x, direction_z))
+            self._simulate_toward(aim_x, aim_y, aim_z)
+            log.debug(
+                "follow sending move: (%.2f, %.2f, %.2f) on_ground=%s",
+                self.x, self.y, self.z, self._physics.on_ground,
+            )
+            await send_move_player_pos_rot(
+                conn, self.x, self.y, self.z, self.yaw, self.pitch, on_ground=self._physics.on_ground,
+            )
 
-            # Adjust Y even when standing right next to the aim point (e.g.
-            # they're on a ledge just above/below us) -- gating this behind
-            # moved_horizontally would mean never noticing a Y difference
-            # once we're within stopping distance.
-            moved_vertically = abs(aim_y - self.y) > 1e-6
-            if not moved_horizontally and not moved_vertically:
-                continue
+    def _simulate_toward(self, aim_x: float, aim_y: float, aim_z: float) -> None:
+        """Feeds simple look-and-walk control inputs into the real physics
+        simulation (minebot/physics/simulate.py) for however many real
+        20Hz game ticks this follow-loop tick spans, then updates
+        x/y/z/yaw from the resulting state -- mirroring
+        mineflayer-pathfinder's own physics.js getController (aim yaw at
+        the target, hold forward, jump when useful) rather than computing
+        a position directly the way earlier phases of this session tried.
 
-            self._step_toward_target_height(aim_y)
-            log.debug("follow sending move: (%.2f, %.2f, %.2f)", self.x, self.y, self.z)
-            await send_move_player_pos_rot(conn, self.x, self.y, self.z, self.yaw, self.pitch)
-
-    def _step_toward_target_height(self, target_y: float) -> None:
-        """Moves self.y toward the target's own tracked Y (see module
-        docstring for why this, not a heightmap lookup, is the primary
-        signal -- a heightmap can't distinguish a floor under a roof from
-        the roof itself, but the target's actual reported Y always can).
-
-        Falling (target below us) accelerates under vanilla's real gravity
-        constant across however many real 20Hz game ticks our follow-loop
-        tick spans, so the server sees a plausible, accelerating fall
-        instead of an arbitrary jump. Climbing (target above us) is capped
-        at vanilla's player step-up height per tick instead -- ordinary
-        walking collision response, not physics that needs acceleration.
+        Jump is held whenever the aim point is above us: real vanilla
+        jumping is a one-tick velocity impulse resolved by ordinary
+        gravity afterward, not something we compute the arc for -- holding
+        the control matches how a real player reaches a ledge one step
+        higher than automatic step-height climbing covers.
         """
-        delta_y = target_y - self.y
+        self._physics.x, self._physics.y, self._physics.z = self.x, self.y, self.z
+        self._physics.control.jump = aim_y > self._physics.y + 0.1
 
-        if delta_y >= 0:
-            # Climbing up: no velocity/acceleration involved in vanilla for
-            # a normal step-up, just cap how much we claim to rise at once.
-            self._vertical_velocity = 0.0
-            if delta_y <= FOLLOW_MAX_UPWARD_STEP:
-                self.y = target_y
-            else:
-                self.y += FOLLOW_MAX_UPWARD_STEP
-            return
-
-        # Falling: accumulate downward velocity over the real number of
-        # 20Hz game ticks this follow-loop tick represents, then apply the
-        # resulting displacement -- this is what makes the server's own
-        # velocity tracking agree with what we're reporting. Order matches
-        # prismarine-physics: subtract gravity, then apply air drag, each
-        # tick (drag gives a terminal velocity instead of unbounded
-        # acceleration on long falls).
+        # physics/simulate.py's _apply_heading computes its own internal
+        # facing as (pi - state.yaw) -- mirroring prismarine-physics's own
+        # `yaw = Math.PI - entity.yaw` exactly -- so its "forward" unit
+        # vector is (-sin(pi-state.yaw), cos(pi-state.yaw)), which only
+        # equals the direction we actually want to walk in
+        # (direction_x, direction_z, normalized) when state.yaw is set to
+        # atan2(-direction_x, -direction_z), not the more intuitive-looking
+        # atan2(direction_x, direction_z) -- verified numerically, not
+        # assumed, since getting this backwards silently makes the bot walk
+        # directly away from wherever it's aiming.
         remaining_ticks = _GAME_TICKS_PER_FOLLOW_STEP
-        while remaining_ticks > 0:
-            tick_fraction = min(1.0, remaining_ticks)
-            self._vertical_velocity -= _GRAVITY_PER_GAME_TICK * tick_fraction
-            self._vertical_velocity *= _AIR_DRAG_PER_GAME_TICK ** tick_fraction
-            proposed_y = self.y + self._vertical_velocity * tick_fraction
-            if proposed_y <= target_y:
-                # Landed partway through this simulation step.
-                self.y = target_y
-                self._vertical_velocity = 0.0
-                return
-            self.y = proposed_y
-            remaining_ticks -= tick_fraction
+        while remaining_ticks >= 1.0:
+            direction_x = aim_x - self._physics.x
+            direction_z = aim_z - self._physics.z
+            direction_distance = math.hypot(direction_x, direction_z)
+            if direction_distance > 0.05:
+                self._physics.yaw = math.atan2(-direction_x, -direction_z)
+                self._physics.control.forward = True
+            else:
+                self._physics.control.forward = False
+
+            simulate_tick(self._physics, self.blocks)
+            remaining_ticks -= 1.0
+
+        self.x, self.y, self.z = self._physics.x, self._physics.y, self._physics.z
+        # Undo the module docstring's forward-direction reconciliation
+        # (state.yaw = pi - radians(self.yaw)) to get back our own
+        # degrees-based convention for the outgoing move packet.
+        self.yaw = math.degrees(math.pi - self._physics.yaw)
 
 
 def register_movement_commands(registry: CommandRegistry, movement: MovementController) -> None:

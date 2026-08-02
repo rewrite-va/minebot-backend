@@ -37,6 +37,15 @@ off Node's minecraft-data for its cost model):
   liquid: !state.getFluidState().isEmpty().
   ladder: the owning block is in the `minecraft:climbable` block tag
       (ladders, vines, scaffolding).
+  shapes: state.getCollisionShape(...).toAabbs() -- the real collision
+      geometry as a list of axis-aligned boxes, each
+      (min_x, min_y, min_z, max_x, max_y, max_z) in block-local coordinates
+      (0.0-1.0 per axis for a shape that stays within the block; some
+      shapes, e.g. certain fence/wall connections, can extend slightly
+      outside that range). Empty list for air or any other
+      no-collision block. This is what makes real physics simulation
+      (minebot/physics/) collide correctly against slabs/stairs/fences
+      instead of treating every solid block as a full cube.
 """
 
 from __future__ import annotations
@@ -48,6 +57,9 @@ from pathlib import Path
 _TABLE_PATH = Path(__file__).resolve().parent / "block_registry_775.json"
 
 
+Box = tuple[float, float, float, float, float, float]
+
+
 @dataclass(frozen=True)
 class BlockStateInfo:
     id: int
@@ -57,6 +69,7 @@ class BlockStateInfo:
     has_collision: bool
     liquid: bool
     ladder: bool
+    shapes: tuple[Box, ...]
 
 
 @dataclass(frozen=True)
@@ -99,6 +112,7 @@ def load_block_registry(path: Path = _TABLE_PATH) -> BlockRegistry:
             has_collision=entry["hasCollision"],
             liquid=entry["liquid"],
             ladder=entry["ladder"],
+            shapes=tuple(tuple(box) for box in entry["shapes"]),
         )
         for entry in raw["entries"]
     }

@@ -39,3 +39,31 @@ def test_ladder_is_climbable():
     assert ladder_states
     for info in ladder_states:
         assert info.ladder is True
+
+
+def test_air_has_no_collision_shapes():
+    info = BLOCK_REGISTRY.get(0)
+    assert info.shapes == ()
+
+
+def test_stone_is_a_full_unit_cube():
+    info = BLOCK_REGISTRY.get(1)
+    assert info.shapes == ((0.0, 0.0, 0.0, 1.0, 1.0, 1.0),)
+
+
+def test_slab_is_a_half_height_box():
+    slab_states = BLOCK_REGISTRY.states_named("minecraft:oak_slab")
+    assert slab_states
+    top_half = next(info for info in slab_states if info.shapes == ((0.0, 0.5, 0.0, 1.0, 1.0, 1.0),))
+    assert top_half.solid is False  # not a full cube, even though it does have collision
+    assert top_half.has_collision is True
+
+
+def test_stairs_have_a_multi_box_l_shape():
+    stair_states = BLOCK_REGISTRY.states_named("minecraft:oak_stairs")
+    assert stair_states
+    # Every orientation should have at least 2 boxes (the step + the riser),
+    # never a single full-cube box or no shape at all.
+    for info in stair_states:
+        assert len(info.shapes) >= 2
+        assert info.solid is False
