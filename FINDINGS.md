@@ -702,6 +702,117 @@ intermittently as a normal consequence of the server's own entity
 visibility bookkeeping. `MINEBOT_LOG_LEVEL=DEBUG` remains available for
 any future "is entity X being tracked" troubleshooting.
 
+## Why the bot got stuck on stairs: movement authority is client-side (fourth live-testing round)
+
+User reported the bot gets stuck descending stairs while following, and
+correctly guessed the underlying cause before we'd even looked at it: "the
+physics happens on clients and then the Y position resolved is reported to
+the server" -- confirmed exactly right by reading
+`ServerGamePacketListenerImpl.handleMovePlayer` (server) in the decompiled
+source. The server does **not** run its own independent gravity
+simulation and reject movement based on a hardcoded speed limit; instead
+it tracks its own *expectation* of the player's velocity
+(`this.player.getDeltaMovement()`, itself built up over time from the
+player's own prior reported position deltas) and only corrects a reported
+position when it deviates too far from that expectation
+(`movedDist - expectedDist > metersPerTick * deltaPackets`, with a fairly
+generous tolerance -- `metersPerTick=100.0`, i.e. squared distance, so
+~10 blocks/tick of slack). Real clients never trip this because their
+gravity/falling velocity was already being incrementally built up tick by
+tick; our old flat-rate Y ramp (`FOLLOW_MAX_VERTICAL_STEP = 1.2`, snapping
+straight toward the target's Y with zero prior velocity) looked, from the
+server's perspective, like an instantaneous unexplained jump every single
+tick, and got silently corrected back to the old position every time --
+confirmed directly in the debug log: `self=` (our tracked position) was
+frozen at the exact same value across dozens of consecutive follow ticks,
+while `follow sending move:` showed we *were* computing and sending a
+different, lower Y each time -- the server was simply overwriting it back
+via `ClientboundPlayerPositionPacket` before our next tick ran.
+
+Fixed in `MovementController._step_toward_target_height`
+(`minebot/bot/movement.py`) by giving falling real physics instead of a
+flat ramp:
+- **Falling** (target below us): accumulate a real vertical velocity that
+  accelerates by vanilla's actual gravity constant
+  (`LivingEntity.DEFAULT_BASE_GRAVITY = 0.08` blocks per 20Hz game tick,
+  confirmed in the decompiled source) every real game tick our
+  slower follow-loop tick (`FOLLOW_STEP_INTERVAL_SECONDS = 0.15s`, i.e.
+  ~3 real game ticks per follow tick) spans, then apply the resulting
+  displacement. This produces a small, accelerating drop each report --
+  exactly what a real client's own physics would produce -- rather than
+  an arbitrary large jump. Lands exactly on the target Y (no overshoot)
+  and resets velocity to 0 once reached.
+- **Climbing** (target above us): vanilla doesn't need gravity/jump
+  physics for a normal single-step rise -- the player's own step-up height
+  (`LivingEntity.maxUpStep()` / `Attributes.STEP_HEIGHT`, `0.6` blocks) is
+  handled as ordinary walking collision response. So climbing stays a flat
+  per-tick cap (`FOLLOW_MAX_UPWARD_STEP = 0.6`), just renamed/re-scoped
+  from the old single vertical-step constant to make clear it only applies
+  to the upward case now.
+- Switching direction (e.g. landing then needing to climb again) resets
+  `_vertical_velocity` to 0 -- leftover fall speed must not carry into a
+  climb.
+
+**Cross-checked against mineflayer's own physics engine.** At the user's
+suggestion, pulled mineflayer's actual physics dependency
+(`prismarine-physics`, not something mindcraft wrote itself) to verify the
+constants independently rather than relying solely on the decompiled
+source. Its `index.js` confirms, exactly: `gravity: 0.08` (identical to
+`LivingEntity.DEFAULT_BASE_GRAVITY`) and `stepHeight: 0.6` (identical to
+what we used for `FOLLOW_MAX_UPWARD_STEP`) -- both values independently
+corroborated by a mature, production-tested implementation of this exact
+problem. It also revealed a gap in our first pass: prismarine-physics
+applies `airdrag: 1 - 0.02` multiplicatively to vertical velocity every
+tick, immediately after subtracting gravity (`vel.y -= gravity;
+vel.y *= airdrag`) -- meaning falling approaches a **terminal velocity**
+(`gravity / (1 - airdrag) = 0.08 / 0.02 = 4.0` blocks/tick at the limit),
+rather than accelerating without bound. Our first implementation had no
+drag term at all, which is harmless for short stair-height drops (the
+difference is negligible over 1-2 blocks) but would make longer falls
+report implausibly fast velocities. Added `_AIR_DRAG_PER_GAME_TICK = 0.98`,
+applied in the same order (gravity subtraction, then drag) each simulated
+game tick; a dedicated test drives the simulation for 2000 ticks and
+confirms velocity converges to within `0.1` of the theoretical `-4.0`
+blocks/tick terminal value rather than growing linearly.
+
+This is still not full physics: no real jump impulse (can't gain upward
+velocity the way pressing space does -- climbing is still just a flat
+per-tick cap, not a jump arc), no collision/terrain awareness beyond the
+target's own reported Y (we don't know if there's a wall or gap between us
+and them), and the server may still reject movement in scenarios not yet
+observed. It should, however, correctly handle ordinary descents (stairs,
+ledges, drops) without getting stuck, which was the actual reported bug.
+
+**Confirmed live**: the gravity fix works when we're already at (or very
+near) the target's (x, z) column -- the debug log showed our reported Y
+correctly descending in small accelerating steps (`102.00 -> 101.54 ->
+100.87 -> ... -> 96.50`, matching the target exactly) and the server
+accepting each step (no reset). But the user found the actual limiting
+case immediately: **if the bot is still some blocks behind the target
+horizontally when the target drops a level, the bot tries to fall to the
+target's new (lower) Y while still positioned over ground/floor that's
+still solid beneath the bot's own (older) (x, z)** -- i.e. we compute
+"fall to Y=96.5" using only the *target's* Y, with zero awareness of
+whether there's actually empty space to fall through at *our own* current
+column. The server (correctly) rejects moving through a solid block, and
+we get stuck oscillating between the fall attempt and the server's
+correction back to solid ground.
+
+This is exactly the boundary already predicted in "Why this needs real
+pathfinding" above: matching a target's raw Y works fine as a *very* naive
+substitute for real navigation as long as the space between wherever we
+currently are and that Y is uniformly open air (or ground, for climbing) --
+which stairs/ledges directly behind the target usually aren't. Fixing this
+properly needs actual per-column, per-block awareness of what's below the
+*bot itself* (not just the target), which is precisely what real chunk
+block parsing (paletted containers, not just the heightmap summary we have
+in `chunks.py`) plus `mineflayer-pathfinder`-equivalent A* pathfinding
+would provide. No further band-aid was attempted here -- see "Why this
+needs real pathfinding" above for the concrete phased plan (chunk block
+parsing -> block-registry lookup -> movements/cost model -> A*), which
+remains the right next step rather than another special-case fix layered
+on top of raw-Y-following.
+
 ## Tooling: uv, not raw venv/pip
 
 This project uses `uv` (Astral) for dependency management and running things

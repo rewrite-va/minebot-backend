@@ -31,12 +31,35 @@ ceiling, MOTION_BLOCKING's topmost hit in that column is the ceiling, not
 the floor. The target's own reported Y has no such ambiguity, since it's
 wherever the server actually says they're standing (this is a real bug we
 hit in live testing: the bot initially teleported up to the roof instead
-of matching the target's indoor Y). Movement toward the target Y is
-stepped incrementally (like x/z), not snapped instantly, though it's still
-not real jump/fall physics -- no notion of "too high to climb", and the
-server may reject/correct positions that aren't a physically plausible
-single step from where it last placed us. See FINDINGS.md "Why this needs
-real pathfinding" for what a proper fix requires.
+of matching the target's indoor Y).
+
+Falling physics (found necessary via live testing -- see FINDINGS.md
+"Why the bot got stuck on stairs"): movement authority in vanilla is
+client-side -- the real client simulates its own gravity/collision each
+tick and reports the already-resolved position; the server
+(ServerGamePacketListenerImpl.handleMovePlayer, read from the decompiled
+source) only rejects a reported position when it deviates too far from
+*its own tracked expectation* of the player's velocity, which itself is
+built up from the player's own prior reported deltas. Jumping straight
+toward a lower target Y (no accumulated falling velocity) reads to the
+server as "moved too quickly" and gets silently corrected back every
+tick -- which is exactly what live testing showed (the bot never actually
+descended a staircase; the server kept resetting it). Fixed by tracking a
+real vertical velocity that accelerates under vanilla's actual gravity
+constant (LivingEntity.DEFAULT_BASE_GRAVITY = 0.08 blocks per 20Hz game
+tick, i.e. -0.08 blocks/tick^2 added to velocity every tick) while falling,
+so our reported per-tick position deltas look like genuine falling motion
+to the server instead of an arbitrary jump. Climbing upward by a small
+amount (e.g. a single stair step) doesn't need this: vanilla's own player
+step-up height (LivingEntity.maxUpStep / Attributes.STEP_HEIGHT) is 0.6
+blocks, handled as ordinary walking collision response, not gravity/jump
+physics -- so small upward Y changes are still just clamped to a flat
+per-tick cap, only the downward (falling) case needs real acceleration.
+This is still not full physics: no actual jump impulse (we can't gain
+upward velocity the way pressing space does), no collision/terrain
+awareness beyond the target's own reported Y, and the server may still
+reject movement in ways we haven't seen yet. See FINDINGS.md "Why this
+needs real pathfinding" for the larger picture.
 """
 
 from __future__ import annotations
@@ -61,11 +84,26 @@ FOLLOW_STOP_DISTANCE = 2.0
 # keeps movement looking like walking instead of teleport-stepping.
 _WALK_SPEED_BLOCKS_PER_SECOND = 4.317
 FOLLOW_STEP_DISTANCE = _WALK_SPEED_BLOCKS_PER_SECOND * FOLLOW_STEP_INTERVAL_SECONDS
-# How fast we let our tracked Y approach the target's Y each tick. Not a
-# real jump/fall speed simulation (there isn't one here) -- just enough to
-# turn "instant teleport to the new Y" into a quick ramp, which the server
-# is more likely to accept as plausible player movement.
-FOLLOW_MAX_VERTICAL_STEP = 1.2
+
+# Vanilla's real per-game-tick gravity constant (LivingEntity.DEFAULT_BASE_GRAVITY,
+# confirmed in the decompiled source, and independently cross-checked
+# against mineflayer's own physics engine, prismarine-physics -- both give
+# exactly 0.08), applied at the real 20Hz game tick rate (50ms/tick)
+# regardless of our own slower follow-loop tick rate. AIR_DRAG (also
+# cross-checked against prismarine-physics: `airdrag: 1 - 0.02`) is
+# applied multiplicatively to vertical velocity every tick *after* gravity,
+# giving falling a terminal velocity instead of unbounded linear
+# acceleration -- matters for longer drops, not just short stair-height ones.
+_GRAVITY_PER_GAME_TICK = 0.08
+_AIR_DRAG_PER_GAME_TICK = 1.0 - 0.02
+_GAME_TICK_SECONDS = 0.05
+_GAME_TICKS_PER_FOLLOW_STEP = FOLLOW_STEP_INTERVAL_SECONDS / _GAME_TICK_SECONDS
+
+# Vanilla's player step-up height (LivingEntity.maxUpStep / Attributes.STEP_HEIGHT):
+# climbing up to this much in one step is just normal walking collision
+# response, not jump physics -- used as the flat per-tick cap for the
+# upward case, which doesn't need gravity simulation.
+FOLLOW_MAX_UPWARD_STEP = 0.6
 
 
 class MovementController:
@@ -78,6 +116,12 @@ class MovementController:
         self.pitch = 0.0
         self.has_position = False
         self._follow_task: asyncio.Task | None = None
+        # Accumulated downward speed while following into a fall (blocks
+        # per game tick, negative while falling); reset to 0 whenever we're
+        # not currently falling. See module docstring for why this needs to
+        # exist at all -- the server rejects a sudden Y jump that isn't
+        # backed by an accelerating velocity like a real client would report.
+        self._vertical_velocity = 0.0
 
     def sync_from_position_packet(self, sync: PlayerPositionSync) -> None:
         self.x = sync.x if not (sync.relatives & REL_X) else self.x + sync.x
@@ -95,6 +139,7 @@ class MovementController:
         would just spam movement packets against stale state.
         """
         self.has_position = False
+        self._vertical_velocity = 0.0
         self.stop_follow()
 
     async def _walk_by(self, conn: Connection, dx: float, dz: float) -> None:
@@ -165,6 +210,11 @@ class MovementController:
             delta_z = target.z - self.z
             distance = math.hypot(delta_x, delta_z)
 
+            log.debug(
+                "follow tick: self=(%.2f,%.2f,%.2f) target=(%.2f,%.2f,%.2f) distance=%.2f",
+                self.x, self.y, self.z, target.x, target.y, target.z, distance,
+            )
+
             moved_horizontally = distance > FOLLOW_STOP_DISTANCE
             if moved_horizontally:
                 step = min(FOLLOW_STEP_DISTANCE, distance - FOLLOW_STOP_DISTANCE)
@@ -183,19 +233,54 @@ class MovementController:
                 continue
 
             self._step_toward_target_height(target.y)
+            log.debug("follow sending move: (%.2f, %.2f, %.2f)", self.x, self.y, self.z)
             await send_move_player_pos_rot(conn, self.x, self.y, self.z, self.yaw, self.pitch)
 
     def _step_toward_target_height(self, target_y: float) -> None:
-        """Ramps self.y toward the target's own tracked Y (see module
+        """Moves self.y toward the target's own tracked Y (see module
         docstring for why this, not a heightmap lookup, is the primary
         signal -- a heightmap can't distinguish a floor under a roof from
         the roof itself, but the target's actual reported Y always can).
+
+        Falling (target below us) accelerates under vanilla's real gravity
+        constant across however many real 20Hz game ticks our follow-loop
+        tick spans, so the server sees a plausible, accelerating fall
+        instead of an arbitrary jump. Climbing (target above us) is capped
+        at vanilla's player step-up height per tick instead -- ordinary
+        walking collision response, not physics that needs acceleration.
         """
         delta_y = target_y - self.y
-        if abs(delta_y) <= FOLLOW_MAX_VERTICAL_STEP:
-            self.y = target_y
-        else:
-            self.y += math.copysign(FOLLOW_MAX_VERTICAL_STEP, delta_y)
+
+        if delta_y >= 0:
+            # Climbing up: no velocity/acceleration involved in vanilla for
+            # a normal step-up, just cap how much we claim to rise at once.
+            self._vertical_velocity = 0.0
+            if delta_y <= FOLLOW_MAX_UPWARD_STEP:
+                self.y = target_y
+            else:
+                self.y += FOLLOW_MAX_UPWARD_STEP
+            return
+
+        # Falling: accumulate downward velocity over the real number of
+        # 20Hz game ticks this follow-loop tick represents, then apply the
+        # resulting displacement -- this is what makes the server's own
+        # velocity tracking agree with what we're reporting. Order matches
+        # prismarine-physics: subtract gravity, then apply air drag, each
+        # tick (drag gives a terminal velocity instead of unbounded
+        # acceleration on long falls).
+        remaining_ticks = _GAME_TICKS_PER_FOLLOW_STEP
+        while remaining_ticks > 0:
+            tick_fraction = min(1.0, remaining_ticks)
+            self._vertical_velocity -= _GRAVITY_PER_GAME_TICK * tick_fraction
+            self._vertical_velocity *= _AIR_DRAG_PER_GAME_TICK ** tick_fraction
+            proposed_y = self.y + self._vertical_velocity * tick_fraction
+            if proposed_y <= target_y:
+                # Landed partway through this simulation step.
+                self.y = target_y
+                self._vertical_velocity = 0.0
+                return
+            self.y = proposed_y
+            remaining_ticks -= tick_fraction
 
 
 def register_movement_commands(registry: CommandRegistry, movement: MovementController) -> None:

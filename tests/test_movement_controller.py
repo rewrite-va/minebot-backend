@@ -301,3 +301,90 @@ async def test_mark_position_stale_clears_has_position_and_stops_follow():
 
     with pytest.raises(RuntimeError):
         await movement.forward(conn, None)
+
+
+def test_step_toward_target_height_climbing_is_capped_at_step_height():
+    from minebot.bot.movement import FOLLOW_MAX_UPWARD_STEP
+
+    movement = MovementController(EntityTracker())
+    movement.y = 0.0
+
+    # Target far above -- should rise by at most one step-height per call,
+    # not jump straight there (a normal walking step-up, not a teleport).
+    movement._step_toward_target_height(10.0)
+    assert movement.y == pytest.approx(FOLLOW_MAX_UPWARD_STEP)
+    assert movement._vertical_velocity == 0.0
+
+
+def test_step_toward_target_height_climbing_within_step_height_snaps_exactly():
+    movement = MovementController(EntityTracker())
+    movement.y = 0.0
+
+    movement._step_toward_target_height(0.3)  # less than the 0.6 step cap
+    assert movement.y == pytest.approx(0.3)
+
+
+def test_step_toward_target_height_falling_accelerates():
+    # Regression test for the real bug found live: a flat-rate ramp toward
+    # a lower Y (no accumulated velocity) reads to the server as an
+    # implausible jump and gets corrected back every tick. Falling must
+    # instead build up speed like a real client's own gravity simulation
+    # (LivingEntity.DEFAULT_BASE_GRAVITY = 0.08 blocks/tick^2), so
+    # consecutive calls should fall progressively *farther* per call, not a
+    # constant amount.
+    movement = MovementController(EntityTracker())
+    movement.y = 100.0
+
+    movement._step_toward_target_height(-1000.0)  # far below -- stay falling
+    first_drop = 100.0 - movement.y
+
+    movement._step_toward_target_height(-1000.0)
+    second_drop = (100.0 - first_drop) - movement.y
+
+    assert first_drop > 0.0
+    assert second_drop > first_drop  # accelerating, not constant speed
+    assert movement._vertical_velocity < 0.0  # still falling
+
+
+def test_step_toward_target_height_falling_approaches_terminal_velocity():
+    # Cross-checked against mineflayer's own physics engine
+    # (prismarine-physics): air drag (1 - 0.02 per tick) is applied to
+    # vertical velocity after gravity every tick, giving a bounded terminal
+    # fall speed (gravity / (1 - airdrag) = 0.08 / 0.02 = 4.0 blocks/tick at
+    # the limit) rather than unbounded linear acceleration -- matters on
+    # long falls, where a naive "just keep subtracting gravity" model would
+    # eventually report implausibly fast speeds.
+    movement = MovementController(EntityTracker())
+    movement.y = 10_000_000.0  # far enough to fall for a long time uninterrupted
+
+    for _ in range(2000):
+        movement._step_toward_target_height(-100_000_000.0)
+
+    # Should be close to the theoretical terminal velocity, and in
+    # particular nowhere near what unbounded linear acceleration would give
+    # (0.08 * 2000 * ticks-per-step, orders of magnitude larger).
+    assert movement._vertical_velocity == pytest.approx(-4.0, abs=0.1)
+
+
+def test_step_toward_target_height_falling_lands_exactly_on_target():
+    movement = MovementController(EntityTracker())
+    movement.y = 10.0
+
+    # Small drop, well within what even the first tick of falling covers --
+    # should land exactly on the target and reset velocity, not overshoot.
+    movement._step_toward_target_height(9.99)
+    assert movement.y == pytest.approx(9.99)
+    assert movement._vertical_velocity == 0.0
+
+
+def test_step_toward_target_height_switching_from_fall_to_climb_resets_velocity():
+    movement = MovementController(EntityTracker())
+    movement.y = 100.0
+
+    movement._step_toward_target_height(-1000.0)
+    assert movement._vertical_velocity < 0.0
+
+    # Target is now above us (e.g. we landed and the target went back up
+    # stairs) -- climbing must not carry over leftover fall velocity.
+    movement._step_toward_target_height(movement.y + 5.0)
+    assert movement._vertical_velocity == 0.0
