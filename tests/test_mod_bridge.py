@@ -1,6 +1,7 @@
-"""Verifies ModBridge against a real (local, ephemeral) WebSocket server
-standing in for minebot-mod's ControlServer -- exercises the actual wire
-format, not just internal method calls.
+"""Verifies ModBridge (now the WebSocket *server* side, with minebot-mod
+as the client -- see bridge/client.py's docstring for why) against a real
+websockets.connect() client standing in for the mod, exercising the
+actual wire format rather than just internal method calls.
 """
 
 from __future__ import annotations
@@ -16,23 +17,29 @@ from minebot.bridge.client import ModBridge
 
 @pytest.mark.asyncio
 async def test_send_methods_produce_correctly_shaped_json():
+    bridge = ModBridge("127.0.0.1", 0)
+    connect_task = asyncio.create_task(bridge.connect())
+
+    # ModBridge.connect() blocks until a mod client connects in, so give it
+    # a moment to start listening before we (as the fake mod) connect --
+    # port 0 means an OS-assigned ephemeral port, so read it back off the
+    # underlying server once it's up.
+    while bridge._server is None:
+        await asyncio.sleep(0.01)
+    port = bridge._server.sockets[0].getsockname()[1]
+
     received: list[dict] = []
-
-    async def handler(websocket):
-        async for raw in websocket:
-            received.append(json.loads(raw))
-
-    async with websockets.serve(handler, "127.0.0.1", 0) as server:
-        port = server.sockets[0].getsockname()[1]
-        bridge = ModBridge("127.0.0.1", port)
-        await bridge.connect()
+    async with websockets.connect(f"ws://127.0.0.1:{port}") as mod_client:
+        await connect_task  # now resolves, since a connection just arrived
 
         await bridge.send_goto(1.0, 2.0, 3.0, stop_distance=1.5)
         await bridge.send_follow(42, stop_distance=3.0)
         await bridge.send_stop()
         await bridge.send_chat("hello")
 
-        await asyncio.sleep(0.1)  # let the server-side handler drain the messages
+        for _ in range(4):
+            received.append(json.loads(await mod_client.recv()))
+
         await bridge.close()
 
     assert received == [
@@ -45,14 +52,17 @@ async def test_send_methods_produce_correctly_shaped_json():
 
 @pytest.mark.asyncio
 async def test_events_parses_incoming_messages_into_mod_events():
-    async def handler(websocket):
-        await websocket.send(json.dumps({"type": "chat", "sender": "Alex", "text": "hi"}))
-        await websocket.send(json.dumps({"type": "position", "x": 1.0}))
+    bridge = ModBridge("127.0.0.1", 0)
+    connect_task = asyncio.create_task(bridge.connect())
 
-    async with websockets.serve(handler, "127.0.0.1", 0) as server:
-        port = server.sockets[0].getsockname()[1]
-        bridge = ModBridge("127.0.0.1", port)
-        await bridge.connect()
+    while bridge._server is None:
+        await asyncio.sleep(0.01)
+    port = bridge._server.sockets[0].getsockname()[1]
+
+    async with websockets.connect(f"ws://127.0.0.1:{port}") as mod_client:
+        await connect_task
+        await mod_client.send(json.dumps({"type": "chat", "sender": "Alex", "text": "hi"}))
+        await mod_client.send(json.dumps({"type": "position", "x": 1.0}))
 
         events = []
         async for event in bridge.events():
@@ -70,15 +80,18 @@ async def test_events_parses_incoming_messages_into_mod_events():
 
 @pytest.mark.asyncio
 async def test_events_ignores_malformed_and_untyped_messages():
-    async def handler(websocket):
-        await websocket.send("not json at all")
-        await websocket.send(json.dumps({"no_type_field": True}))
-        await websocket.send(json.dumps({"type": "stop"}))
+    bridge = ModBridge("127.0.0.1", 0)
+    connect_task = asyncio.create_task(bridge.connect())
 
-    async with websockets.serve(handler, "127.0.0.1", 0) as server:
-        port = server.sockets[0].getsockname()[1]
-        bridge = ModBridge("127.0.0.1", port)
-        await bridge.connect()
+    while bridge._server is None:
+        await asyncio.sleep(0.01)
+    port = bridge._server.sockets[0].getsockname()[1]
+
+    async with websockets.connect(f"ws://127.0.0.1:{port}") as mod_client:
+        await connect_task
+        await mod_client.send("not json at all")
+        await mod_client.send(json.dumps({"no_type_field": True}))
+        await mod_client.send(json.dumps({"type": "stop"}))
 
         events = []
         async for event in bridge.events():
@@ -89,3 +102,10 @@ async def test_events_ignores_malformed_and_untyped_messages():
 
     assert len(events) == 1
     assert events[0].type == "stop"
+
+
+@pytest.mark.asyncio
+async def test_send_is_a_no_op_when_mod_not_connected():
+    bridge = ModBridge("127.0.0.1", 0)
+    # Never actually connected -- send_* must not raise, just drop the command.
+    await bridge.send_stop()

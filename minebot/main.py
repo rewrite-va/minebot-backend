@@ -17,7 +17,7 @@ log = logging.getLogger("minebot")
 
 async def run_bot(config: BotConfig) -> None:
     bridge = ModBridge(config.mod_host, config.mod_port)
-    log.info("connecting to minebot-mod control channel at %s:%s", config.mod_host, config.mod_port)
+    log.info("waiting for minebot-mod to connect on %s:%s", config.mod_host, config.mod_port)
     await bridge.connect()
 
     registry = CommandRegistry()
