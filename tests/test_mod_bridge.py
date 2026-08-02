@@ -109,3 +109,52 @@ async def test_send_is_a_no_op_when_mod_not_connected():
     bridge = ModBridge("127.0.0.1", 0)
     # Never actually connected -- send_* must not raise, just drop the command.
     await bridge.send_stop()
+
+
+@pytest.mark.asyncio
+async def test_events_recovers_after_a_reconnect_without_busy_looping():
+    """Regression test: events() used to busy-loop at 100% CPU after a
+    client disconnected and reconnected, because it could observe the old
+    (closed) connection object as still current -- a race against
+    _on_connection's own cleanup -- and re-iterate it instantly forever
+    instead of waiting for a genuinely new connection. Found live: the
+    backend process kept climbing in CPU usage with no further log output
+    after "connection closed". events() now tracks the last connection
+    object it actually iterated and refuses to re-enter the same one,
+    sleeping briefly instead.
+    """
+    bridge = ModBridge("127.0.0.1", 0)
+    connect_task = asyncio.create_task(bridge.connect())
+
+    while bridge._server is None:
+        await asyncio.sleep(0.01)
+    port = bridge._server.sockets[0].getsockname()[1]
+
+    events_task = asyncio.create_task(_collect_two_events(bridge))
+
+    first_client = await websockets.connect(f"ws://127.0.0.1:{port}")
+    await connect_task
+    await first_client.send(json.dumps({"type": "chat", "sender": "Alex", "text": "first"}))
+    await first_client.close()
+
+    # Reconnect as a fresh client, standing in for the mod reconnecting
+    # after a drop -- this must be picked up promptly, not starved by a
+    # busy loop spinning on the now-closed first connection.
+    second_client = await websockets.connect(f"ws://127.0.0.1:{port}")
+    await second_client.send(json.dumps({"type": "chat", "sender": "Alex", "text": "second"}))
+
+    events = await asyncio.wait_for(events_task, timeout=2.0)
+
+    await second_client.close()
+    await bridge.close()
+
+    assert [e.data["text"] for e in events] == ["first", "second"]
+
+
+async def _collect_two_events(bridge: ModBridge) -> list:
+    events = []
+    async for event in bridge.events():
+        events.append(event)
+        if len(events) == 2:
+            return events
+    return events

@@ -18,6 +18,7 @@ log = logging.getLogger("minebot.run_loop")
 async def run(bridge: ModBridge, commands: CommandRegistry, tracker: EntityTracker) -> None:
     async for event in bridge.events():
         if event.type == "entity":
+            log.debug("entity event: %s", event.data)
             tracker.handle_event(event)
             continue
 

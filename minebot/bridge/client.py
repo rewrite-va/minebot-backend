@@ -60,8 +60,11 @@ class ModBridge:
         self._connected.set()
         try:
             await connection.wait_closed()
+        except BaseException:
+            log.exception("control-channel connection handler crashed")
+            raise
         finally:
-            log.info("minebot-mod disconnected")
+            log.info("minebot-mod disconnected (code=%s, reason=%r)", connection.close_code, connection.close_reason)
             if self._connection is connection:
                 self._connection = None
                 self._connected.clear()
@@ -77,12 +80,25 @@ class ModBridge:
         """Yields every event the mod sends, reconnecting across drops
         (the mod itself retries on its side too -- see ControlClient) so a
         momentary disconnect doesn't end the whole run loop.
+
+        Tracks the last connection object it actually finished iterating,
+        since `_on_connection`'s cleanup (clearing `self._connection` /
+        `self._connected`) runs concurrently and isn't guaranteed to happen
+        before this loop notices the connection closed -- without this
+        check, a closed-but-not-yet-cleared connection got re-read
+        instantly on every spin, busy-looping at 100% CPU until the other
+        coroutine's `finally` eventually ran (found live: a stale
+        connection kept the process pegged at high CPU with no further log
+        output after "connection closed").
         """
+        last_connection = None
         while True:
             await self._connected.wait()
             connection = self._connection
-            if connection is None:
+            if connection is None or connection is last_connection:
+                await asyncio.sleep(0.05)
                 continue
+            last_connection = connection
             try:
                 async for raw in connection:
                     event = self._parse_event(raw)
