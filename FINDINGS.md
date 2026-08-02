@@ -35,8 +35,22 @@ Two repos now make up this project:
   Runs inside a real Minecraft client, logged into the bot's account via
   normal Microsoft/Mojang auth (nothing custom -- just sign into the actual
   launcher/client like a human would). It's the only thing that actually
-  connects to the Minecraft server. Exposes a local WebSocket server
-  (`ControlServer`, `127.0.0.1:47893` by default) that Python connects to.
+  connects to the Minecraft server. It's the WebSocket *client*
+  (`ControlClient`), connecting out to Python's WebSocket server
+  (`ModBridge`, `0.0.0.0:47893` by default).
+
+**Why Python is the WebSocket server and the mod is the client** (this was
+originally the other way round): the Python backend commonly runs inside
+WSL2, and WSL2's default (NAT) networking mode only forwards `localhost`
+connections *from Windows into WSL2*, not the reverse -- confirmed live: a
+mod-side server bound to `127.0.0.1` got `ConnectionRefusedError` from
+WSL2, and rebinding it to `0.0.0.0` instead got a silent TCP timeout
+(Windows Firewall dropping the inbound connection). A plain
+`python3 -m http.server` run inside WSL2, by contrast, was reachable from
+Windows via plain `http://localhost:PORT/` with zero configuration. So
+Python (in WSL2) now runs the WebSocket server, and the mod (on Windows)
+makes an *outbound* connection to `localhost:47893`, which WSL2 forwards
+transparently -- no IP-passing or firewall changes needed either side.
 
 ## How the mod drives real movement
 
@@ -66,19 +80,21 @@ Goal resolution (`MinebotMod.resolveMovementIntent`, called every client
 tick): Python sends a high-level goal over the WebSocket
 (`{"type":"goto",x,y,z}` or `{"type":"follow",entity_id}`, both with a
 `stop_distance`), and the mod's own tick loop resolves it against live
-game state -- aim yaw at the target (`atan2(-dx, dz)`, vanilla's yaw
-convention), hold forward while still farther than `stop_distance`, hold
-jump whenever the target sits meaningfully above us. This deliberately
-mirrors the same heuristic the earlier from-scratch physics port used (see
-`pure-protocol-backend`'s FINDINGS.md history) for the same reason: it's a
-reasonable substitute for a full jump-arc/pathfinding model without needing
-one yet. No A* pathfinding exists on this side yet -- `follow`/`goto` walk
-in a straight line toward the target and rely on vanilla's own step-height
-(0.6 blocks) to handle small ledges; a real obstacle will just stall
-forward progress against it, not route around it. Porting the old A*
-pathfinding (`pure-protocol-backend`'s `minebot/pathfinding/`) to run
-against real block data the mod could expose is the natural next step if
-that's needed.
+game state. Real A* pathfinding now runs on the mod side
+(`minebot/mod/pathfinding/`) -- a direct Java port of the same
+mineflayer-pathfinder cost model already validated as the Python port on
+`pure-protocol-backend` (walk/climb/parkour moves, no dig/place, since
+the mod can't dig/place). `ControlState.pathTracker` (a `PathTracker`)
+replans a path only once the target has moved far enough from where the
+current one was aimed, and `resolveMovementIntent` aims yaw/forward/jump
+at the next unreached waypoint along that path instead of the raw target
+position -- this is what makes `follow` actually route the bot down to a
+different floor instead of stalling at the edge (the straight-line-plus-
+step-height approach it replaced only handled ledges within vanilla's
+0.6-block auto-step, and otherwise just relied on gravity, which left the
+bot standing at a floor's edge instead of finding a way down). Falls back
+to the raw target position if no path is found (e.g. unloaded chunks) so
+the bot still makes some progress rather than freezing.
 
 Entity/chat/health awareness: the mod diffs its own live `ClientLevel`
 player list every tick (`ClientLevel.players()`/`.getEntity(int)`,
@@ -125,7 +141,8 @@ Events, mod -> Python:
   architecture; both were already protocol-agnostic (`!name(args)` chat
   grammar and name->handler dispatch), so they carried over as-is.
 - `minebot/config.py` -- now just `MINEBOT_MOD_HOST`/`MINEBOT_MOD_PORT`
-  (default `127.0.0.1:47893`, matching the mod's `ControlServer.DEFAULT_PORT`).
+  (default `0.0.0.0:47893` -- Python binds as the server now; see the
+  WSL2-networking note above).
 - `minebot/main.py` -- wires it all together: connect the bridge, build
   the registry/tracker/movement controller, run the loop.
 
@@ -147,37 +164,48 @@ working in the sibling `mods/VillagerHelper` project (same toolchain, same
 one-shot Fabric-mod-dump tricks used earlier for the block registry --
 see `pure-protocol-backend`'s FINDINGS.md if that's ever needed again).
 
-- `ControlServer.java` -- embeds Java-WebSocket (shaded via Loom's
-  jar-in-jar `include`, since nothing else provides it), bound to
-  `127.0.0.1` only (no auth of its own -- fine only as long as it's
-  unreachable from outside the machine).
+- `ControlClient.java` -- embeds Java-WebSocket (shaded via Loom's
+  jar-in-jar `include`, since nothing else provides it) as a *client*
+  connecting out to Python's server (see the WSL2-networking note above
+  for why the roles are this way round). Auto-reconnects every 2s.
+  `onOpen` also resets `MinebotMod`'s `knownPlayerIds` so a freshly
+  (re)started Python backend gets full `add` events again instead of
+  only ever seeing silent `move` events for players it has no record of.
 - `ControlState.java` -- the current goal (`IDLE`/`GOTO`/`FOLLOW` +
-  target), set by incoming WebSocket commands.
+  target), set by incoming WebSocket commands. Owns a `PathTracker`
+  (reset whenever the goal changes) holding the currently-planned A*
+  route toward that goal.
+- `pathfinding/` -- `Move`/`AStar`/`BlockInfo`/`Movements`/`GoalNear`/
+  `PathTracker`: the Java A* port described above.
 - `MovementIntent.java` -- the concrete per-tick forward/jump/yaw resolved
   from the current goal against live game state; separates goal
   resolution (needs live entity/player state) from input plumbing (doesn't).
 - `MinebotInput.java` -- the `ClientInput` replacement described above
   (keyboard-override + `MovementIntent`-driven fallback).
-- `MinebotMod.java` -- entry point: starts the control server, registers
-  the client-tick hook (resolves the goal, updates `MinebotInput`, sets
-  yaw, broadcasts position/entity/health events), registers chat-event
-  forwarding.
+- `StatusHud.java` -- a HUD text overlay showing whether the control
+  channel is currently connected.
+- `MinebotMod.java` -- entry point: starts the control client, registers
+  the client-tick hook (resolves the goal via `PathTracker`, updates
+  `MinebotInput`, sets yaw, broadcasts position/entity/health events),
+  registers chat-event forwarding, registers the HUD.
 
 `fabric.mod.json` declares `"environment": "client"` (no server-side
 component -- this only makes sense running inside an actual client).
 
 ## Known gaps / next steps
 
-- No A* pathfinding wired up on the mod side yet -- `follow`/`goto` are
-  straight-line-plus-step-height only. Real obstacles (walls, gaps wider
-  than a single step) will just stall the bot rather than route around
-  them. The old A*/movements cost-model port on `pure-protocol-backend`
-  could be adapted to run against real block data the mod could expose
-  (e.g. `ClientLevel.getBlockState(pos)`), if/when that's needed.
-- Mining/placing/combat/inventory are not implemented on either side yet.
-- Not yet load-tested for WebSocket reconnection -- if the mod restarts
-  (e.g. game crash) while Python is running, `ModBridge` has no retry/
-  reconnect logic yet; Python would need to be restarted too.
+- The Java pathfinding port (`Move`/`AStar`/`BlockInfo`/`Movements`/
+  `GoalNear`/`PathTracker`) has no unit tests yet, unlike its Python
+  equivalent on `pure-protocol-backend` -- so far only validated by live
+  testing `!follow` across a floor transition, not by an automated suite.
+- Mining/placing/combat/inventory are not implemented on either side yet,
+  so pathfinding is walk/climb/parkour only (no dig/place moves).
+- `ModBridge` (Python, the WebSocket server side) does handle reconnects
+  now -- confirmed live across multiple mod/game-client restarts -- but
+  there's no test coverage yet for what happens if the *Python* process
+  itself needs to restart mid-session beyond the regression test for the
+  events()-busy-loop fix (see `test_mod_bridge.py`); the mod's own
+  `ControlClient` retries every 2s regardless.
 - The control channel has no authentication -- anything that can open a
   TCP connection to `127.0.0.1:47893` can drive the bot. Fine on a
   single-user machine; would need hardening before ever exposing this
