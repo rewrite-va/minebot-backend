@@ -952,13 +952,127 @@ Wired into `run_play_loop`/`main.py` alongside the existing
 pattern `chunks.py` already used standalone -- simpler than coupling the
 two parsers together for a modest amount of duplicate header parsing).
 
-**Not yet done**: this cache is built and tested but not yet consulted by
-`MovementController` -- the actual A* pathfinding (steps 3-5 of the
-original phased plan: port `movements.js`'s neighbor/cost model using this
-new solid/liquid/climbable data, then `astar.js`/`heap.js`/`goals.js`,
-which were already identified as portable as-is) is still unstarted. This
-phase specifically closes the "we have no idea what's actually at a given
-block" gap that step (4)'s cost model needs as an input.
+This cache closed the "we have no idea what's actually at a given block"
+gap; steps (3)-(5) (the actual A* pathfinding) are covered next.
+
+## Steps (3)-(5) done: A* pathfinding (minebot/pathfinding/), wired into follow
+
+Completed the phased plan from "Why this needs real pathfinding": ported
+`mineflayer-pathfinder@2.4.5`'s `astar.js`/`movements.js`/`goals.js` (pulled
+the actual tagged-release source via a git clone at
+`/home/colaila/git/mineflayer-pathfinder`, checked out to the exact `2.4.5`
+tag mindcraft pins, rather than working from memory of what the library
+does) into `minebot/pathfinding/`, and wired the result into
+`MovementController`'s follow loop.
+
+### Deliberately scoped down from the full library
+
+Ported walk/climb/parkour moves only -- **no digging or block placement**.
+Every branch in `movements.js` that breaks or places a block was dropped
+entirely (not stubbed -- the moves that would need them, like widening a
+1-wide gap or 1x1-towering straight up, simply aren't offered as
+neighbors), because minebot has no digging/placement packets implemented
+at all: a "path" that requires placing a block could never actually be
+executed even if A* found one, exactly why mineflayer's own `canDig =
+false` disables the same branches for the same reason. Also dropped:
+entity-avoidance cost weighting and scaffolding-item tracking (both need
+`bot.entities`/inventory data this port has no use for yet). Kept: ordinary
+forward walking, diagonal moves, stepping up/down a single block
+(vanilla's real 0.6-block step height, matching the constant already used
+in `movement.py`'s gravity fix above), dropping into a pit/off a ledge
+(bounded by how far down we actually have block data, since we don't track
+a dimension's real min_y -- see chunks.py), ladder climbing, and
+parkour-style running jumps across 2-4 block gaps (`allowSprinting`).
+
+### Files
+
+- `minebot/pathfinding/move.py`: `Move` -- direct port of `move.js` minus
+  the `toBreak`/`toPlace`/scaffolding bookkeeping fields, which have no use
+  without digging/placing.
+- `minebot/pathfinding/astar.py`: `AStar` -- same g/h/f scoring and
+  closed-set/open-map semantics as `astar.js`, but uses Python's built-in
+  `heapq` instead of porting `heap.js`'s hand-rolled binary heap (`heapq`
+  already gives an equivalent priority queue; reimplementing a custom one
+  would just be more code for the same behavior). `heapq` has no
+  decrease-key operation, so an updated node is pushed as a fresh heap
+  entry and the stale one is detected and skipped on pop via identity
+  comparison against the authoritative `_open_data_map` (whichever entry is
+  the *current* value for a given position hash is the live one; anything
+  else popped later is a stale duplicate).
+- `minebot/pathfinding/goals.py`: only `Goal`, `GoalNear`, and `GoalFollow`
+  ported -- the goal kinds minebot's `!follow` actually needs. The rest
+  (`GoalBlock`, `GoalXZ`, `GoalPlaceBlock`, `GoalLookAtBlock`, composites,
+  ...) aren't used by anything yet; port them when something needs them.
+  `GoalFollow` takes a `get_position` callable rather than holding a live
+  mineflayer-style entity reference, since minebot's `EntityTracker`
+  already owns that state.
+- `minebot/pathfinding/movements.py`: `Movements.get_block` classifies
+  each queried block as `safe`/`physical`/`liquid`/`climbable` using
+  `block_registry.py`'s solid/liquid/ladder flags (instead of
+  prismarine-block/minecraft-data). **A real bug caught by testing, not
+  assumed**: initially classified `safe` as `is_air or is_ladder` only,
+  which made `get_move_forward` refuse to walk into water at all (an
+  isolated test placing a water block one step ahead failed the "still
+  walkable, just costs extra" assertion). Rereading `movements.js` closely:
+  `b.safe = (boundingBox === 'empty' || climbable || carpet) && !avoid` --
+  liquids have no collision box in vanilla (you can swim through them), so
+  they're `'empty'`/safe too, confirmed by `getLandingBlock`'s
+  `blockLand.liquid && blockLand.safe` check (which would be dead code if
+  liquid could never also be `safe`). Fixed by adding `is_liquid` to the
+  `safe` classification. Also: every block query landing in a chunk we
+  don't have data for yet is treated as unsafe/non-physical/unknown rather
+  than optimistically guessed either way -- unlike mineflayer (which always
+  has full world data once a chunk loads), we have no fallback for unknown
+  terrain, and guessing wrong could walk the bot off a ledge just as easily
+  as make it think open space is a wall. "Don't route through the unknown"
+  is the conservative default for a pathfinder whose whole point is not
+  falling through unseen gaps.
+
+### Tests
+
+`tests/test_astar.py` (search mechanics against a trivial synthetic
+graph), `tests/test_goals.py`, `tests/test_movements.py` (cost model
+against synthetic terrain built via the new `tests/pathfinding_fixtures.py`
+helper -- flat ground has all 8 neighbors, a 1-block step is climbable but
+2 blocks is "too high to jump", a 2-tall wall blocks forward movement
+entirely, a drop-down lands on the far floor or correctly returns "no move"
+when no floor exists within the loaded/searched area, unknown chunks are
+conservatively blocked, water costs extra but doesn't block movement), and
+`tests/test_pathfinding_integration.py` (full `AStar` + `Movements` +
+`GoalNear` runs: paths around a pit instead of falling through it, **paths
+down a staircase the bot is behind on** -- the literal reported bug,
+reproduced and fixed -- climbs a single step directly, and correctly
+reports `noPath` when fully walled in).
+
+### Wired into `MovementController._follow_loop`
+
+Added `MovementController.blocks: ChunkBlockCache` (now a required
+constructor arg, threaded through from `main.py`) and
+`_maybe_replan_path`/`_next_waypoint`. Each follow tick, if the target has
+moved far enough from where the last path was aimed (`FOLLOW_REPLAN_DISTANCE
+= 2.0`, mirroring `GoalFollow.hasChanged()`'s role -- avoids rerunning A*
+every single tick for a barely-moving target), (re)computes a path via
+`GoalNear` around the target's current position and steers toward the
+path's next waypoint's (x, y) instead of the target's raw position
+directly. Falls back to the previous raw-target-following behavior (not a
+freeze) whenever pathfinding can't help: no block data under our own feet
+yet, or A* reports `noPath`/no path found -- following imperfectly beats
+not moving at all. The existing gravity-based `_step_toward_target_height`
+is unchanged and still does the actual per-tick Y movement, just now aimed
+at a safe intermediate waypoint instead of the target's raw Y; all the
+gravity/step-height physics work from the previous phase stays exactly as
+useful as before, just correctly targeted now.
+
+**Verified via a real regression test** (`test_follow_uses_pathfinding_to_
+step_down_a_staircase_instead_of_falling_through_ground`, going through the
+actual public `MovementController.follow()` API, not just the standalone
+pathfinding module): given a 3-step staircase and a target standing at the
+bottom, the bot's tracked Y actually descends step by step toward the
+target instead of getting stuck trying to fall through solid ground still
+under its own earlier column -- the exact bug reported from live testing.
+**Not yet verified live** against the real server -- next session should
+`!follow` across real uneven terrain (stairs, ledges, a hole) and confirm
+the same fix holds up outside synthetic fixtures.
 
 ## Tooling: uv, not raw venv/pip
 

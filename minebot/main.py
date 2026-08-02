@@ -50,7 +50,7 @@ async def run(config: BotConfig) -> None:
     tracker = EntityTracker()
     heightmaps = ChunkHeightmapCache()
     blocks = ChunkBlockCache()
-    movement = MovementController(tracker)
+    movement = MovementController(tracker, blocks)
     register_movement_commands(registry, movement)
 
     # Mining/placing/combat/inventory command handlers are not implemented

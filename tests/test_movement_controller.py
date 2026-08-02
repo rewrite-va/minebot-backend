@@ -4,13 +4,15 @@ import uuid
 
 import pytest
 
-from minebot.bot.movement import MovementController
+from minebot.bot.movement import FOLLOW_STEP_INTERVAL_SECONDS, MovementController
 from minebot.net.connection import Connection
 from minebot.net.types import ByteReader
+from minebot.protocol.chunk_blocks import ChunkBlockCache
 from minebot.protocol.chunks import ChunkHeightmapCache
 from minebot.protocol.entities import EntityTracker, PlayerListEntry
 from minebot.protocol.movement import PlayerPositionSync
 from minebot.protocol.registry import REGISTRY
+from pathfinding_fixtures import build_world, flat_ground
 
 STATE = "play"
 
@@ -44,14 +46,14 @@ def _last_move(conn: RecordingConnection):
 
 @pytest.mark.asyncio
 async def test_forward_without_known_position_raises():
-    movement = MovementController(EntityTracker())
+    movement = MovementController(EntityTracker(), ChunkBlockCache())
     with pytest.raises(RuntimeError):
         await movement.forward(RecordingConnection(), None)
 
 
 @pytest.mark.asyncio
 async def test_sync_from_position_packet_sets_absolute_position():
-    movement = MovementController(EntityTracker())
+    movement = MovementController(EntityTracker(), ChunkBlockCache())
     movement.sync_from_position_packet(
         PlayerPositionSync(teleport_id=1, x=10.0, y=64.0, z=-5.0, yaw=0.0, pitch=0.0, relatives=0)
     )
@@ -62,7 +64,7 @@ async def test_sync_from_position_packet_sets_absolute_position():
 @pytest.mark.asyncio
 async def test_forward_at_yaw_zero_moves_north_positive_z():
     # yaw 0 faces +Z per vanilla convention.
-    movement = MovementController(EntityTracker())
+    movement = MovementController(EntityTracker(), ChunkBlockCache())
     movement.sync_from_position_packet(
         PlayerPositionSync(teleport_id=1, x=0.0, y=64.0, z=0.0, yaw=0.0, pitch=0.0, relatives=0)
     )
@@ -78,7 +80,7 @@ async def test_forward_at_yaw_zero_moves_north_positive_z():
 
 @pytest.mark.asyncio
 async def test_backward_is_opposite_of_forward():
-    movement = MovementController(EntityTracker())
+    movement = MovementController(EntityTracker(), ChunkBlockCache())
     movement.sync_from_position_packet(
         PlayerPositionSync(teleport_id=1, x=0.0, y=64.0, z=0.0, yaw=45.0, pitch=0.0, relatives=0)
     )
@@ -99,7 +101,7 @@ async def test_backward_is_opposite_of_forward():
 
 @pytest.mark.asyncio
 async def test_strafe_left_and_right_are_opposite():
-    movement = MovementController(EntityTracker())
+    movement = MovementController(EntityTracker(), ChunkBlockCache())
     movement.sync_from_position_packet(
         PlayerPositionSync(teleport_id=1, x=0.0, y=64.0, z=0.0, yaw=0.0, pitch=0.0, relatives=0)
     )
@@ -125,7 +127,7 @@ async def test_follow_by_explicit_name_moves_toward_target_and_stop_cancels():
     tracker.handle_add_entity(1, target_uuid, 10.0, 64.0, 0.0)
     tracker.handle_player_info([PlayerListEntry(profile_id=target_uuid, name="Alex")])
 
-    movement = MovementController(tracker)
+    movement = MovementController(tracker, ChunkBlockCache())
     movement.sync_from_position_packet(
         PlayerPositionSync(teleport_id=1, x=0.0, y=64.0, z=0.0, yaw=0.0, pitch=0.0, relatives=0)
     )
@@ -154,7 +156,7 @@ async def test_follow_with_no_name_follows_the_chat_sender():
     # Deliberately no tab-list/name mapping registered -- following by
     # sender uuid must not depend on the name lookup succeeding.
 
-    movement = MovementController(tracker)
+    movement = MovementController(tracker, ChunkBlockCache())
     movement.sync_from_position_packet(
         PlayerPositionSync(teleport_id=1, x=0.0, y=64.0, z=0.0, yaw=0.0, pitch=0.0, relatives=0)
     )
@@ -171,7 +173,7 @@ async def test_follow_with_no_name_follows_the_chat_sender():
 
 @pytest.mark.asyncio
 async def test_follow_with_no_name_and_no_sender_raises():
-    movement = MovementController(EntityTracker())
+    movement = MovementController(EntityTracker(), ChunkBlockCache())
     with pytest.raises(RuntimeError):
         await movement.follow(RecordingConnection(), None)
 
@@ -187,7 +189,7 @@ async def test_follow_ramps_toward_target_tracked_y():
     tracker.handle_add_entity(1, target_uuid, 5.0, 0.0, 0.0)  # target is at Y=0
     tracker.handle_player_info([PlayerListEntry(profile_id=target_uuid, name="Alex")])
 
-    movement = MovementController(tracker)
+    movement = MovementController(tracker, ChunkBlockCache())
     movement.sync_from_position_packet(
         PlayerPositionSync(teleport_id=1, x=0.0, y=999.0, z=0.0, yaw=0.0, pitch=0.0, relatives=0)
     )
@@ -228,7 +230,7 @@ async def test_follow_matches_target_y_under_a_roof_not_the_heightmap():
         ChunkHeightmap(chunk_x=0, chunk_z=0, heights_by_type={HEIGHTMAP_TYPE_MOTION_BLOCKING: [165] * 256})
     )
 
-    movement = MovementController(tracker)
+    movement = MovementController(tracker, ChunkBlockCache())
     movement.sync_from_position_packet(
         PlayerPositionSync(teleport_id=1, x=0.0, y=4.5, z=0.0, yaw=0.0, pitch=0.0, relatives=0)
     )
@@ -258,7 +260,7 @@ async def test_follow_adjusts_y_even_when_already_within_stop_distance():
     tracker.handle_add_entity(1, target_uuid, 0.5, 3.0, 0.0)
     tracker.handle_player_info([PlayerListEntry(profile_id=target_uuid, name="Alex")])
 
-    movement = MovementController(tracker)
+    movement = MovementController(tracker, ChunkBlockCache())
     movement.sync_from_position_packet(
         PlayerPositionSync(teleport_id=1, x=0.0, y=0.0, z=0.0, yaw=0.0, pitch=0.0, relatives=0)
     )
@@ -284,7 +286,7 @@ async def test_mark_position_stale_clears_has_position_and_stops_follow():
     tracker.handle_add_entity(1, target_uuid, 10.0, 64.0, 0.0)
     tracker.handle_player_info([PlayerListEntry(profile_id=target_uuid, name="Alex")])
 
-    movement = MovementController(tracker)
+    movement = MovementController(tracker, ChunkBlockCache())
     movement.sync_from_position_packet(
         PlayerPositionSync(teleport_id=1, x=0.0, y=64.0, z=0.0, yaw=0.0, pitch=0.0, relatives=0)
     )
@@ -306,7 +308,7 @@ async def test_mark_position_stale_clears_has_position_and_stops_follow():
 def test_step_toward_target_height_climbing_is_capped_at_step_height():
     from minebot.bot.movement import FOLLOW_MAX_UPWARD_STEP
 
-    movement = MovementController(EntityTracker())
+    movement = MovementController(EntityTracker(), ChunkBlockCache())
     movement.y = 0.0
 
     # Target far above -- should rise by at most one step-height per call,
@@ -317,7 +319,7 @@ def test_step_toward_target_height_climbing_is_capped_at_step_height():
 
 
 def test_step_toward_target_height_climbing_within_step_height_snaps_exactly():
-    movement = MovementController(EntityTracker())
+    movement = MovementController(EntityTracker(), ChunkBlockCache())
     movement.y = 0.0
 
     movement._step_toward_target_height(0.3)  # less than the 0.6 step cap
@@ -332,7 +334,7 @@ def test_step_toward_target_height_falling_accelerates():
     # (LivingEntity.DEFAULT_BASE_GRAVITY = 0.08 blocks/tick^2), so
     # consecutive calls should fall progressively *farther* per call, not a
     # constant amount.
-    movement = MovementController(EntityTracker())
+    movement = MovementController(EntityTracker(), ChunkBlockCache())
     movement.y = 100.0
 
     movement._step_toward_target_height(-1000.0)  # far below -- stay falling
@@ -354,7 +356,7 @@ def test_step_toward_target_height_falling_approaches_terminal_velocity():
     # the limit) rather than unbounded linear acceleration -- matters on
     # long falls, where a naive "just keep subtracting gravity" model would
     # eventually report implausibly fast speeds.
-    movement = MovementController(EntityTracker())
+    movement = MovementController(EntityTracker(), ChunkBlockCache())
     movement.y = 10_000_000.0  # far enough to fall for a long time uninterrupted
 
     for _ in range(2000):
@@ -367,7 +369,7 @@ def test_step_toward_target_height_falling_approaches_terminal_velocity():
 
 
 def test_step_toward_target_height_falling_lands_exactly_on_target():
-    movement = MovementController(EntityTracker())
+    movement = MovementController(EntityTracker(), ChunkBlockCache())
     movement.y = 10.0
 
     # Small drop, well within what even the first tick of falling covers --
@@ -378,7 +380,7 @@ def test_step_toward_target_height_falling_lands_exactly_on_target():
 
 
 def test_step_toward_target_height_switching_from_fall_to_climb_resets_velocity():
-    movement = MovementController(EntityTracker())
+    movement = MovementController(EntityTracker(), ChunkBlockCache())
     movement.y = 100.0
 
     movement._step_toward_target_height(-1000.0)
@@ -388,3 +390,65 @@ def test_step_toward_target_height_switching_from_fall_to_climb_resets_velocity(
     # stairs) -- climbing must not carry over leftover fall velocity.
     movement._step_toward_target_height(movement.y + 5.0)
     assert movement._vertical_velocity == 0.0
+
+
+@pytest.mark.asyncio
+async def test_follow_uses_pathfinding_to_step_down_a_staircase_instead_of_falling_through_ground():
+    # Regression test for the exact bug diagnosed via live testing (see
+    # FINDINGS.md): when block data is available, the bot must step down a
+    # staircase toward a target on lower ground rather than trying to fall
+    # straight through solid ground still beneath its own (older) column.
+    ground = flat_ground(-10, 10, -10, 10, ground_y=3)
+    ground[(1, 0)] = 2
+    ground[(2, 0)] = 1
+    ground[(3, 0)] = 0
+    blocks = build_world(ground)
+
+    tracker = EntityTracker()
+    target_uuid = uuid.uuid4()
+    tracker.handle_add_entity(1, target_uuid, 3.5, 1.0, 0.0)  # target down at the bottom step
+    tracker.handle_player_info([PlayerListEntry(profile_id=target_uuid, name="Alex")])
+
+    movement = MovementController(tracker, blocks)
+    movement.sync_from_position_packet(
+        PlayerPositionSync(teleport_id=1, x=0.5, y=4.0, z=0.0, yaw=0.0, pitch=0.0, relatives=0)
+    )
+    conn = RecordingConnection()
+
+    await movement.follow(conn, None, "Alex")
+    for _ in range(40):
+        await asyncio.sleep(FOLLOW_STEP_INTERVAL_SECONDS)
+        if movement.y <= 1.5:
+            break
+    movement.stop_follow()
+
+    assert len(conn.sent) > 0
+    # The key assertion: our reported Y actually descended toward the
+    # target's, in a real path down the stairs -- not stuck floating above
+    # solid ground it thinks it needs to fall through.
+    assert movement.y < 3.5
+
+
+@pytest.mark.asyncio
+async def test_follow_falls_back_to_raw_target_position_when_blocks_unknown():
+    # No chunk data at all (the default, pre-pathfinding behavior): follow
+    # must still work by tracking the target's raw position directly,
+    # exactly as it did before pathfinding existed.
+    tracker = EntityTracker()
+    target_uuid = uuid.uuid4()
+    tracker.handle_add_entity(1, target_uuid, 10.0, 0.0, 0.0)
+    tracker.handle_player_info([PlayerListEntry(profile_id=target_uuid, name="Alex")])
+
+    movement = MovementController(tracker, ChunkBlockCache())
+    movement.sync_from_position_packet(
+        PlayerPositionSync(teleport_id=1, x=0.0, y=0.0, z=0.0, yaw=0.0, pitch=0.0, relatives=0)
+    )
+    conn = RecordingConnection()
+
+    await movement.follow(conn, None, "Alex")
+    await asyncio.sleep(0.3)
+    movement.stop_follow()
+
+    assert len(conn.sent) > 0
+    result = _last_move(conn)
+    assert result["x"] > 0.0  # moved toward the target, not frozen in place

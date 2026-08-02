@@ -56,10 +56,21 @@ blocks, handled as ordinary walking collision response, not gravity/jump
 physics -- so small upward Y changes are still just clamped to a flat
 per-tick cap, only the downward (falling) case needs real acceleration.
 This is still not full physics: no actual jump impulse (we can't gain
-upward velocity the way pressing space does), no collision/terrain
-awareness beyond the target's own reported Y, and the server may still
-reject movement in ways we haven't seen yet. See FINDINGS.md "Why this
-needs real pathfinding" for the larger picture.
+upward velocity the way pressing space does), and the server may still
+reject movement in ways we haven't seen yet.
+
+Path planning (minebot/pathfinding/ -- a port of mineflayer-pathfinder's
+astar.js/movements.js/goals.js, walk+climb+parkour moves only, no
+dig/place): when the target's chunk data is loaded, the follow loop
+computes an A* path toward a GoalNear around the target and steers toward
+the path's next waypoint instead of the target's raw (x, y, z) directly.
+This is what actually fixes the reported "bot tries to fall through solid
+ground when behind a target who drops a level" bug -- raw-Y-following has
+no idea whether the space between the bot and the target's new Y is open,
+while the pathfinder does. Falls back to the previous raw-target-following
+behavior when we don't have block data for the relevant area yet (e.g. we
+haven't received those chunks) or when no path is found, rather than
+freezing -- following imperfectly is better than not moving at all.
 """
 
 from __future__ import annotations
@@ -71,6 +82,11 @@ import uuid as uuid_module
 
 from minebot.commands.registry import CommandRegistry
 from minebot.net.connection import Connection
+from minebot.pathfinding.astar import AStar
+from minebot.pathfinding.goals import GoalNear
+from minebot.pathfinding.move import Move as PathMove
+from minebot.pathfinding.movements import Movements
+from minebot.protocol.chunk_blocks import ChunkBlockCache
 from minebot.protocol.entities import EntityTracker
 from minebot.protocol.movement import PlayerPositionSync, REL_X, REL_X_ROT, REL_Y, REL_Y_ROT, REL_Z, send_move_player_pos_rot
 
@@ -105,10 +121,22 @@ _GAME_TICKS_PER_FOLLOW_STEP = FOLLOW_STEP_INTERVAL_SECONDS / _GAME_TICK_SECONDS
 # upward case, which doesn't need gravity simulation.
 FOLLOW_MAX_UPWARD_STEP = 0.6
 
+# How long A* is allowed to spend per invocation -- generous relative to
+# the follow loop's own tick rate (FOLLOW_STEP_INTERVAL_SECONDS) since a
+# search only needs to run once every FOLLOW_REPLAN_MIN_DISTANCE, not
+# every tick.
+PATHFINDING_TIMEOUT_SECONDS = 1.0
+# Re-run A* only once the target has moved this far from where the last
+# computed path was aimed -- matches GoalFollow.has_changed()'s role in
+# mineflayer-pathfinder: avoids recomputing a path every single tick for a
+# target that's barely moved.
+FOLLOW_REPLAN_DISTANCE = 2.0
+
 
 class MovementController:
-    def __init__(self, tracker: EntityTracker) -> None:
+    def __init__(self, tracker: EntityTracker, blocks: ChunkBlockCache) -> None:
         self.tracker = tracker
+        self.blocks = blocks
         self.x = 0.0
         self.y = 0.0
         self.z = 0.0
@@ -122,6 +150,12 @@ class MovementController:
         # exist at all -- the server rejects a sudden Y jump that isn't
         # backed by an accelerating velocity like a real client would report.
         self._vertical_velocity = 0.0
+        # Current planned path (list of pathfinding.move.Move waypoints,
+        # nearest-first) and the target position it was computed for, so we
+        # know when it's gone stale enough to recompute (see
+        # FOLLOW_REPLAN_DISTANCE) rather than re-running A* every tick.
+        self._current_path: list[PathMove] = []
+        self._path_computed_for: tuple[float, float, float] | None = None
 
     def sync_from_position_packet(self, sync: PlayerPositionSync) -> None:
         self.x = sync.x if not (sync.relatives & REL_X) else self.x + sync.x
@@ -140,6 +174,8 @@ class MovementController:
         """
         self.has_position = False
         self._vertical_velocity = 0.0
+        self._current_path = []
+        self._path_computed_for = None
         self.stop_follow()
 
     async def _walk_by(self, conn: Connection, dx: float, dz: float) -> None:
@@ -174,6 +210,8 @@ class MovementController:
             )
         log.info("starting follow of %s", target_uuid)
         self.stop_follow()
+        self._current_path = []
+        self._path_computed_for = None
         self._follow_task = asyncio.create_task(self._follow_loop(conn, target_uuid))
 
     def stop_follow(self) -> None:
@@ -183,6 +221,66 @@ class MovementController:
 
     async def stop(self, conn: Connection, sender: uuid_module.UUID | None) -> None:
         self.stop_follow()
+
+    def _maybe_replan_path(self, target_x: float, target_y: float, target_z: float) -> None:
+        """(Re)computes an A* path toward the target if we don't have a
+        current one, or the target has moved far enough that the existing
+        one is stale (mirrors mineflayer-pathfinder's GoalFollow.hasChanged,
+        which exists for the same reason: replanning every single tick for
+        a target that's barely moved is wasted work).
+
+        Leaves self._current_path empty (not an exception) when we don't
+        have block data for the relevant area yet or no path is found --
+        the follow loop falls back to raw target-following in that case,
+        same as before pathfinding existed, rather than freezing.
+        """
+        if self._path_computed_for is not None:
+            last_x, last_y, last_z = self._path_computed_for
+            moved = math.dist((last_x, last_y, last_z), (target_x, target_y, target_z))
+            if moved <= FOLLOW_REPLAN_DISTANCE and self._current_path:
+                return  # existing path is still aimed close enough to the target
+
+        self._path_computed_for = (target_x, target_y, target_z)
+
+        start_x, start_y, start_z = math.floor(self.x), math.floor(self.y), math.floor(self.z)
+        if self.blocks.block_state_at(start_x, start_z, start_y - 1) is None:
+            # We don't have block data under our own feet -- e.g. chunks
+            # haven't loaded yet. Pathfinding can't do better than guessing
+            # here, so don't pretend to have a plan.
+            self._current_path = []
+            return
+
+        movements = Movements(blocks=self.blocks)
+        start = PathMove(start_x, start_y, start_z, 0.0)
+        goal = GoalNear(target_x, target_y, target_z, range=FOLLOW_STOP_DISTANCE)
+        astar = AStar(start, movements.get_neighbors, goal.heuristic, goal.is_end, timeout=PATHFINDING_TIMEOUT_SECONDS)
+        result = astar.compute()
+
+        if result.status in ("success", "partial") and result.path:
+            self._current_path = result.path
+            log.debug("follow: planned path of %d waypoints (status=%s)", len(result.path), result.status)
+        else:
+            self._current_path = []
+            log.debug("follow: no path found (status=%s), falling back to raw target-following", result.status)
+
+    def _next_waypoint(self) -> PathMove | None:
+        """Pops and returns waypoints we've already reached, then returns
+        the next one still ahead of us -- or None once the path is
+        exhausted (the caller falls back to the target's raw position,
+        which by then should be within FOLLOW_STOP_DISTANCE anyway since
+        the path was planned toward a GoalNear around it).
+        """
+        while self._current_path:
+            waypoint = self._current_path[0]
+            reached = (
+                math.floor(self.x) == waypoint.x
+                and math.floor(self.z) == waypoint.z
+                and abs(self.y - waypoint.y) < 1.0
+            )
+            if not reached:
+                return waypoint
+            self._current_path.pop(0)
+        return None
 
     async def _follow_loop(self, conn: Connection, target_uuid: uuid_module.UUID) -> None:
         warned_no_position = False
@@ -206,33 +304,41 @@ class MovementController:
                 continue
             warned_no_target = False
 
-            delta_x = target.x - self.x
-            delta_z = target.z - self.z
+            self._maybe_replan_path(target.x, target.y, target.z)
+            waypoint = self._next_waypoint()
+            aim_x, aim_y, aim_z = (waypoint.x, waypoint.y, waypoint.z) if waypoint is not None else (target.x, target.y, target.z)
+
+            delta_x = aim_x - self.x
+            delta_z = aim_z - self.z
             distance = math.hypot(delta_x, delta_z)
+            # Only the raw target position (not a waypoint) should ever
+            # stop horizontal movement -- stopping short of an intermediate
+            # waypoint would leave us stuck mid-path.
+            stop_distance = FOLLOW_STOP_DISTANCE if waypoint is None else 0.0
 
             log.debug(
-                "follow tick: self=(%.2f,%.2f,%.2f) target=(%.2f,%.2f,%.2f) distance=%.2f",
-                self.x, self.y, self.z, target.x, target.y, target.z, distance,
+                "follow tick: self=(%.2f,%.2f,%.2f) aim=(%.2f,%.2f,%.2f) target=(%.2f,%.2f,%.2f) distance=%.2f",
+                self.x, self.y, self.z, aim_x, aim_y, aim_z, target.x, target.y, target.z, distance,
             )
 
-            moved_horizontally = distance > FOLLOW_STOP_DISTANCE
+            moved_horizontally = distance > stop_distance
             if moved_horizontally:
-                step = min(FOLLOW_STEP_DISTANCE, distance - FOLLOW_STOP_DISTANCE)
+                step = min(FOLLOW_STEP_DISTANCE, distance - stop_distance)
                 direction_x = delta_x / distance
                 direction_z = delta_z / distance
                 self.x += direction_x * step
                 self.z += direction_z * step
                 self.yaw = math.degrees(math.atan2(-direction_x, direction_z))
 
-            # Adjust Y even when standing right next to the target (e.g.
+            # Adjust Y even when standing right next to the aim point (e.g.
             # they're on a ledge just above/below us) -- gating this behind
             # moved_horizontally would mean never noticing a Y difference
             # once we're within stopping distance.
-            moved_vertically = abs(target.y - self.y) > 1e-6
+            moved_vertically = abs(aim_y - self.y) > 1e-6
             if not moved_horizontally and not moved_vertically:
                 continue
 
-            self._step_toward_target_height(target.y)
+            self._step_toward_target_height(aim_y)
             log.debug("follow sending move: (%.2f, %.2f, %.2f)", self.x, self.y, self.z)
             await send_move_player_pos_rot(conn, self.x, self.y, self.z, self.yaw, self.pitch)
 

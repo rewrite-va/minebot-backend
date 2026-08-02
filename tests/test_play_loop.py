@@ -85,7 +85,7 @@ async def test_play_loop_answers_keepalive_and_dispatches_commands():
     tracker = EntityTracker()
     heightmaps = ChunkHeightmapCache()
     blocks = ChunkBlockCache()
-    movement = MovementController(tracker)
+    movement = MovementController(tracker, blocks)
 
     async with server:
         conn = await Connection.open(host, port)
@@ -148,7 +148,7 @@ async def test_play_loop_respawns_only_on_our_own_death():
     tracker = EntityTracker()
     heightmaps = ChunkHeightmapCache()
     blocks = ChunkBlockCache()
-    movement = MovementController(tracker)
+    movement = MovementController(tracker, blocks)
 
     async with server:
         conn = await Connection.open(host, port)
@@ -208,7 +208,7 @@ async def test_play_loop_respawns_from_zero_health_alone():
     tracker = EntityTracker()
     heightmaps = ChunkHeightmapCache()
     blocks = ChunkBlockCache()
-    movement = MovementController(tracker)
+    movement = MovementController(tracker, blocks)
 
     async with server:
         conn = await Connection.open(host, port)
@@ -278,7 +278,7 @@ async def test_play_loop_does_not_double_respawn_for_one_death():
     tracker = EntityTracker()
     heightmaps = ChunkHeightmapCache()
     blocks = ChunkBlockCache()
-    movement = MovementController(tracker)
+    movement = MovementController(tracker, blocks)
 
     async with server:
         conn = await Connection.open(host, port)
