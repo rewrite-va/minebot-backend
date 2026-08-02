@@ -10,6 +10,7 @@ from minebot.bot.play_loop import run_play_loop
 from minebot.commands.registry import CommandRegistry
 from minebot.config import BotConfig
 from minebot.net.connection import Connection
+from minebot.protocol.chunk_blocks import ChunkBlockCache
 from minebot.protocol.chunks import ChunkHeightmapCache
 from minebot.protocol.configuration import run_configuration_phase
 from minebot.protocol.entities import EntityTracker
@@ -48,13 +49,14 @@ async def run(config: BotConfig) -> None:
     registry = CommandRegistry()
     tracker = EntityTracker()
     heightmaps = ChunkHeightmapCache()
+    blocks = ChunkBlockCache()
     movement = MovementController(tracker)
     register_movement_commands(registry, movement)
 
     # Mining/placing/combat/inventory command handlers are not implemented
     # yet -- chat receive/dispatch, keepalive, and basic movement
     # (forward/backward/left/right/follow/stop) are functional.
-    await run_play_loop(conn, registry, movement, tracker, heightmaps)
+    await run_play_loop(conn, registry, movement, tracker, heightmaps, blocks)
 
 
 def main() -> None:

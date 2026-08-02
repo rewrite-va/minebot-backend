@@ -813,6 +813,153 @@ parsing -> block-registry lookup -> movements/cost model -> A*), which
 remains the right next step rather than another special-case fix layered
 on top of raw-Y-following.
 
+## Step (1)+(2) done: real per-block chunk parsing + a generated block registry
+
+Picked up the phased plan from "Why this needs real pathfinding" above:
+`chunks.py`'s heightmaps only ever answer "how tall is this column," which
+can't distinguish solid ground from a roof/ceiling and has no idea about
+gaps, overhangs, or what's actually beneath the *bot's own* position (the
+exact gap identified in the previous section). This phase builds the real
+thing: per-(x,y,z) block-state data plus a solid/liquid/climbable lookup
+for each state id.
+
+### Where block-state ids and solidity actually come from (and why that ruled out pure source-parsing)
+
+Investigated (by reading the decompiled source directly, not from prior
+Minecraft-version knowledge, since 26.1.2 postdates training) whether
+block-state ids and their solidity could be statically derived by parsing
+`Blocks.java` text, the same way `tools/extract_packet_ids.py` derives
+packet ids from `*Protocols.java`. They can't, for two different reasons:
+- **IDs**: there's no static table anywhere. `Block.BLOCK_STATE_REGISTRY`
+  (an `IdMapper`) is populated by a static initializer at the bottom of
+  `Blocks.java`: `for (Block block : BuiltInRegistries.BLOCK) { for
+  (BlockState state : block.getStateDefinition().getPossibleStates()) {
+  BLOCK_STATE_REGISTRY.add(state); } }`. The ordering is fully
+  deterministic in principle (block registration order, then each
+  property's declared value order via `StateDefinition`'s
+  `ImmutableSortedMap`-keyed cartesian product), but correctly
+  reimplementing that ordering in Python would mean re-deriving ~70+ block
+  subclasses' exact property sets and Java's sort/cartesian-product
+  semantics -- fragile and easy to get subtly (and silently) wrong.
+- **Solidity**: `BlockBehaviour.Properties` flags (`hasCollision`,
+  `canOcclude`, ...) are real static per-block flags, but the actual
+  *collision shape* used to compute "is this state solid enough to stand
+  on/blocks movement" for irregular blocks (stairs, slabs, fences, walls,
+  ...) is computed by real per-block-class `VoxelShape` geometry
+  (`StairBlock`/`SlabBlock`/etc override `getCollisionShape()`), not a
+  static flag. "Climbable" is a `minecraft:climbable` block-tag membership
+  check, not a per-block field either. None of this is safely
+  re-derivable from source text.
+
+### The fix: dump the real registry from a live dev server, once
+
+Same idea as the packet-id extraction, but since this data can only be
+produced by actually running Minecraft's registry bootstrap (not sitting
+statically in source), it needed a live dump instead of static parsing.
+Added a temporary mod hook to `mods/VillagerHelper` (the same
+26.1.2-pinned Fabric project already used to get decompiled sources) that,
+on `ServerLifecycleEvents.SERVER_STARTED` (fires after registries **and**
+tags are fully loaded -- deliberately not `ModInitializer.onInitialize()`,
+which is too early for tag data), iterates
+`BuiltInRegistries.BLOCK.listElements()`, then each block's
+`getStateDefinition().getPossibleStates()`, and for each real `BlockState`
+object queries `Block.BLOCK_STATE_REGISTRY.getId(state)` (the real id),
+`state.isAir()`, `state.isCollisionShapeFullBlock(EmptyBlockGetter.INSTANCE,
+BlockPos.ZERO)` (solid), `!state.getCollisionShape(...).isEmpty()`
+(has-collision, for future partial-collision blocks like slabs/stairs),
+`!state.getFluidState().isEmpty()` (liquid), and
+`block.builtInRegistryHolder().is(BlockTags.CLIMBABLE)` (ladder), dumping
+all of it to JSON, then immediately `server.halt(false)`. Ran once via
+`./gradlew runServer` (a throwaway local dev world, EULA accepted locally
+for this one-shot data-extraction run -- not a real server), producing
+29,873 block states with sequential ids 0..29872. Spot-checked:
+`minecraft:air`=air/not-solid, `minecraft:stone`=solid, `minecraft:water`
+=liquid/not-solid, `minecraft:ladder`=climbable, `minecraft:oak_stairs`
+(80 property-combination variants)=has-collision but not solid (correctly
+distinguishing "blocks movement partially" from "is a full cube"). The
+temporary mod hook and its one-shot output were then removed from
+`mods/VillagerHelper` (that repo is left clean -- this generator isn't
+kept in-tree there since it's not a repeatable part of the mod, just a
+one-time extraction); the JSON output itself was copied into this repo as
+`minebot/protocol/block_registry_775.json` and is what
+`minebot/protocol/block_registry.py`'s `BLOCK_REGISTRY` loads.
+
+Two Java-API surprises hit while writing the dumper, both fixed by reading
+the decompiled source rather than assuming older-version knowledge still
+applied: `ResourceLocation` has been renamed `Identifier` in this version
+(`ResourceKey.identifier()`, not `.location()`), and there's no
+`BlockState.isLadder()`/`Block.isLadder()` method at all in 26.1.2 --
+climbability is purely a `BlockTags.CLIMBABLE` tag-membership check via
+the block's registry `Holder`.
+
+### Real per-section block-state parsing (`minebot/protocol/chunk_blocks.py`)
+
+Decoded `ClientboundLevelChunkPacketData`'s actual per-section paletted
+block buffer -- the varint-length-prefixed byte buffer that `chunks.py`'s
+heightmap parsing deliberately stops right before. Verified every wire
+detail against the decompiled `PalettedContainer`/`LevelChunkSection`/
+`Strategy`/`LinearPalette`/`HashMapPalette`/`GlobalPalette`/
+`SingleValuePalette` sources rather than assumed from older-version
+knowledge (the exact bit-count thresholds in particular have shifted
+across Minecraft versions historically, so this mattered):
+- Sections are stored back-to-back with **no explicit count on the wire**
+  -- read until the packet's own already-framed block-data buffer is
+  exhausted (mirrors how `LevelChunkSection.write`/`read` really work: no
+  count is ever written, since the real client already knows the
+  dimension's height from registry data we don't parse).
+- Each section: `nonEmptyBlockCount:i16`, `fluidCount:i16` (server-side
+  tick-optimization counters, unused by us), then the block-state
+  paletted container, then the biome paletted container (parsed only
+  structurally, to correctly skip past it -- we have no biome registry
+  and no use for biome data yet).
+- Paletted container: `bits:u8` (a *wire-declared* bit count), then a
+  palette whose shape depends on `bits` **and** which strategy is in use
+  (confirmed these differ for blocks vs biomes, not just a single shared
+  table): `Strategy.createForBlockStates` pads wire bits 1-4 uniformly to
+  a fixed in-memory storage width of 4 (`FOUR_BITS_LINEAR`), stores wire
+  bits 5-8 at their own declared width (the HashMap range), and anything
+  above 8 is `GlobalPalette` (no local palette at all -- packed values
+  are already real global ids). `Strategy.createForBiomes` has no padding
+  and no HashMap range whatsoever: wire bits 1-3 are each stored at their
+  own exact width, with Global starting immediately above 3. Getting this
+  wrong for biomes (which we never even interpret) would still misalign
+  every subsequent byte in the chunk, so `_biome_storage_bits` mirrors the
+  real threshold exactly even though its output is discarded.
+- The packed index/value array itself is a **bare, unprefixed** fixed-size
+  long array (unlike heightmaps' varint-prefixed `LONG_ARRAY`) -- same
+  non-splitting `SimpleBitStorage` bit-packing scheme already relied on in
+  `chunks.py`, just parameterized by whatever `entry_count`/bit-width is
+  in play (4096 entries/16 bits-per-axis-4 for blocks, 64 entries for
+  biomes).
+
+Verified against hand-encoded packets covering all four palette shapes
+(`tests/test_chunk_blocks.py`) rather than only a self-consistent
+roundtrip -- SingleValue, Linear-padded-to-4-bits, HashMap-at-its-own-bit-
+count, and Global-direct all produce independently-checked expected block-
+state ids at specific (x,y,z) positions, plus multi-section stacking and
+world-Y-to-section-index mapping (including out-of-range positions
+correctly returning `None` rather than silently misreading the wrong
+section).
+
+`ChunkBlockCache` (mirrors `ChunkHeightmapCache`'s shape) holds
+`(chunk_x, chunk_z) -> ChunkBlocks` and answers
+`is_solid(world_x, world_z, world_y)` / `block_state_at(...)`, returning
+`None` (not `False`) when the containing chunk hasn't been received yet --
+callers must treat "unknown" as its own state, not conflate it with "air."
+Wired into `run_play_loop`/`main.py` alongside the existing
+`ChunkHeightmapCache`, fed from the same `ClientboundLevelChunkWithLightPacket`
+(each module independently re-parses the packet's shared header, same
+pattern `chunks.py` already used standalone -- simpler than coupling the
+two parsers together for a modest amount of duplicate header parsing).
+
+**Not yet done**: this cache is built and tested but not yet consulted by
+`MovementController` -- the actual A* pathfinding (steps 3-5 of the
+original phased plan: port `movements.js`'s neighbor/cost model using this
+new solid/liquid/climbable data, then `astar.js`/`heap.js`/`goals.js`,
+which were already identified as portable as-is) is still unstarted. This
+phase specifically closes the "we have no idea what's actually at a given
+block" gap that step (4)'s cost model needs as an input.
+
 ## Tooling: uv, not raw venv/pip
 
 This project uses `uv` (Astral) for dependency management and running things

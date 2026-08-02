@@ -7,6 +7,7 @@ from minebot.bot.play_loop import run_play_loop
 from minebot.commands.registry import CommandRegistry
 from minebot.net.connection import Connection
 from minebot.net.types import ByteReader, ByteWriter
+from minebot.protocol.chunk_blocks import ChunkBlockCache
 from minebot.protocol.chunks import ChunkHeightmapCache
 from minebot.protocol.entities import EntityTracker
 from minebot.protocol.registry import REGISTRY
@@ -83,6 +84,7 @@ async def test_play_loop_answers_keepalive_and_dispatches_commands():
     registry.register("ping", ping_handler)
     tracker = EntityTracker()
     heightmaps = ChunkHeightmapCache()
+    blocks = ChunkBlockCache()
     movement = MovementController(tracker)
 
     async with server:
@@ -90,7 +92,7 @@ async def test_play_loop_answers_keepalive_and_dispatches_commands():
 
         try:
             await asyncio.wait_for(
-                run_play_loop(conn, registry, movement, tracker, heightmaps), timeout=1.0
+                run_play_loop(conn, registry, movement, tracker, heightmaps, blocks), timeout=1.0
             )
         except (asyncio.IncompleteReadError, ConnectionResetError, asyncio.TimeoutError):
             pass
@@ -145,6 +147,7 @@ async def test_play_loop_respawns_only_on_our_own_death():
     registry = CommandRegistry()
     tracker = EntityTracker()
     heightmaps = ChunkHeightmapCache()
+    blocks = ChunkBlockCache()
     movement = MovementController(tracker)
 
     async with server:
@@ -152,7 +155,7 @@ async def test_play_loop_respawns_only_on_our_own_death():
 
         try:
             await asyncio.wait_for(
-                run_play_loop(conn, registry, movement, tracker, heightmaps), timeout=1.0
+                run_play_loop(conn, registry, movement, tracker, heightmaps, blocks), timeout=1.0
             )
         except (asyncio.IncompleteReadError, ConnectionResetError, asyncio.TimeoutError):
             pass
@@ -204,6 +207,7 @@ async def test_play_loop_respawns_from_zero_health_alone():
     registry = CommandRegistry()
     tracker = EntityTracker()
     heightmaps = ChunkHeightmapCache()
+    blocks = ChunkBlockCache()
     movement = MovementController(tracker)
 
     async with server:
@@ -211,7 +215,7 @@ async def test_play_loop_respawns_from_zero_health_alone():
 
         try:
             await asyncio.wait_for(
-                run_play_loop(conn, registry, movement, tracker, heightmaps), timeout=1.0
+                run_play_loop(conn, registry, movement, tracker, heightmaps, blocks), timeout=1.0
             )
         except (asyncio.IncompleteReadError, ConnectionResetError, asyncio.TimeoutError):
             pass
@@ -273,6 +277,7 @@ async def test_play_loop_does_not_double_respawn_for_one_death():
     registry = CommandRegistry()
     tracker = EntityTracker()
     heightmaps = ChunkHeightmapCache()
+    blocks = ChunkBlockCache()
     movement = MovementController(tracker)
 
     async with server:
@@ -280,7 +285,7 @@ async def test_play_loop_does_not_double_respawn_for_one_death():
 
         try:
             await asyncio.wait_for(
-                run_play_loop(conn, registry, movement, tracker, heightmaps), timeout=1.0
+                run_play_loop(conn, registry, movement, tracker, heightmaps, blocks), timeout=1.0
             )
         except (asyncio.IncompleteReadError, ConnectionResetError, asyncio.TimeoutError):
             pass

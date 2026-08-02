@@ -30,6 +30,7 @@ from minebot.bot.movement import MovementController
 from minebot.commands.registry import CommandRegistry
 from minebot.net.connection import Connection, STATE_PLAY
 from minebot.protocol.chat import PlayerChatMessage, SystemChatMessage, parse_play_chat, send_say
+from minebot.protocol.chunk_blocks import ChunkBlockCache, parse_level_chunk_block_data
 from minebot.protocol.chunks import ChunkHeightmapCache, parse_level_chunk_with_light
 from minebot.protocol.entities import EntityTracker, apply_entity_packet
 from minebot.protocol.health import (
@@ -52,6 +53,7 @@ async def run_play_loop(
     movement: MovementController,
     tracker: EntityTracker,
     heightmaps: ChunkHeightmapCache,
+    blocks: ChunkBlockCache,
 ) -> None:
     own_entity_id: int | None = None
     awaiting_respawn = False
@@ -129,6 +131,9 @@ async def run_play_loop(
         chunk_heightmap = parse_level_chunk_with_light(raw.packet_id, raw.data)
         if chunk_heightmap is not None:
             heightmaps.handle_chunk(chunk_heightmap)
+            chunk_blocks = parse_level_chunk_block_data(raw.packet_id, raw.data)
+            if chunk_blocks is not None:
+                blocks.handle_chunk(chunk_blocks)
             continue
 
         if log.isEnabledFor(logging.DEBUG):
@@ -137,5 +142,4 @@ async def run_play_loop(
                 log.debug("entity packet: %s", name)
         apply_entity_packet(tracker, raw.packet_id, raw.data)
 
-        # Everything else (the raw per-section block data within chunk
-        # packets, inventory, ...) is not handled yet; safe to ignore.
+        # Everything else (inventory, ...) is not handled yet; safe to ignore.
