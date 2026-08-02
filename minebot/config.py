@@ -8,17 +8,13 @@ from dotenv import load_dotenv
 
 @dataclass(frozen=True)
 class BotConfig:
-    host: str
-    port: int
-    username: str
-    online_mode: bool
+    mod_host: str
+    mod_port: int
 
     @classmethod
     def from_env(cls) -> "BotConfig":
         load_dotenv()  # loads .env into os.environ if present; no-op otherwise
         return cls(
-            host=os.environ.get("MINEBOT_HOST", "127.0.0.1"),
-            port=int(os.environ.get("MINEBOT_PORT", "25565")),
-            username=os.environ.get("MINEBOT_USERNAME", "minebot"),
-            online_mode=os.environ.get("MINEBOT_ONLINE_MODE", "false").lower() == "true",
+            mod_host=os.environ.get("MINEBOT_MOD_HOST", "127.0.0.1"),
+            mod_port=int(os.environ.get("MINEBOT_MOD_PORT", "47893")),
         )

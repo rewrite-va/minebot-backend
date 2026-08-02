@@ -2,1450 +2,196 @@
 
 Context for a future session picking this up cold. See `prompt.txt` for the
 original ask: a Python Minecraft bot (mindcraft-alike, but no LLM in the loop
-for basic actions) that connects via the raw protocol, parses chat commands,
-and does movement/mining/placing/combat/inventory.
-
-## The core problem: target version is brand new
-
-Target server: `51.81.166.195:60433`, **online-mode** (real Microsoft/Mojang
-auth required, not cracked).
-
-Minecraft moved to year-based versioning; our target is **26.1.2**
-(protocol version **775**, confirmed from `SharedConstants.java` ->
-`RELEASE_NETWORK_PROTOCOL_VERSION = 775`). This is past Claude's training
-cutoff (Jan 2026) and past every Python Minecraft library's support window:
-
-- `pycraft` (PyPI as `pycraft`/`minecraft-protocol`): dead since ~2019, caps
-  out at protocol 340 (MC 1.12.2). Not usable as-is.
-- `quarry` (PyPI, actively maintained, asyncio): current release 1.9.6 only
-  ships packet tables through MC 1.19.1. Still useful as a **networking
-  primitives** reference/dependency (VarInt, frame splitting, zlib
-  compression, AES/CFB8 encryption, zone Login flow) but its packet ID
-  tables are useless for us and were not used.
-- No Yarn mapping branch exists for `26.1.2` (yarn's most recent branch at
-  time of writing is `1.21.11`) — irrelevant, see below.
-
-## The unlock: we already have ground-truth source for 26.1.2
-
-`/home/colaila/git/mods/VillagerHelper` is a real, working Fabric mod pinned
-to `minecraft_version=26.1.2`, `loader_version=0.19.3`. Its Gradle setup has
-**no Yarn mapping dependency at all** — modern Loom defaults to Mojang's own
-official mappings, so class/method/field names in the decompiled jar are the
-same human-readable names Mojang's own source uses
-(`net.minecraft.client.Minecraft`, `net.minecraft.network.chat.Component`,
-`net.minecraft.core.BlockPos`, etc.) — no obfuscation to reverse and no
-mapping-file hunting needed.
-
-Fabric Loom caches the actual Minecraft jar for a project's pinned version
-locally once built. It was already present at:
-
-```
-/home/colaila/.gradle/caches/fabric-loom/26.1.2/minecraft-merged.jar
-```
-
-Running Loom's decompile task against VillagerHelper produced full, readable
-Java source for the entire game, client and server merged, for exactly
-`26.1.2`:
-
-```bash
-cd /home/colaila/git/mods/VillagerHelper
-./gradlew genSources      # needs network access once, to fetch the Vineflower
-                           # decompiler jar itself — NOT to fetch Minecraft,
-                           # that part is already cached and works --offline
-```
-
-Output lands at (note: gets regenerated / may move on subsequent runs, so
-treat this path as "wherever VillagerHelper's Loom cache put it" and re-find
-if stale):
-
-```
-mods/VillagerHelper/.gradle/loom-cache/minecraftMaven/net/minecraft/
-  minecraft-merged-043a8b3edf/26.1.2/minecraft-merged-043a8b3edf-26.1.2-sources.jar
-```
-
-**This means the original plan (write a Fabric packet-sniffing mod with
-Mixins into the client's Connection/PacketEncoder/PacketDecoder, join the
-live server, capture packets) was unnecessary and was abandoned.** We have
-better-than-packet-capture data: the actual source that defines every
-packet's field layout and ID.
-
-If this sources jar ever goes missing, regenerate it with the command above
-against any mod repo under `mods/` pinned to `26.1.2` (VillagerHelper,
-jade-trades also qualify — check each mod's `gradle.properties` for
-`minecraft_version` before assuming).
-
-## What we learned from reading the decompiled source
-
-Connection state machine is **unchanged** from the 1.20.2+ protocol rework:
-`HANDSHAKING -> {STATUS | LOGIN} -> CONFIGURATION -> PLAY`
-(`net.minecraft.network.ConnectionProtocol`).
-
-Packet IDs are **not** written anywhere as literal numbers in modern source.
-Each phase/direction registers its packets via a fluent builder:
-
-```java
-// net/minecraft/network/protocol/game/GameProtocols.java (abridged)
-builder -> builder.addPacket(GamePacketTypes.SERVERBOUND_ACCEPT_TELEPORTATION, ...)
-    .addPacket(GamePacketTypes.SERVERBOUND_ATTACK, ...)
-    .addPacket(GamePacketTypes.SERVERBOUND_BLOCK_ENTITY_TAG_QUERY, ...)
-    // ...
-```
-
-and `ProtocolInfoBuilder.buildDetails()` assigns IDs by **enumeration order**:
-
-```java
-for (int i = 0; i < codecs.size(); i++) {
-    output.accept(((CodecEntry) codecs.get(i)).type, i);
-}
-```
-
-So a packet's ID = its zero-based position in that `.addPacket(...)` chain.
-The five registration files are:
-
-- `net/minecraft/network/protocol/handshake/HandshakeProtocols.java`
-- `net/minecraft/network/protocol/status/StatusProtocols.java`
-- `net/minecraft/network/protocol/login/LoginProtocols.java`
-- `net/minecraft/network/protocol/configuration/ConfigurationProtocols.java`
-- `net/minecraft/network/protocol/game/GameProtocols.java` (PLAY state)
-
-`tools/extract_packet_ids.py` parses these five files directly out of the
-sources jar with a regex (matches the `VAR = ProtocolInfoBuilder.xProtocol(...)`
-assignment, then every `.addPacket(TYPE, ...)` / `.withBundlePacket(TYPE, ...)`
-call inside it, in source order) and writes the resulting id<->name table to
-`minebot/protocol/packets_775.json`. Re-run it any time the sources jar is
-regenerated (e.g. after bumping to a newer game version):
-
-```bash
-python3 tools/extract_packet_ids.py
-```
-
-Result: 256 packets across 5 states (handshake: 1, status: 2+2, login: 5+6,
-configuration: 10+19, play: 69 serverbound + 141 clientbound). Spot-checked
-against manual reading of the source — matches exactly (e.g.
-`SERVERBOUND_CHAT` = id 9, `CLIENTBOUND_KEEP_ALIVE` = id 44,
-`CLIENTBOUND_SYSTEM_CHAT` = id 121 in PLAY).
-
-### New-to-us protocol element found in 26.1.2
-
-A "Code of Conduct" acceptance step was added to the CONFIGURATION phase,
-not present in any protocol version predating this session's knowledge:
-
-- `ClientboundCodeOfConductPacket(String codeOfConduct)` (clientbound)
-- `ServerboundAcceptCodeOfConductPacket` (serverbound, no fields — singleton)
-
-Our client will need to handle this packet (likely: receive it, immediately
-reply with the accept packet) somewhere during the configuration phase or
-the server will presumably stall/kick us. Not yet implemented.
-
-Everything else in the packet inventory (bundle packets, cookies, known-packs
-negotiation, registry data, feature flags, tags, `ServerboundClientTickEndPacket`,
-`ServerboundPlayerLoadedPacket`, chat session/signing packets, etc.) matches
-the shape already established in the 1.20.5-1.21.x line — no other surprises
-found so far.
-
-### Handshake / login wire format (unchanged from vanilla-since-1.7 shape)
-
-- `ClientIntentionPacket(protocolVersion: varint, hostName: string, port: u16, intention: varint)`
-  — `intention` values: STATUS=1, LOGIN=2, TRANSFER=3.
-- `ServerboundHelloPacket(name: string, profileId: uuid)`.
-- `ClientboundLoginCompressionPacket(compressionThreshold: varint)`.
-- Online-mode encryption handshake is byte-for-byte the same shape used since
-  1.7: `ClientboundHelloPacket(serverId: string, publicKey: bytes, challenge: bytes, shouldAuthenticate: bool)`
-  -> client generates AES secret, RSA-encrypts secret+challenge with the
-  server's public key, replies `ServerboundKeyPacket(keybytes, encryptedChallenge)`
-  -> both sides switch to AES/CFB8 (`Connection.setEncryptionKey`, netty
-  `CipherEncoder`/`CipherDecoder` inserted into the pipeline). Nothing new
-  here; quarry/pycraft-era knowledge of this flow still applies directly.
-- Netty pipeline shape in `net.minecraft.network.Connection`: `splitter`
-  (frame-by-length) / `prepender` (length-prefix) with `decompress`/`compress`
-  and `decrypt`/`encrypt` handlers insertable around them — same architecture
-  as every MC version since compression was introduced.
-
-## Auth: real Microsoft online-mode login (working, proven against the live server)
-
-Server is online-mode, so before PLAY we need real Microsoft/Xbox/Minecraft
-auth. **This is fully implemented and has successfully logged into the real
-target server** (`51.81.166.195:60433`, account `ritebot`) end-to-end,
-including the encrypted LOGIN handshake, CONFIGURATION, and receiving real
-chat messages in PLAY.
-
-### The client-ID saga (read this before touching minebot/auth/msa.py)
-
-The obvious approach — reuse `prismarine-auth`'s (mineflayer's underlying
-auth library, and therefore mindcraft's) hardcoded Azure AD client id
-`389b1b32-b5d5-43b2-bddc-84ce938d6737` (originally from a third-party tool,
-Office365APIEditor) — **is dead**: Microsoft returns
-`AADSTS700016: Application ... was not found in the directory`, meaning
-that app registration has been deleted/deregistered since prismarine-auth's
-code was written. Verified live, not assumed.
-
-Investigated what mindcraft/mineflayer *actually* use: their default (no
-`flow` specified to prismarine-auth's `Authflow`) is the `msal` flow with
-that same dead client id — so mindcraft's own default auth is currently
-broken too, for the identical reason, unless a user supplies their own
-`authTitle`.
-
-The fix: prismarine-auth also documents a `live` flow
-(`docs/API.md`/`LiveTokenManager.js`) that authenticates against the legacy
-`login.live.com` device-code endpoints using one of Microsoft's own
-**official product Title IDs** (`prismarine-auth`'s `Titles` export) rather
-than a self-registered Azure app — these can't go stale the way a
-third-party registration can, since Microsoft controls them directly.
-Critically, **`Titles.MinecraftJava` (`00000000402b5328`) does NOT work
-with the `live` flow's device+title-token dance** (prismarine-auth's own
-docs are explicit that `MinecraftJava` only works with the separate `sisu`
-flow) — we hit this directly: using the Java title ID here made
-`title.auth.xboxlive.com/title/authenticate` reject our device token with a
-bare `400 {}`. Switching to **`Titles.MinecraftNintendoSwitch`
-(`00000000441cc96b`) + `DeviceType: "Nintendo"`** (prismarine-auth's own
-documented example for the `live` flow) fixed it immediately. This is *not*
-what mindcraft's default does, but it's a legitimate, documented
-prismarine-auth flow that actually works today with zero user setup
-(no Azure app registration needed).
-
-### The actual working flow (see minebot/auth/msa.py, xbox.py,
-minecraft_services.py, encryption.py, base.py)
-
-1. **MSA device-code**: `POST login.live.com/oauth20_connect.srf`
-   (`client_id=00000000441cc96b`, `scope=service::user.auth.xboxlive.com::MBI_SSL`,
-   `response_type=device_code`) -> `{user_code, device_code, verification_uri, interval, expires_in}`.
-   Show the user `verification_uri` + `user_code`. Poll
-   `POST login.live.com/oauth20_token.srf?client_id=...` with
-   `grant_type=urn:ietf:params:oauth:grant-type:device_code` every
-   `interval` seconds. **Gotcha**: the "still waiting" response
-   (`authorization_pending`) comes back as **HTTP 400**, not 200 — check the
-   JSON `error` field regardless of status code, don't treat 400 as fatal.
-   Also carry the devicecode response's `Set-Cookie` cookies through to the
-   polling requests (login.live.com ties the device-code session to them).
-2. **Xbox device token**: `POST device.auth.xboxlive.com/device/authenticate`,
-   `DeviceType: "Nintendo"`, `Version: "0.0.0"`, random `Id`/`SerialNumber`
-   UUIDs, signed (see below) -> device token.
-3. **Xbox title token**: `POST title.auth.xboxlive.com/title/authenticate`,
-   `RpsTicket: "t=" + msa_access_token`, `DeviceToken: <device token>`,
-   signed -> title token. (This step is what rejected the wrong title ID.)
-4. **Xbox user token**: `POST user.auth.xboxlive.com/user/authenticate`,
-   `RpsTicket: "t=" + msa_access_token` (note: `"t="` preamble for a Title-ID
-   /`live`-flow token; a real Azure-app/`msal`-flow token would use `"d="`
-   instead — mixing these up produces a cryptic auth failure), signed ->
-   user token.
-5. **XSTS**: `POST xsts.auth.xboxlive.com/xsts/authorize` with
-   `UserTokens: [user_token]`, `DeviceToken`, `TitleToken`,
-   `RelyingParty: "rp://api.minecraftservices.com/"`, signed -> XSTS token +
-   `uhs` (user hash).
-6. **Request signing** (steps 2-5 all need this): every Xbox Live call must
-   include an `ES256` (P-256 EC) keypair-derived JWK as `"ProofKey"` in the
-   payload, and a base64 `"Signature"` header computed over
-   `policy_version(i32 BE) + \x00 + windows_epoch_timestamp(u64 BE) + \x00 +
-   "POST\x00" + url_path_and_query + "\x00" + "\x00" (empty auth token) +
-   body + "\x00"`, signed with ECDSA/SHA-256 over that byte string, with the
-   raw (r || s, 32 bytes each) signature — not DER — appended after a
-   4-byte policy version + 8-byte Windows-epoch timestamp header. Windows
-   epoch = Unix epoch + 11644473600 seconds, in 100ns ticks
-   (`* 10_000_000`). Skipping this makes Xbox Live reject every request.
-7. **Minecraft Services login**: `POST api.minecraftservices.com/authentication/login_with_xbox`,
-   `identityToken: "XBL3.0 x=" + uhs + ";" + xsts_token` -> Minecraft access
-   token.
-8. **Profile fetch**: `GET api.minecraftservices.com/minecraft/profile`,
-   `Authorization: Bearer <mc access token>` -> `{id, name}` (UUID +
-   username). A 404 here can mean several different things (no
-   entitlement, entitlement present but no Java username set yet at
-   minecraft.net, or — rarely — a very fresh purchase/rename not yet
-   propagated); **always surface the actual response body** rather than
-   assuming which, see "debugging notes" below.
-9. **Session join**: on receiving `ClientboundHelloPacket` (empty
-   `serverId` string in this protocol version — that's normal, not a bug),
-   compute the Mojang server hash (`sha1(serverId_latin1_bytes + shared_secret
-   + server_public_key_der)`, then Java `BigInteger(digest).toString(16)`
-   semantics: two's-complement signed interpretation of the 20 hash bytes,
-   formatted as hex with a leading `-` for negative values — cross-checked
-   against real `java.math.BigInteger` output, see `tests/test_encryption.py`),
-   then `POST sessionserver.mojang.com/session/minecraft/join` with
-   `{accessToken, selectedProfile: <dashless uuid>, serverId: <hash>}`
-   before replying with `ServerboundKeyPacket`.
-10. **Encryption**: RSA (PKCS#1 v1.5, Java's default `Cipher.getInstance("RSA")`)
-    -encrypt a fresh 16-byte (AES-128) secret and the server's challenge with
-    its public key, send `ServerboundKeyPacket(encrypted_secret,
-    encrypted_challenge)`, then switch the connection to AES/CFB8 (IV = the
-    secret itself) both directions.
-
-None of steps 1-10 are protocol-version-specific — this is the same flow
-every modern MC client/library uses — but it took real investigation to get
-right (see the client-ID saga above and the debugging notes below).
-
-### A real bug we hit and fixed: CONFIGURATION-phase keepalive/ping
-
-First full live run got all the way through LOGIN and well into
-CONFIGURATION (client info sent, custom payload/feature-flags/known-packs/~25
-registry-data chunks/tags all received correctly), then died with a clean
-EOF a few seconds later. Turned out: the server sends `CLIENTBOUND_KEEP_ALIVE`
-and `CLIENTBOUND_PING` during CONFIGURATION too, not just PLAY, and our
-keepalive/ping handling only existed in the PLAY loop
-(`minebot/bot/play_loop.py`) — CONFIGURATION-phase keepalives were silently
-ignored, and the server disconnected us for not responding. Fixed by making
-`minebot/protocol/keepalive.py`'s functions take an explicit `state`
-parameter (packet IDs differ between CONFIGURATION and PLAY) and wiring
-keepalive+ping handling into `run_configuration_phase` too. Regression-tested
-in `tests/test_configuration_flow.py` and `tests/test_keepalive.py`.
-
-### Debugging notes / how we found all this
-
-- Ran the bot for real with `2>&1 | tee /tmp/some.log` so output could be
-  read back after the fact — much more effective than relaying terminal
-  output by hand.
-- Added (then, once things worked, trimmed back to `logging.debug`) explicit
-  logging at every step of LOGIN/CONFIGURATION — this is what let us see
-  exactly which packet type preceded a disconnect, rather than guessing from
-  a bare `IncompleteReadError`.
-- `IncompleteReadError: 0 bytes read on N expected` = the peer closed the
-  TCP connection cleanly (EOF), not a decode/decryption bug (which would
-  instead produce garbage bytes or a length-prefix that doesn't make sense).
-  Useful signal for distinguishing "our crypto is wrong" from "something else
-  made the server hang up on us."
-- When something looks like our code's fault, check the *server's* logs too
-  if available — its Netty encoder error
-  (`Sending unknown packet 'clientbound/minecraft:disconnect'`,
-  `IdDispatchCodec.encode`) looked like a server-side crash at first, but was
-  actually the server trying (and failing, due to being mid-teardown) to
-  send a disconnect reason after the client side was already closed — a
-  process-killed-by-user artifact, not a real bug.
-- Cross-check crypto/algorithm implementations against real reference
-  output when possible instead of trusting memorized "known" values: we
-  initially had a wrong set of "known" server-hash test vectors (fabricated
-  from memory) that made a *correct* implementation look broken. Recomputed
-  the same test cases with actual `javac`/`java` (`java.math.BigInteger`)
-  locally and confirmed the Python implementation matched exactly.
-- Mojang's public, no-auth profile lookup
-  (`https://api.mojang.com/users/profiles/minecraft/<name>`) is a useful,
-  independent way to check whether a username has actually propagated on
-  Mojang's backend, decoupled from our own OAuth chain.
-
-## Movement + follow-player
-
-Implemented `!forward`/`!backward`/`!left`/`!right(distance=1.0)`,
-`!follow` (or `!follow("name")`), and `!stop` (cancels an active follow).
-
-Every command handler's signature is `(conn, sender, *args)` --
-`run_play_loop` now calls `commands.dispatch(text, conn, sender)` where
-`sender` is the speaking player's UUID (from `PlayerChatMessage.sender`) for
-player chat, or `None` for system chat. `!follow` uses this: with no
-argument it targets whoever typed the command (via `EntityTracker.find_by_uuid`
-on the sender directly, no name lookup needed at all); `!follow("name")`
-still works by resolving the name through the tab-list mapping
-(`EntityTracker.name_to_uuid`) first. Following by UUID directly (rather
-than requiring a name) is strictly more robust, since it works even for
-players not yet seen in a `ClientboundPlayerInfoUpdatePacket`.
-
-### Verified live, with two real bugs found and one fixed
-
-Tested against the real target server: sign-in (using the cached refresh
-token -- see below), login, `!follow` typed by another player, and the bot
-visibly followed. Two issues surfaced:
-
-1. **Movement looked jerky** -- `FOLLOW_STEP_INTERVAL_SECONDS` was 0.5s with
-   a flat 1.0-block step, i.e. ~2 blocks/sec in visibly discrete jumps.
-   Fixed: tick interval down to 0.15s, step distance scaled to match
-   vanilla's real walk speed (`4.317 blocks/sec * interval`) instead of a
-   fixed distance, so it now moves in smaller, more frequent increments that
-   read as continuous walking rather than teleport-stepping.
-2. **Y-axis / no jumping** -- our follow logic only ever moves in the (x, z)
-   plane; `self.y` is never touched after the initial position sync. When
-   the user walked to a lower Y level, the bot kept following in x/z at its
-   old Y and visibly floated in the air; walking to a higher Y (a 1-block
-   step-up) produced no jump attempt at all, since we have no concept of
-   ground height or block collision. **Not fixed this session** -- see
-   "Why this needs real pathfinding" below for why it's not a quick patch.
-
-### Why this needs real pathfinding (mineflayer-pathfinder), not a quick fix
-
-Checked how mindcraft actually handles this: it doesn't implement
-follow/movement logic itself at all. `skills.followPlayer()` /
-`skills.goToPlayer()` (`src/agent/library/skills.js`) are thin wrappers
-around `bot.pathfinder.setGoal(new pf.goals.GoalFollow(player, distance), true)`
--- the entire pathfinding/physics subsystem is `mineflayer-pathfinder`, a
-separately-maintained library, not something mindcraft wrote.
-
-Pulled `mineflayer-pathfinder@2.4.5`'s actual source to gauge real porting
-effort: core logic is ~2300 lines across `astar.js` (125, generic A* --
-portable as-is, no block data needed), `heap.js` (81, binary heap for the
-open set), `goals.js` (492, goal definitions like `GoalFollow`/`GoalNear`),
-`movements.js` (663, **the actual blocker** -- computes neighbor
-moves/costs by querying real block state: is this solid, diggable, a
-liquid, dangerous (lava/cobweb), climbable, etc., which requires both (a)
-parsed chunk/block data, which we don't have -- `ClientboundLevelChunkWithLightPacket`
-is entirely unparsed right now -- and (b) a block-registry data source
-(block properties by ID/state) equivalent to Node's `minecraft-data`
-package, which doesn't exist for `26.1.2` either, though the raw registry
-IDs are in `CLIENTBOUND_REGISTRY_DATA`, which we currently only drain, not
-decode), and `physics.js`/`move.js` (~140, jump/fall/step timing based on
-real per-tick velocity simulation).
-
-`astar.js` and `goals.js` are genuinely portable now with no new
-dependencies. The real prerequisite work, in order, is:
-1. Parse `ClientboundLevelChunkWithLightPacket`'s paletted-container block
-   format (a bit-packed per-section block-state array with a small local
-   palette -- a well-documented but nontrivial encoding) -- OR, as a
-   cheaper first step, just decode the packet's **heightmaps**
-   (`Map<Heightmap.Types, long[]>`, already precomputed server-side per
-   (x,z) column) to answer "what's the ground height here" without needing
-   full block-type data at all. Good enough for basic walk/step-up/fall
-   movement; not enough for real A* around obstacles (needs full block
-   solidity, not just height).
-2. A minimal block-registry lookup (from `CLIENTBOUND_REGISTRY_DATA`) if/when
-   full `movements.js`-equivalent cost modeling is wanted.
-3. Port `physics.js`/`move.js`'s jump-timing logic against our own tick loop.
-4. Port `movements.js`'s neighbor/cost model once (1)+(2) exist.
-5. Port `astar.js`+`heap.js`+`goals.js` (already portable, just needs (4)
-   to call into).
-
-Decided to land the tick-rate fix now (self-contained, already done above)
-and treat the chunk-parsing foundation as its own dedicated follow-up
-rather than half-wiring jump physics on top of no block data.
-
-### Step (1) done: heightmap-based ground-height tracking (minebot/protocol/chunks.py)
-
-Implemented the "cheaper first step" from the plan above: parses
-`ClientboundLevelChunkWithLightPacket`'s **heightmaps** only (not the raw
-per-section paletted block buffer that follows them in the packet --
-deliberately not parsed, and not needed for this). This answers "what's
-the ground height at (x, z)" without needing full block-type data.
-
-Key implementation details, all cross-checked against the decompiled source
-rather than assumed:
-- Heightmap bit-packing (`net.minecraft.util.SimpleBitStorage`): 256
-  entries (16x16 columns), `bits`-wide fields, `valuesPerLong = 64 // bits`
-  values per `long`, entry `index` at `data[index // valuesPerLong]`, bit
-  offset `(index % valuesPerLong) * bits`. The class's actual division
-  logic uses a lookup-table "magic number" multiply-shift optimization
-  (for fast non-power-of-2 division), which is mathematically identical to
-  plain integer floor division -- didn't need to replicate the optimization
-  itself, just its semantics.
-- `bits = ceil(log2(dimension_height + 1))`, where `dimension_height` is
-  part of the dimension-type registry data we don't parse (part of
-  `CLIENTBOUND_REGISTRY_DATA`). Rather than hardcode a specific dimension's
-  height, `bits` is reverse-derived from the observed heightmap `long[]`
-  array's length (`_infer_bits_from_long_count`), which is unambiguous for
-  any realistic Minecraft world height (bits 1-10, i.e. heights up to 1023
-  blocks -- verified this holds; it stops being unique somewhere past
-  `bits=10`, but no real dimension is anywhere near that tall).
-- The stored raw value means `getFirstAvailable` (first empty Y above the
-  ground) when added to `min_y`, **not** the topmost solid block itself --
-  confirmed via `Heightmap.getFirstAvailable`/`getHighestTaken` in the
-  decompiled source (`getHighestTaken = getFirstAvailable - 1`). Our
-  `ground_height_at()` returns the highest solid/matching block's Y
-  (`getHighestTaken` equivalent); a player's feet rest one block above that.
-- `min_y` itself is also dimension-registry data we don't parse; defaults
-  to `-64` (the standard modern overworld since the 1.18 height expansion).
-  Wrong for the Nether (`min_y=0`), a custom dimension, or pre-1.18 world
-  format -- acceptable for now since we're only using this to follow a
-  player who's presumably also in the overworld.
-
-`ChunkHeightmapCache` holds `(chunk_x, chunk_z) -> ChunkHeightmap` and
-answers `ground_height_at(world_x, world_z)`, handling negative-coordinate
-chunk/local-index math correctly (Python's `>>`/`&` on negative ints already
-give the right floor-division/modulo semantics here, verified explicitly
-rather than assumed). Wired into `run_play_loop` (feeds
-`ClientboundLevelChunkWithLightPacket`s in); still built and fed every run
-as useful groundwork for future pathfinding work, but **not currently used
-by `MovementController`** -- see the correction below for why.
-
-**Correction from live testing**: the first version of the follow fix
-snapped `self.y` to `ChunkHeightmapCache.ground_height_at()` every tick.
-Live testing surfaced a real bug this approach can't solve: standing
-indoors under a roof, the bot teleported *up to the roof* instead of
-matching the player's actual (lower, indoor) Y. The reason is structural,
-not a parsing bug: `MOTION_BLOCKING` heightmaps only ever store the single
-highest solid/liquid block in an entire (x,z) column -- they have no way
-to represent "the floor under whatever's above it." Any player standing
-under a roof, overhang, or upper floor will always resolve to the
-roof/ceiling's height, never the floor they're actually standing on.
-
-Fixed by switching the follow loop's Y-source from the heightmap to the
-**target's own tracked Y** (`EntityTracker`'s `TrackedEntity.y`, fed by
-`AddEntity`/`TeleportEntity`/`EntityPositionSync`/`MoveEntity` -- see the
-entity-tracking section above). This has no such ambiguity: it's simply
-wherever the server says the target actually is, indoors or out.
-`MovementController._step_toward_target_height()` ramps `self.y` toward
-`target.y` by at most `FOLLOW_MAX_VERTICAL_STEP` (1.2 blocks) per tick,
-rather than snapping instantly -- also fixes a related complaint from live
-testing ("it's just teleporting to the target Y").
-
-One more bug caught while fixing this: the follow loop's original
-structure gated *all* per-tick updates (both x/z movement and the Y step)
-behind "are we still further than `FOLLOW_STOP_DISTANCE` away
-horizontally?" -- meaning once the bot was standing right next to the
-target, it would stop reacting entirely, including to a pure vertical
-difference (e.g. the target hopping onto a ledge right beside the bot).
-Fixed by decoupling the two: horizontal movement is still gated on
-distance, but the Y step now runs independently whenever `target.y !=
-self.y`, even with zero horizontal distance left to close.
-
-Net effect: `ChunkHeightmapCache`/heightmap parsing remains implemented,
-tested, and wired into the PLAY loop (it's real, correct groundwork for
-when full pathfinding is eventually built and needs terrain-height
-estimation for *unvisited* columns where no live entity position exists)
-but is not currently consulted for following a tracked player, since that
-player's own reported position is always the better signal. Steps (2)-(5)
-from the plan above (block-registry lookup, real jump timing, the
-movements cost model, and A*) remain unimplemented. This still isn't real
-physics: no jump animation, no "too high to climb" detection, and the
-server may reject/correct a position that isn't a plausible single step
-from where it last placed us -- not yet observed/handled.
-
-### Our own position: ClientboundPlayerPositionPacket
-
-Field layout: `id: varint` (a teleport id, echoed back), then
-`PositionMoveRotation` = `position: Vec3(f64,f64,f64)`,
-`deltaMovement: Vec3(f64,f64,f64)` (present on the wire but unused by us),
-`yRot/xRot: f32`, then `relatives: Set<Relative>` as a **raw i32 bitmask**
-(not a varint -- `Relative.SET_STREAM_CODEC` uses `ByteBufCodecs.INT`), bit N
-= `Relative` enum ordinal N (`X=0, Y=1, Z=2, Y_ROT=3, X_ROT=4, ...`). Each
-axis is either an absolute value or an offset added to our last known
-value, per whether its bit is set -- in practice vanilla servers send an
-all-absolute sync on spawn/teleport. We must reply with
-`ServerboundAcceptTeleportationPacket(id: varint)`, echoing the same id, or
-the server disconnects us for not acknowledging the teleport (same
-"unacknowledged packet" pattern as the CONFIGURATION-phase keepalive bug
-above -- always check whether a clientbound sync/state-change packet
-expects an ack).
-
-Movement is sent via `ServerboundMovePlayerPacket.PosRot`
-(`x,y,z: f64, yRot,xRot: f32, flags: u8` where bit0=onGround,
-bit1=horizontalCollision) with our tracked position updated locally first
--- the server trusts client-reported positions within reason (anti-cheat
-notwithstanding) rather than us waiting for a round-trip confirmation per
-step.
-
-Yaw-to-direction math is standard vanilla convention: yaw 0 faces +Z, and
-walking "forward" moves along `(-sin(yaw), cos(yaw))` in the (x, z) plane;
-this hasn't changed across versions and is the same math every Minecraft
-bot library uses.
-
-### Tracking other entities/players: minebot/protocol/entities.py
-
-`!follow` needs another player's live position. Building this required
-more than one packet:
-
-- `ClientboundAddEntityPacket`: gives `(entity_id, uuid, x, y, z)`. We
-  deliberately do **not** decode the `type` field (a registry-ID varint) --
-  matching purely on `uuid` avoids needing to parse
-  `CLIENTBOUND_REGISTRY_DATA` (currently just drained, not interpreted) to
-  know which registry ID corresponds to "player."
-- `ClientboundRemoveEntitiesPacket`: varint-prefixed list of entity ids to
-  drop from tracking.
-- `ClientboundTeleportEntityPacket` / `ClientboundEntityPositionSyncPacket`:
-  both share an `(id: varint, PositionMoveRotation, ...)` prefix giving an
-  absolute position -- simpler than the delta-based move packets below.
-- `ClientboundMoveEntityPacket.Pos`/`.PosRot`: relative position updates
-  using the classic **fixed-point delta encoding** unchanged since ~1.8:
-  `xa/ya/za: i16`, each unit = 1/4096 of a block. Must be accumulated onto
-  the entity's last known absolute position (from AddEntity or a
-  teleport/sync packet), not treated as absolute.
-- `ClientboundPlayerInfoUpdatePacket`: the trickiest one -- gives
-  username<->UUID (needed to resolve a name typed in `!follow("name")` to
-  an entity). Its wire format is `actions: EnumSet<Action>` as a
-  **fixed-size bitset** (`ceil(8 actions / 8) = 1 byte`, LSB-first per
-  `BitSet.valueOf`), then a varint-prefixed entry list where **each entry's
-  field layout depends on which actions are active** (every active action
-  contributes one field, in the action enum's declared order, not
-  necessarily UUID-then-name-then-whatever). We parse `ADD_PLAYER`'s
-  `(name: string, GameProfileProperties)` pair for the name, but must still
-  correctly consume every other active action's bytes (latency varint,
-  listed bool, a nullable chat-session record with a nested nullable
-  `ProfilePublicKey.Data`, a nullable NBT Component for display name, etc.)
-  or the next entry's fields desync. Two bugs caught during this: (1) a
-  `ProfilePublicKey.Data`'s `expiresAt` is a **plain i64 epoch-millis**
-  (`FriendlyByteBuf.readInstant` = `Instant.ofEpochMilli(readLong())`), not
-  i64-seconds+i32-nanos as commonly assumed from other serialization
-  formats; (2) `readNullable`'s wire shape is a plain bool prefix (true =
-  value follows), which is easy to get right but easy to forget to apply
-  consistently across every nullable sub-field.
-
-`EntityTracker` (in `minebot/protocol/entities.py`) holds `by_id: {entity_id
--> position}` and `name_to_uuid`, fed by `apply_entity_packet()` from the
-PLAY loop; `MovementController.follow()` (in `minebot/bot/movement.py`)
-runs a background `asyncio.Task` that polls the tracker every
-`FOLLOW_STEP_INTERVAL_SECONDS` (0.15s, see the tick-rate fix above) and
-steps toward the target's last known position, stopping within ~2 blocks;
-`!stop` cancels that task.
-
-## Death and respawn (minebot/protocol/health.py)
-
-Found via live testing: a baby zombie killed the bot, and it never
-recovered -- died server-side and just sat there indefinitely. Even a
-subsequent `/tp` from another player didn't make it visibly reappear,
-which makes sense in retrospect: a dead player that never requests respawn
-isn't a normal tickable/visible entity to other clients, so nothing we did
-afterward (including moving our internally-tracked x/y/z, which we kept
-right on updating) would show up in-game. This is why the bot could
-"report it's with you" while being invisible: our process-local state
-(`MovementController.x/y/z`) never knew anything was wrong, only the
-server-side entity did.
-
-Implemented in `minebot/protocol/health.py`:
-- `CLIENTBOUND_LOGIN` (the PLAY-phase spawn packet -- distinct from the
-  LOGIN-state's `CLIENTBOUND_LOGIN_FINISHED`, and previously entirely
-  unparsed by us): its first field is `playerId: i32`, our own entity ID.
-  We now capture this in `run_play_loop` as `own_entity_id`.
-- `CLIENTBOUND_PLAYER_COMBAT_KILL`: `playerId: varint, message: Component`
-  (message not parsed -- we don't need the death message text). This
-  packet fires for **any** player's death broadcast visible to us, not
-  just our own -- confirmed via the decompiled client's own
-  `handlePlayerCombatKill`, which only reacts
-  `if (packet.playerId() == this.minecraft.player's entity id)`. We do the
-  same comparison against our tracked `own_entity_id` before reacting;
-  regression-tested in `tests/test_play_loop.py` (someone else's death is
-  a no-op, ours triggers a respawn request).
-- On our own death: send `SERVERBOUND_CLIENT_COMMAND` with
-  `action=PERFORM_RESPAWN` (0) -- mirrors the real client's
-  `shouldShowDeathScreen()`-false branch (we have no UI, so we always
-  respawn immediately rather than waiting on user input we can't receive).
-- `CLIENTBOUND_RESPAWN` arrives once the respawn completes; not parsed
-  (it carries spawn info but no position -- the fresh position always
-  arrives separately via the `ClientboundPlayerPositionPacket` handling we
-  already had), just used as a signal.
-- Both the death and the respawn events call
-  `MovementController.mark_position_stale()`, which clears `has_position`
-  (our tracked x/y/z is from wherever we died, not the new spawn point --
-  every movement command already guards on `has_position` and raises if
-  it's false) and cancels any in-progress `!follow` task (continuing to
-  chase someone using stale pre-death coordinates would be actively wrong).
-
-**Correction from a second round of live testing**: the first version only
-listened for `CLIENTBOUND_PLAYER_COMBAT_KILL`. A real death was still
-missed entirely (no respawn log line at all) -- turns out `COMBAT_KILL` is
-not sent for every death path; the decompiled client's actual death
-detection lives in `Minecraft.java`'s own per-tick game loop, which polls
-`player.isDeadOrDying()` (`health <= 0`, set from
-`ClientboundSetHealthPacket` via `hurtTo()`) every frame, entirely separate
-from any death-message packet. Fixed by triggering respawn from
-`CLIENTBOUND_SET_HEALTH` reaching `health <= 0` as well (matching what the
-real client actually does), keeping `COMBAT_KILL` as a second, harmless
-trigger for the same death. Guarded with an `awaiting_respawn` flag in
-`run_play_loop` so receiving both signals for one death (a real
-possibility) sends exactly one `PERFORM_RESPAWN`, not two -- regression
-tested in `tests/test_play_loop.py` alongside a health-only-death test.
-
-## Robustness gaps found from "the bot went silent after !follow" (third live-testing round)
-
-After the health-based respawn fix, the bot respawned correctly and became
-visible, but then went silent: `!follow` was typed three times across the
-session, no movement was ever observed, and the log simply stopped
-producing lines after the last `!follow` (no traceback, no further
-activity logged). Two real bugs, found by inspection since the exact
-runtime cause couldn't be reproduced/confirmed live in the moment:
-
-1. **`MovementController._follow_loop` had two silent-forever-idle paths**:
-   if `has_position` was `False` (e.g. right after a respawn that hasn't
-   yet gotten a fresh `ClientboundPlayerPositionPacket`) or the target
-   wasn't in `EntityTracker` (e.g. out of range, or a lookup gap), the loop
-   just `continue`d forever with zero logging -- indistinguishable from
-   "working but nothing to do" versus "stuck". Fixed: both conditions now
-   log a one-time `logging.warning` (re-armed once the condition clears),
-   so a stuck follow is now visible in the log instead of silent.
-2. **`CommandRegistry.dispatch()` had no exception handling around the
-   handler call at all.** Since `run_play_loop` awaits `dispatch()` inline
-   inside its main `while True: read_packet()` loop (the same loop that
-   answers every keepalive), an uncaught exception from *any* command
-   handler -- not just movement -- would propagate out of `dispatch`,
-   out of `run_play_loop`, and kill the entire read loop silently (no
-   traceback would even reach the log if something upstream swallowed it,
-   e.g. depending on how the process is being supervised). This is a
-   plausible explanation for total unresponsiveness after a single bad
-   command, though it could not be confirmed as *the* cause of this
-   specific incident. Fixed regardless, since it's a real gap either way:
-   `dispatch()` now catches and logs (`log.exception`) any handler
-   exception rather than propagating it, so a bug in one command can never
-   take down chat responsiveness or keepalive handling.
-
-Also added: a `position sync: (x, y, z) yaw=...` log line for every
-`ClientboundPlayerPositionPacket` (previously silent), so a future
-"is our position actually updating" question can be answered directly from
-the log rather than inferred.
-
-Net effect: even if the exact trigger for this incident is never fully
-pinned down, the system can no longer fail silently in either of these two
-ways again.
-
-**Root cause found (first incident)**: with the new logging in place,
-`!follow` consistently logged
-`follow(...) idling: target not found in entity tracker` right after
-`!follow` was typed. Added `MINEBOT_LOG_LEVEL=DEBUG` (env var, read in
-`main.py` -- see `.env.example`) to log every
-`CLIENTBOUND_ADD_ENTITY`/`CLIENTBOUND_REMOVE_ENTITIES`/
-`CLIENTBOUND_PLAYER_INFO_UPDATE` seen.
-
-**Follow-up round with debug logging on**: `!follow` worked, but the user
-reported it "freezes for some seconds, then works again," and noticed it
-correlated with losing line of sight. The debug log explains this
-precisely: `CLIENTBOUND_REMOVE_ENTITIES` fired **161 times** in a single
-session (alongside 308 `ADD_ENTITY`s), i.e. the server is actively
-removing and re-adding the target's entity from our view repeatedly as
-they move (out of render distance, or possibly server-side occlusion/
-visibility culling -- both plausible, not distinguished). This is expected
-protocol behavior, not a bug: `EntityTracker.handle_remove_entities` and
-`MovementController._follow_loop`'s "target not found" idle-and-retry
-already handle this exactly as intended -- the "freeze" the user saw *is*
-the idle period, and it self-recovers via the warning-then-clear logic
-already in place once a fresh `AddEntity` arrives, matching what was
-observed live. No further fix needed for this specific behavior; it's an
-inherent limitation of following-by-last-known-position without real
-pathfinding/prediction (see "Why this needs real pathfinding" above) --
-during a visibility gap we simply don't know where the target is, so
-idling is the only honest option available at this level of implementation.
-
-The original hypothesis (from the very first symptom report, before debug
-logging existed) that `AddEntity` "genuinely never arrived at all" for the
-target turned out to be specific to that earlier session/moment, not a
-structural gap -- once observed with proper logging, `AddEntity` for the
-target does arrive reliably; it also gets removed and re-added
-intermittently as a normal consequence of the server's own entity
-visibility bookkeeping. `MINEBOT_LOG_LEVEL=DEBUG` remains available for
-any future "is entity X being tracked" troubleshooting.
-
-## Why the bot got stuck on stairs: movement authority is client-side (fourth live-testing round)
-
-User reported the bot gets stuck descending stairs while following, and
-correctly guessed the underlying cause before we'd even looked at it: "the
-physics happens on clients and then the Y position resolved is reported to
-the server" -- confirmed exactly right by reading
-`ServerGamePacketListenerImpl.handleMovePlayer` (server) in the decompiled
-source. The server does **not** run its own independent gravity
-simulation and reject movement based on a hardcoded speed limit; instead
-it tracks its own *expectation* of the player's velocity
-(`this.player.getDeltaMovement()`, itself built up over time from the
-player's own prior reported position deltas) and only corrects a reported
-position when it deviates too far from that expectation
-(`movedDist - expectedDist > metersPerTick * deltaPackets`, with a fairly
-generous tolerance -- `metersPerTick=100.0`, i.e. squared distance, so
-~10 blocks/tick of slack). Real clients never trip this because their
-gravity/falling velocity was already being incrementally built up tick by
-tick; our old flat-rate Y ramp (`FOLLOW_MAX_VERTICAL_STEP = 1.2`, snapping
-straight toward the target's Y with zero prior velocity) looked, from the
-server's perspective, like an instantaneous unexplained jump every single
-tick, and got silently corrected back to the old position every time --
-confirmed directly in the debug log: `self=` (our tracked position) was
-frozen at the exact same value across dozens of consecutive follow ticks,
-while `follow sending move:` showed we *were* computing and sending a
-different, lower Y each time -- the server was simply overwriting it back
-via `ClientboundPlayerPositionPacket` before our next tick ran.
-
-Fixed in `MovementController._step_toward_target_height`
-(`minebot/bot/movement.py`) by giving falling real physics instead of a
-flat ramp:
-- **Falling** (target below us): accumulate a real vertical velocity that
-  accelerates by vanilla's actual gravity constant
-  (`LivingEntity.DEFAULT_BASE_GRAVITY = 0.08` blocks per 20Hz game tick,
-  confirmed in the decompiled source) every real game tick our
-  slower follow-loop tick (`FOLLOW_STEP_INTERVAL_SECONDS = 0.15s`, i.e.
-  ~3 real game ticks per follow tick) spans, then apply the resulting
-  displacement. This produces a small, accelerating drop each report --
-  exactly what a real client's own physics would produce -- rather than
-  an arbitrary large jump. Lands exactly on the target Y (no overshoot)
-  and resets velocity to 0 once reached.
-- **Climbing** (target above us): vanilla doesn't need gravity/jump
-  physics for a normal single-step rise -- the player's own step-up height
-  (`LivingEntity.maxUpStep()` / `Attributes.STEP_HEIGHT`, `0.6` blocks) is
-  handled as ordinary walking collision response. So climbing stays a flat
-  per-tick cap (`FOLLOW_MAX_UPWARD_STEP = 0.6`), just renamed/re-scoped
-  from the old single vertical-step constant to make clear it only applies
-  to the upward case now.
-- Switching direction (e.g. landing then needing to climb again) resets
-  `_vertical_velocity` to 0 -- leftover fall speed must not carry into a
-  climb.
-
-**Cross-checked against mineflayer's own physics engine.** At the user's
-suggestion, pulled mineflayer's actual physics dependency
-(`prismarine-physics`, not something mindcraft wrote itself) to verify the
-constants independently rather than relying solely on the decompiled
-source. Its `index.js` confirms, exactly: `gravity: 0.08` (identical to
-`LivingEntity.DEFAULT_BASE_GRAVITY`) and `stepHeight: 0.6` (identical to
-what we used for `FOLLOW_MAX_UPWARD_STEP`) -- both values independently
-corroborated by a mature, production-tested implementation of this exact
-problem. It also revealed a gap in our first pass: prismarine-physics
-applies `airdrag: 1 - 0.02` multiplicatively to vertical velocity every
-tick, immediately after subtracting gravity (`vel.y -= gravity;
-vel.y *= airdrag`) -- meaning falling approaches a **terminal velocity**
-(`gravity / (1 - airdrag) = 0.08 / 0.02 = 4.0` blocks/tick at the limit),
-rather than accelerating without bound. Our first implementation had no
-drag term at all, which is harmless for short stair-height drops (the
-difference is negligible over 1-2 blocks) but would make longer falls
-report implausibly fast velocities. Added `_AIR_DRAG_PER_GAME_TICK = 0.98`,
-applied in the same order (gravity subtraction, then drag) each simulated
-game tick; a dedicated test drives the simulation for 2000 ticks and
-confirms velocity converges to within `0.1` of the theoretical `-4.0`
-blocks/tick terminal value rather than growing linearly.
-
-This is still not full physics: no real jump impulse (can't gain upward
-velocity the way pressing space does -- climbing is still just a flat
-per-tick cap, not a jump arc), no collision/terrain awareness beyond the
-target's own reported Y (we don't know if there's a wall or gap between us
-and them), and the server may still reject movement in scenarios not yet
-observed. It should, however, correctly handle ordinary descents (stairs,
-ledges, drops) without getting stuck, which was the actual reported bug.
-
-**Confirmed live**: the gravity fix works when we're already at (or very
-near) the target's (x, z) column -- the debug log showed our reported Y
-correctly descending in small accelerating steps (`102.00 -> 101.54 ->
-100.87 -> ... -> 96.50`, matching the target exactly) and the server
-accepting each step (no reset). But the user found the actual limiting
-case immediately: **if the bot is still some blocks behind the target
-horizontally when the target drops a level, the bot tries to fall to the
-target's new (lower) Y while still positioned over ground/floor that's
-still solid beneath the bot's own (older) (x, z)** -- i.e. we compute
-"fall to Y=96.5" using only the *target's* Y, with zero awareness of
-whether there's actually empty space to fall through at *our own* current
-column. The server (correctly) rejects moving through a solid block, and
-we get stuck oscillating between the fall attempt and the server's
-correction back to solid ground.
-
-This is exactly the boundary already predicted in "Why this needs real
-pathfinding" above: matching a target's raw Y works fine as a *very* naive
-substitute for real navigation as long as the space between wherever we
-currently are and that Y is uniformly open air (or ground, for climbing) --
-which stairs/ledges directly behind the target usually aren't. Fixing this
-properly needs actual per-column, per-block awareness of what's below the
-*bot itself* (not just the target), which is precisely what real chunk
-block parsing (paletted containers, not just the heightmap summary we have
-in `chunks.py`) plus `mineflayer-pathfinder`-equivalent A* pathfinding
-would provide. No further band-aid was attempted here -- see "Why this
-needs real pathfinding" above for the concrete phased plan (chunk block
-parsing -> block-registry lookup -> movements/cost model -> A*), which
-remains the right next step rather than another special-case fix layered
-on top of raw-Y-following.
-
-## Step (1)+(2) done: real per-block chunk parsing + a generated block registry
-
-Picked up the phased plan from "Why this needs real pathfinding" above:
-`chunks.py`'s heightmaps only ever answer "how tall is this column," which
-can't distinguish solid ground from a roof/ceiling and has no idea about
-gaps, overhangs, or what's actually beneath the *bot's own* position (the
-exact gap identified in the previous section). This phase builds the real
-thing: per-(x,y,z) block-state data plus a solid/liquid/climbable lookup
-for each state id.
-
-### Where block-state ids and solidity actually come from (and why that ruled out pure source-parsing)
-
-Investigated (by reading the decompiled source directly, not from prior
-Minecraft-version knowledge, since 26.1.2 postdates training) whether
-block-state ids and their solidity could be statically derived by parsing
-`Blocks.java` text, the same way `tools/extract_packet_ids.py` derives
-packet ids from `*Protocols.java`. They can't, for two different reasons:
-- **IDs**: there's no static table anywhere. `Block.BLOCK_STATE_REGISTRY`
-  (an `IdMapper`) is populated by a static initializer at the bottom of
-  `Blocks.java`: `for (Block block : BuiltInRegistries.BLOCK) { for
-  (BlockState state : block.getStateDefinition().getPossibleStates()) {
-  BLOCK_STATE_REGISTRY.add(state); } }`. The ordering is fully
-  deterministic in principle (block registration order, then each
-  property's declared value order via `StateDefinition`'s
-  `ImmutableSortedMap`-keyed cartesian product), but correctly
-  reimplementing that ordering in Python would mean re-deriving ~70+ block
-  subclasses' exact property sets and Java's sort/cartesian-product
-  semantics -- fragile and easy to get subtly (and silently) wrong.
-- **Solidity**: `BlockBehaviour.Properties` flags (`hasCollision`,
-  `canOcclude`, ...) are real static per-block flags, but the actual
-  *collision shape* used to compute "is this state solid enough to stand
-  on/blocks movement" for irregular blocks (stairs, slabs, fences, walls,
-  ...) is computed by real per-block-class `VoxelShape` geometry
-  (`StairBlock`/`SlabBlock`/etc override `getCollisionShape()`), not a
-  static flag. "Climbable" is a `minecraft:climbable` block-tag membership
-  check, not a per-block field either. None of this is safely
-  re-derivable from source text.
-
-### The fix: dump the real registry from a live dev server, once
-
-Same idea as the packet-id extraction, but since this data can only be
-produced by actually running Minecraft's registry bootstrap (not sitting
-statically in source), it needed a live dump instead of static parsing.
-Added a temporary mod hook to `mods/VillagerHelper` (the same
-26.1.2-pinned Fabric project already used to get decompiled sources) that,
-on `ServerLifecycleEvents.SERVER_STARTED` (fires after registries **and**
-tags are fully loaded -- deliberately not `ModInitializer.onInitialize()`,
-which is too early for tag data), iterates
-`BuiltInRegistries.BLOCK.listElements()`, then each block's
-`getStateDefinition().getPossibleStates()`, and for each real `BlockState`
-object queries `Block.BLOCK_STATE_REGISTRY.getId(state)` (the real id),
-`state.isAir()`, `state.isCollisionShapeFullBlock(EmptyBlockGetter.INSTANCE,
-BlockPos.ZERO)` (solid), `!state.getCollisionShape(...).isEmpty()`
-(has-collision, for future partial-collision blocks like slabs/stairs),
-`!state.getFluidState().isEmpty()` (liquid), and
-`block.builtInRegistryHolder().is(BlockTags.CLIMBABLE)` (ladder), dumping
-all of it to JSON, then immediately `server.halt(false)`. Ran once via
-`./gradlew runServer` (a throwaway local dev world, EULA accepted locally
-for this one-shot data-extraction run -- not a real server), producing
-29,873 block states with sequential ids 0..29872. Spot-checked:
-`minecraft:air`=air/not-solid, `minecraft:stone`=solid, `minecraft:water`
-=liquid/not-solid, `minecraft:ladder`=climbable, `minecraft:oak_stairs`
-(80 property-combination variants)=has-collision but not solid (correctly
-distinguishing "blocks movement partially" from "is a full cube"). The
-temporary mod hook and its one-shot output were then removed from
-`mods/VillagerHelper` (that repo is left clean -- this generator isn't
-kept in-tree there since it's not a repeatable part of the mod, just a
-one-time extraction); the JSON output itself was copied into this repo as
-`minebot/protocol/block_registry_775.json` and is what
-`minebot/protocol/block_registry.py`'s `BLOCK_REGISTRY` loads.
-
-Two Java-API surprises hit while writing the dumper, both fixed by reading
-the decompiled source rather than assuming older-version knowledge still
-applied: `ResourceLocation` has been renamed `Identifier` in this version
-(`ResourceKey.identifier()`, not `.location()`), and there's no
-`BlockState.isLadder()`/`Block.isLadder()` method at all in 26.1.2 --
-climbability is purely a `BlockTags.CLIMBABLE` tag-membership check via
-the block's registry `Holder`.
-
-### Real per-section block-state parsing (`minebot/protocol/chunk_blocks.py`)
-
-Decoded `ClientboundLevelChunkPacketData`'s actual per-section paletted
-block buffer -- the varint-length-prefixed byte buffer that `chunks.py`'s
-heightmap parsing deliberately stops right before. Verified every wire
-detail against the decompiled `PalettedContainer`/`LevelChunkSection`/
-`Strategy`/`LinearPalette`/`HashMapPalette`/`GlobalPalette`/
-`SingleValuePalette` sources rather than assumed from older-version
-knowledge (the exact bit-count thresholds in particular have shifted
-across Minecraft versions historically, so this mattered):
-- Sections are stored back-to-back with **no explicit count on the wire**
-  -- read until the packet's own already-framed block-data buffer is
-  exhausted (mirrors how `LevelChunkSection.write`/`read` really work: no
-  count is ever written, since the real client already knows the
-  dimension's height from registry data we don't parse).
-- Each section: `nonEmptyBlockCount:i16`, `fluidCount:i16` (server-side
-  tick-optimization counters, unused by us), then the block-state
-  paletted container, then the biome paletted container (parsed only
-  structurally, to correctly skip past it -- we have no biome registry
-  and no use for biome data yet).
-- Paletted container: `bits:u8` (a *wire-declared* bit count), then a
-  palette whose shape depends on `bits` **and** which strategy is in use
-  (confirmed these differ for blocks vs biomes, not just a single shared
-  table): `Strategy.createForBlockStates` pads wire bits 1-4 uniformly to
-  a fixed in-memory storage width of 4 (`FOUR_BITS_LINEAR`), stores wire
-  bits 5-8 at their own declared width (the HashMap range), and anything
-  above 8 is `GlobalPalette` (no local palette at all -- packed values
-  are already real global ids). `Strategy.createForBiomes` has no padding
-  and no HashMap range whatsoever: wire bits 1-3 are each stored at their
-  own exact width, with Global starting immediately above 3. Getting this
-  wrong for biomes (which we never even interpret) would still misalign
-  every subsequent byte in the chunk, so `_biome_storage_bits` mirrors the
-  real threshold exactly even though its output is discarded.
-- The packed index/value array itself is a **bare, unprefixed** fixed-size
-  long array (unlike heightmaps' varint-prefixed `LONG_ARRAY`) -- same
-  non-splitting `SimpleBitStorage` bit-packing scheme already relied on in
-  `chunks.py`, just parameterized by whatever `entry_count`/bit-width is
-  in play (4096 entries/16 bits-per-axis-4 for blocks, 64 entries for
-  biomes).
-
-Verified against hand-encoded packets covering all four palette shapes
-(`tests/test_chunk_blocks.py`) rather than only a self-consistent
-roundtrip -- SingleValue, Linear-padded-to-4-bits, HashMap-at-its-own-bit-
-count, and Global-direct all produce independently-checked expected block-
-state ids at specific (x,y,z) positions, plus multi-section stacking and
-world-Y-to-section-index mapping (including out-of-range positions
-correctly returning `None` rather than silently misreading the wrong
-section).
-
-`ChunkBlockCache` (mirrors `ChunkHeightmapCache`'s shape) holds
-`(chunk_x, chunk_z) -> ChunkBlocks` and answers
-`is_solid(world_x, world_z, world_y)` / `block_state_at(...)`, returning
-`None` (not `False`) when the containing chunk hasn't been received yet --
-callers must treat "unknown" as its own state, not conflate it with "air."
-Wired into `run_play_loop`/`main.py` alongside the existing
-`ChunkHeightmapCache`, fed from the same `ClientboundLevelChunkWithLightPacket`
-(each module independently re-parses the packet's shared header, same
-pattern `chunks.py` already used standalone -- simpler than coupling the
-two parsers together for a modest amount of duplicate header parsing).
-
-This cache closed the "we have no idea what's actually at a given block"
-gap; steps (3)-(5) (the actual A* pathfinding) are covered next.
-
-## Steps (3)-(5) done: A* pathfinding (minebot/pathfinding/), wired into follow
-
-Completed the phased plan from "Why this needs real pathfinding": ported
-`mineflayer-pathfinder@2.4.5`'s `astar.js`/`movements.js`/`goals.js` (pulled
-the actual tagged-release source via a git clone at
-`/home/colaila/git/mineflayer-pathfinder`, checked out to the exact `2.4.5`
-tag mindcraft pins, rather than working from memory of what the library
-does) into `minebot/pathfinding/`, and wired the result into
-`MovementController`'s follow loop.
-
-### Deliberately scoped down from the full library
-
-Ported walk/climb/parkour moves only -- **no digging or block placement**.
-Every branch in `movements.js` that breaks or places a block was dropped
-entirely (not stubbed -- the moves that would need them, like widening a
-1-wide gap or 1x1-towering straight up, simply aren't offered as
-neighbors), because minebot has no digging/placement packets implemented
-at all: a "path" that requires placing a block could never actually be
-executed even if A* found one, exactly why mineflayer's own `canDig =
-false` disables the same branches for the same reason. Also dropped:
-entity-avoidance cost weighting and scaffolding-item tracking (both need
-`bot.entities`/inventory data this port has no use for yet). Kept: ordinary
-forward walking, diagonal moves, stepping up/down a single block
-(vanilla's real 0.6-block step height, matching the constant already used
-in `movement.py`'s gravity fix above), dropping into a pit/off a ledge
-(bounded by how far down we actually have block data, since we don't track
-a dimension's real min_y -- see chunks.py), ladder climbing, and
-parkour-style running jumps across 2-4 block gaps (`allowSprinting`).
-
-### Files
-
-- `minebot/pathfinding/move.py`: `Move` -- direct port of `move.js` minus
-  the `toBreak`/`toPlace`/scaffolding bookkeeping fields, which have no use
-  without digging/placing.
-- `minebot/pathfinding/astar.py`: `AStar` -- same g/h/f scoring and
-  closed-set/open-map semantics as `astar.js`, but uses Python's built-in
-  `heapq` instead of porting `heap.js`'s hand-rolled binary heap (`heapq`
-  already gives an equivalent priority queue; reimplementing a custom one
-  would just be more code for the same behavior). `heapq` has no
-  decrease-key operation, so an updated node is pushed as a fresh heap
-  entry and the stale one is detected and skipped on pop via identity
-  comparison against the authoritative `_open_data_map` (whichever entry is
-  the *current* value for a given position hash is the live one; anything
-  else popped later is a stale duplicate).
-- `minebot/pathfinding/goals.py`: only `Goal`, `GoalNear`, and `GoalFollow`
-  ported -- the goal kinds minebot's `!follow` actually needs. The rest
-  (`GoalBlock`, `GoalXZ`, `GoalPlaceBlock`, `GoalLookAtBlock`, composites,
-  ...) aren't used by anything yet; port them when something needs them.
-  `GoalFollow` takes a `get_position` callable rather than holding a live
-  mineflayer-style entity reference, since minebot's `EntityTracker`
-  already owns that state.
-- `minebot/pathfinding/movements.py`: `Movements.get_block` classifies
-  each queried block as `safe`/`physical`/`liquid`/`climbable` using
-  `block_registry.py`'s solid/liquid/ladder flags (instead of
-  prismarine-block/minecraft-data). **A real bug caught by testing, not
-  assumed**: initially classified `safe` as `is_air or is_ladder` only,
-  which made `get_move_forward` refuse to walk into water at all (an
-  isolated test placing a water block one step ahead failed the "still
-  walkable, just costs extra" assertion). Rereading `movements.js` closely:
-  `b.safe = (boundingBox === 'empty' || climbable || carpet) && !avoid` --
-  liquids have no collision box in vanilla (you can swim through them), so
-  they're `'empty'`/safe too, confirmed by `getLandingBlock`'s
-  `blockLand.liquid && blockLand.safe` check (which would be dead code if
-  liquid could never also be `safe`). Fixed by adding `is_liquid` to the
-  `safe` classification. Also: every block query landing in a chunk we
-  don't have data for yet is treated as unsafe/non-physical/unknown rather
-  than optimistically guessed either way -- unlike mineflayer (which always
-  has full world data once a chunk loads), we have no fallback for unknown
-  terrain, and guessing wrong could walk the bot off a ledge just as easily
-  as make it think open space is a wall. "Don't route through the unknown"
-  is the conservative default for a pathfinder whose whole point is not
-  falling through unseen gaps.
-
-### Tests
-
-`tests/test_astar.py` (search mechanics against a trivial synthetic
-graph), `tests/test_goals.py`, `tests/test_movements.py` (cost model
-against synthetic terrain built via the new `tests/pathfinding_fixtures.py`
-helper -- flat ground has all 8 neighbors, a 1-block step is climbable but
-2 blocks is "too high to jump", a 2-tall wall blocks forward movement
-entirely, a drop-down lands on the far floor or correctly returns "no move"
-when no floor exists within the loaded/searched area, unknown chunks are
-conservatively blocked, water costs extra but doesn't block movement), and
-`tests/test_pathfinding_integration.py` (full `AStar` + `Movements` +
-`GoalNear` runs: paths around a pit instead of falling through it, **paths
-down a staircase the bot is behind on** -- the literal reported bug,
-reproduced and fixed -- climbs a single step directly, and correctly
-reports `noPath` when fully walled in).
-
-### Wired into `MovementController._follow_loop`
-
-Added `MovementController.blocks: ChunkBlockCache` (now a required
-constructor arg, threaded through from `main.py`) and
-`_maybe_replan_path`/`_next_waypoint`. Each follow tick, if the target has
-moved far enough from where the last path was aimed (`FOLLOW_REPLAN_DISTANCE
-= 2.0`, mirroring `GoalFollow.hasChanged()`'s role -- avoids rerunning A*
-every single tick for a barely-moving target), (re)computes a path via
-`GoalNear` around the target's current position and steers toward the
-path's next waypoint's (x, y) instead of the target's raw position
-directly. Falls back to the previous raw-target-following behavior (not a
-freeze) whenever pathfinding can't help: no block data under our own feet
-yet, or A* reports `noPath`/no path found -- following imperfectly beats
-not moving at all. The existing gravity-based `_step_toward_target_height`
-is unchanged and still does the actual per-tick Y movement, just now aimed
-at a safe intermediate waypoint instead of the target's raw Y; all the
-gravity/step-height physics work from the previous phase stays exactly as
-useful as before, just correctly targeted now.
-
-**Verified via a real regression test** (`test_follow_uses_pathfinding_to_
-step_down_a_staircase_instead_of_falling_through_ground`, going through the
-actual public `MovementController.follow()` API, not just the standalone
-pathfinding module): given a 3-step staircase and a target standing at the
-bottom, the bot's tracked Y actually descends step by step toward the
-target instead of getting stuck trying to fall through solid ground still
-under its own earlier column -- the exact bug reported from live testing.
-**Attempted live verification -- found a blocker unrelated to pathfinding
-itself.** Connected to the real server and issued `!follow`: A* correctly
-found a real path (3 waypoints) and each follow tick computed a sensible,
-small move toward the next waypoint. But **every single move packet we
-sent was rejected**: the server responded with a fresh
-`ClientboundPlayerPositionPacket` snapping us back to the exact position we
-started at, every tick, with a freshly incrementing `teleport_id` (2, 3, 4,
-5, ... one higher each time) -- confirmed with exact (not rounded) float
-values and the packet's `relatives` bitmask (`0b0`, i.e. a fully-absolute
-resync, not a relative nudge). This happened immediately, from the very
-first follow tick, well within the documented ~10-block/tick server-side
-velocity tolerance (`ServerGamePacketListenerImpl.handleMovePlayer`, see
-above) that should easily allow a walk-speed step -- so this isn't the same
-"implausible jump" mechanism the gravity fix addressed.
-
-This means the *previous* live-tested success ("gravity fix works... server
-accepting each step, no reset") must have differed in some way that
-happened to avoid whatever's rejecting movement now -- worth checking
-whether that earlier test ever actually sent combined X/Z *and* Y movement
-in the same packet, versus only Y changing while already at the target's
-column. Suspect this is real server-side anti-cheat (this is a live
-third-party server, not a vanilla reference instance) requiring a more
-complete client movement pattern than a single absolute position+rotation
-packet per tick -- common anti-cheat plugins (NoCheatPlus/AAC-style) can
-require consistent packet cadence, sprint/sneak state, or rotation-then-
-position ordering that a minimal bot client doesn't replicate. Not
-confirmed; needs dedicated investigation, not more blind guessing against
-a server we can't inspect server-side.
-
-Added slightly better diagnostics for this in `bot/play_loop.py`'s
-position-sync log line (exact float precision, `teleport_id`, `relatives`
-bitmask) to make the next investigation session faster.
-
-**Update: root-caused, not anti-cheat.** A second live-testing round (user
-teleported the bot to an open area and re-tested `!follow`) showed
-horizontal-only following worked perfectly, but the bot got permanently
-stuck the instant it reached an edge where the target had dropped one
-block down -- ruling out a blanket anti-cheat rejection (plain walking was
-never rejected) and pointing at something specific to *diagonal Y-changing
-moves*. The user's own diagnosis, stated before any further investigation:
-"A* is trying to go to the center of each block surface... the line
-between a and b goes through the geometry of a, diagonal movement should
-only be allowed on horizontal movement, not on vertical." Confirmed exactly
-right: `MovementController`'s move execution interpolated (x, z) in a
-straight line while independently ramping y under the hand-rolled gravity
-model from the previous phase, in the *same* move packet -- for a diagonal
-waypoint that changes both axes at once (stepping down a ledge), this
-briefly reports a position that's horizontally still over the block being
-stepped off of while already claiming a lower y, i.e. reporting a position
-inside solid geometry that was never actually vacated. The server correctly
-rejected every such packet.
-
-Two increasingly-targeted patches were tried and both failed for
-instructive reasons before the real fix:
-1. "Never send x/z and y together" -- broke a test where the bot needs to
-   walk a long horizontal distance while also catching up in y (real
-   players do both concurrently, just not through an uncleared corner).
-2. "Only sequence horizontal-then-vertical for the tick that actually
-   crosses into the next column" -- correctly diagnosed as the right
-   *shape* of fix but the user stopped this line of patching directly:
-   "we are monkey fixing stuff, we need to implement physics simulation
-   same as mineflayer-pathfinder, that is proven to work." Considered
-   pivoting further to a real Minecraft client + a Fabric mod as the
-   actual movement executor (Python only doing chat/commands, the mod
-   handling all physics via the real game code) -- a genuinely strong
-   option -- but decided to finish the real physics port first since the
-   AABB primitive and collision-shape data were already most of the way
-   built (see next section for why this was the right call: it fully
-   fixed the live bug).
-
-## Steps (6): real per-tick physics simulation (minebot/physics/)
-
-Completed by porting `prismarine-physics@1.5.2` -- the actual physics
-engine mineflayer-pathfinder relies on for movement execution (its own
-`physics.js` is a thin wrapper that just calls
-`bot.physics.simulatePlayer(state, world)` every tick with control inputs).
-Real Minecraft never blends x/z/y into one straight-line-to-a-point move;
-every real client resolves collision as three separate swept-AABB checks
-per axis, every individual 20Hz game tick. Porting that exactly (rather
-than another hand-tuned approximation) is what actually fixed the live bug.
-
-### Real per-block collision shapes, not just solid/air
-
-`movements.js`'s own cost-model port (previous phase) only needed
-solid/liquid/climbable booleans, but real collision resolution needs the
-*actual* geometry (a slab is a half-height box, stairs are an L-shaped pair
-of boxes, not a full cube) to correctly step onto a half-block slab via
-`STEP_HEIGHT` while still blocking a full stair riser. Extended the same
-one-shot Fabric-mod dump used for the block registry (see "Step (1)+(2)"
-above) to also call each block state's real
-`state.getCollisionShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO).toAabbs()`
-and serialize the resulting box list (`block_registry.py`'s new `shapes`
-field, `(min_x, min_y, min_z, max_x, max_y, max_z)` in block-local 0-1
-coordinates). Verified against known geometry: air has zero boxes, stone is
-exactly `(0,0,0,1,1,1)`, an oak slab's bottom half is `(0,0,0,1,0.5,1)`,
-oak stairs decode to a real two-box L-shape. Regenerated
-`block_registry_775.json` with this data (same throwaway-dev-server,
-temporary-mod-hook, then-clean-up pattern as every other one-shot
-extraction this session -- VillagerHelper's repo stays clean afterward).
-
-### `minebot/physics/aabb.py`
-
-Direct port of `lib/aabb.js`: `compute_offset_{x,y,z}` answer "how far can
-this box actually move by the proposed offset before hitting that one,"
-clamping down when overlapping on the other two axes -- the swept-collision
-primitive everything else sweeps against. Verified against known collision
-scenarios (falling onto solid ground, walking into a wall from both
-directions, non-overlapping boxes are unaffected) rather than just a
-roundtrip test.
-
-### `minebot/physics/simulate.py`
-
-Ports `moveEntity`/`moveEntityWithHeading`/`simulatePlayer` from
-prismarine-physics's `index.js`, deliberately scoped down: walking,
-falling, jumping, step-height climbing (real per-block shapes, so a slab is
-climbable but a stair riser isn't treated as a full block), and ladders.
-Explicitly skipped -- water/lava movement, bubble columns, soul
-sand/honey-block speed modifiers, cobwebs, sneaking edge-detection,
-sprint-jump horizontal boost, potion effects, depth strider -- none of
-which matter yet for a bot that doesn't swim, fight, or use items; add them
-if a real use case needs them rather than porting unused branches
-speculatively. Unknown (unloaded-chunk) blocks are treated as having no
-collision at all, the same conservative tradeoff used everywhere else in
-this codebase for unknown terrain -- we have no better fallback, and
-treating unknown as solid would make the bot refuse to move at the edge of
-loaded terrain entirely.
-
-Verified against real scenarios, not just internal consistency: falling
-lands exactly on a real floor and gravity accelerates correctly tick over
-tick (matching the same constants cross-checked in the previous phase),
-walking on flat ground never leaves the ground, jumping onto a 1-block
-obstacle (too tall to auto-step) traces a real parabolic arc and lands on
-top, walking into a 2-tall wall never clips through it, and -- the first
-real exercise of the new per-block shape data -- climbing a real bottom-half
-oak slab via step-height alone, no jump input, using the actual registry
-geometry rather than a synthetic full-cube stand-in.
-
-### Wired into `MovementController`
-
-Replaced the entire hand-rolled Y-ramp/XZ-interpolation execution with
-`_simulate_toward`: each follow-loop tick, aims yaw at the current waypoint
-(or raw target once the path is exhausted), holds `forward=True` (and
-`jump=True` whenever the aim point is above us), and calls `simulate_tick`
-for exactly as many real 20Hz game ticks as the follow-loop's own interval
-spans (3, at `FOLLOW_STEP_INTERVAL_SECONDS=0.15`) -- mirroring
-mineflayer-pathfinder's own `physics.js` `getController` pattern. `on_ground`
-in the outgoing move packet now comes directly from the simulation's own
-real collision result, not a heuristic. `sync_from_position_packet`
-resyncs the physics state's position and resets velocity/on_ground
-whenever a server-authoritative position arrives (teleport, join, respawn),
-since simulated motion from before that point reflects nothing the server
-actually agreed to.
-
-One subtle, easy-to-get-backwards bug caught before it shipped: matching
-minebot's own yaw convention (0=+z, "forward" = `(-sin(yaw), cos(yaw))`)
-against prismarine-physics's internal convention (`yaw = Math.PI -
-entity.yaw` before computing its own forward vector) requires feeding the
-physics state `atan2(-direction_x, -direction_z)` when aiming at a point --
-the more intuitive-looking `atan2(direction_x, direction_z)` is exactly
-backwards and would make the bot walk directly away from wherever it's
-aiming. Verified numerically (not assumed) before wiring it in.
-
-Test suite updated accordingly: removed the now-obsolete
-`_step_toward_target_height` tests (that method no longer exists; its
-gravity/terminal-velocity/step-height behavior is now covered by
-`test_physics_simulate.py` against the real port) and the
-`test_follow_never_changes_xz_and_y_in_the_same_move_packet_for_a_waypoint`
-test, which encoded the *wrong* invariant (real physics legitimately
-changes x/z and y in the same tick when walking off a ledge -- that's
-correct, collision-resolved behavior, not a bug) -- replaced with a test
-asserting the actual invariant that matters: no reported position is ever
-below the real floor for wherever (x, z) claims to be.
-
-**Confirmed live.** Ran `!follow` continuously for 4+ minutes (~1300 follow
-ticks) across real varied terrain -- the bot climbed (observed
-`on_ground=False` mid-jump, e.g. y=105.25->106.25) and descended (y=102
-down to y=92 over multiple ledges/steps) repeatedly, with correct
-airborne/grounded transitions every step and no recurrence of the
-stuck-at-the-edge symptom (no repeated identical position + incrementing
-`teleport_id` spam anywhere in the log). A second, separate test session
-also ran cleanly; the only thing that looked like "stuck" on closer
-inspection was the bot correctly holding still because the target player
-had also stopped moving nearby, within `FOLLOW_STOP_DISTANCE` -- expected
-behavior, not a bug. User confirmed: "works." This closes out the
-axis-blending bug and the real-physics-simulation phase both.
-
-## Tooling: uv, not raw venv/pip
-
-This project uses `uv` (Astral) for dependency management and running things
-— it's the current modern standard, replaces pip+venv+pip-tools with one
-fast, lockfile-backed tool. `pyenv` is a different concern (manages multiple
-*interpreter* versions side by side) and isn't in use here since one Python
-version is enough for this project.
-
-```bash
-uv sync --extra dev   # creates .venv/, installs all deps incl. pytest/pytest-asyncio
-uv run pytest -q      # run the test suite
-uv run python -m minebot.main   # run the bot, reading config from .env (see below)
-```
-
-`uv.lock` is checked in for reproducibility; regenerate with `uv lock` after
-changing dependencies in `pyproject.toml`.
-
-### Config: .env (gitignored) + .env.example (committed template)
-
-`minebot/config.py`'s `BotConfig.from_env()` calls `python-dotenv`'s
-`load_dotenv()` first, so a `.env` file in the repo root is picked up
-automatically — no need to prefix every invocation with env vars by hand.
-`.env` is gitignored (it holds the real target server address, and will
-hold cached auth tokens if/when that gets added); `.env.example` is the
-committed, documented template to copy from. Vars:
-`MINEBOT_HOST`, `MINEBOT_PORT`, `MINEBOT_USERNAME` (only used in offline
-mode — see below), `MINEBOT_ONLINE_MODE`.
-
-Note on `MINEBOT_USERNAME`: it's **only consumed by `OfflineAuthenticator`**
-(`minebot/main.py`). In online mode it's completely unused — the real
-username/UUID always comes from whichever Microsoft account you sign into
-via the device-code flow at runtime, not this variable. This caused real
-confusion mid-session (tried setting it to an email at one point) — worth
-remembering if it comes up again.
-
-## Repo layout / implementation status as of this session
-
-```
-minebot/
-  protocol/
-    packets_775.json      # generated, see tools/extract_packet_ids.py
-    registry.py            # PacketRegistry: id<->name lookups per state/direction — done, tested
-    handshake.py            # handshake + LOGIN-phase packet (de)serialization — done, incl. ServerboundKeyPacket
-    login_flow.py            # drives socket -> LOGIN -> start of CONFIGURATION, incl. the full
-                              # online-mode encryption handshake — done, proven against the real
-                              # target server (see "Auth" section above)
-    configuration.py         # CONFIGURATION-phase driver — done: sends client info, answers
-                              # keepalive/ping (see "real bug" note above), replies to known-packs
-                              # negotiation with an empty list, auto-accepts the code-of-conduct
-                              # prompt, acks finish-configuration. Drains/ignores everything else
-                              # (cookies, resource packs, registry data, feature flags, tags,
-                              # dialogs, server links) — safe, not required to proceed.
-    chat.py                  # PLAY-phase chat — done: parses ClientboundPlayerChatPacket (reads
-                              # straight to SignedMessageBody.Packed.content, ignores trailing
-                              # fields) and ClientboundSystemChatPacket (NBT component -> text,
-                              # including translatable/"translate"+"fallback"+"with" components,
-                              # not just plain "text" -- see below). Sends outbound chat as
-                              # `/say <msg>` via ServerboundChatCommandPacket (see "Outbound chat"
-                              # section below for why, not real player chat).
-    keepalive.py              # keepalive + ping/pong, parameterized by state (CONFIGURATION and
-                                # PLAY have separate packet-id tables) — done, tested
-    nbt.py                    # minimal network-NBT reader (type byte + payload, no root name,
-                                # per NbtIo.readAnyTag) — only compound/string/list + numeric types,
-                                # enough to pull chat-component fields out. Extend this (don't write
-                                # a second parser) if a later packet needs full NBT (e.g. item
-                                # components, block entity data).
-    movement.py                 # our own position sync (ClientboundPlayerPositionPacket +
-                                 # ServerboundAcceptTeleportationPacket ack) and
-                                 # ServerboundMovePlayerPacket.PosRot sends — done, tested
-    entities.py                  # other-entity/player position tracking (AddEntity/RemoveEntities/
-                                  # TeleportEntity/EntityPositionSync/MoveEntity + PlayerInfoUpdate's
-                                  # name<->uuid mapping) — done, tested. See "Movement + follow-player"
-                                  # section above for the two Instant/nullable-parsing bugs caught here.
-    chunks.py                     # ClientboundLevelChunkWithLightPacket's heightmaps only (not the
-                                   # raw per-section block buffer) — done, tested. ChunkHeightmapCache
-                                   # answers ground_height_at(world_x, world_z); fed by the PLAY loop
-                                   # as groundwork for future pathfinding, but not currently consulted
-                                   # by MovementController -- see "Correction from live testing" in the
-                                   # movement section above for why (heightmaps can't tell a floor
-                                   # under a roof from the roof itself; the target's own tracked Y is
-                                   # used instead).
-    health.py                     # death/respawn — done, tested. Tracks our own entity id (from
-                                   # CLIENTBOUND_LOGIN), requests respawn on our own death (ignores
-                                   # other players' deaths), and tells MovementController to distrust
-                                   # its tracked position until a fresh sync arrives. See "Death and
-                                   # respawn" section above for the live-testing bug this fixes.
-  net/
-    types.py                # VarInt/UTF/UUID/byte-array encode-decode — done, tested
-    connection.py            # framing + zlib compression + AES/CFB8 encryption — done, proven live
-  auth/
-    base.py                  # Authenticator protocol + OfflineAuthenticator (done, tested against
-                              # vanilla's offline-UUID algorithm) + MicrosoftAuthenticator (done,
-                              # proven against the real target server — see "Auth" section above)
-    msa.py                    # MSA device-code flow against login.live.com w/ the Nintendo Switch
-                               # title id — done
-    xbox.py                   # Xbox Live device/title/user/XSTS token exchange + request signing — done
-    minecraft_services.py      # Minecraft Services login + profile fetch — done
-    encryption.py               # server-hash computation (Java BigInteger-compatible, cross-checked),
-                                 # RSA/AES crypto helpers, sessionserver joinServer call — done
-  bot/
-    movement.py               # MovementController — done, tested: forward/backward/left/right
-                               # (yaw-relative walk, tracked position updated locally then sent via
-                               # ServerboundMovePlayerPacket.PosRot), follow(name) (background
-                               # asyncio.Task polling EntityTracker every 0.5s, walks toward the
-                               # target and stops within ~2 blocks), stop() (cancels an active follow).
-    play_loop.py                # PLAY-phase main loop — done: reads packets forever, auto-answers
-                                 # keepalive + ping, syncs our position from ClientboundPlayerPosition
-                                 # (acking with ServerboundAcceptTeleportation), feeds player/system
-                                 # chat text through the command registry (dispatch(text, conn)), and
-                                 # feeds entity/player-list packets into the EntityTracker. Proven live:
-                                 # received and logged real chat messages from another player on the
-                                 # target server. Chunk/inventory packets still ignored for now.
-  commands/
-    parser.py                 # !name(args) regex grammar, mirrors mindcraft — done, tested
-    registry.py                # name -> async handler dispatch — done, tested
-  main.py                      # wires config -> auth -> connection -> login_flow -> configuration
-                                # -> play_loop, constructing one EntityTracker + MovementController per
-                                # run. This is the full MVP path from prompt.txt (connect, listen to
-                                # chat, parse commands, move) plus follow-player, proven end-to-end
-                                # against the real online-mode target server (movement/follow verified
-                                # via unit tests with a recording fake connection, not yet re-run live
-                                # end-to-end after this pass -- worth doing before considering this
-                                # fully proven in production).
-  config.py                    # BotConfig.from_env(), loads .env via python-dotenv first —
-                                # MINEBOT_HOST/PORT/USERNAME/ONLINE_MODE (see ".env" section above)
-tools/
-  extract_packet_ids.py      # regenerate packets_775.json from a sources jar — done
-tests/                        # 68 tests, all passing (uv run pytest -q): varint/uuid/utf roundtrips,
-                               # registry lookups + spot-checks against manually-read source, offline-UUID
-                               # vs. known "Notch" reference value, command parser/registry, NBT reader
-                               # (plain text + nested "extra" siblings), chat packet parsing (player chat
-                               # with/without signature, system chat incl. translatable components),
-                               # keepalive/ping echo (both states), server-hash vs. real java.math.BigInteger
-                               # output, RSA/AES roundtrips, full LOGIN flow for both offline and online mode
-                               # (the latter with a real generated RSA keypair and a full AES/CFB8 cipher
-                               # switch mid-connection), CONFIGURATION phase incl. keepalive/ping, the PLAY
-                               # loop, movement packet (de)serialization, entity/player-info tracking (incl.
-                               # a regression test for correct positional field-skipping across multiple
-                               # active PlayerInfoUpdate actions), and MovementController's yaw math +
-                               # follow-loop behavior (via a RecordingConnection fake, no real socket needed)
-                               # — all against fake in-process servers except where noted above
-```
-
-### Outbound chat: why /say instead of real ServerboundChatPacket
-
-Real player chat (`ServerboundChatPacket`) requires the 1.19.1+ secure chat
-signing system: a running `LastSeenMessages` acknowledgement tracker (offset,
-BitSet, checksum) built from every `ClientboundPlayerChatPacket` seen, plus
-optionally a cryptographic signature. That's real, version-independent scope
-unrelated to the 26.1.2-specific work. Decided with the user to instead send
-outbound bot messages as `/say <message>` via `ServerboundChatCommandPacket`
-(just a single string field, no signing) — the trade-off is messages show up
-as a command/announcement rather than a normal player chat bubble under the
-bot's name. Revisit if a deployment needs real signed chat.
-
-**Not started:** mining/placing/combat/inventory PLAY packets (chat,
-keepalive/ping, and basic movement/follow are wired up now), and
-Docker/compose packaging.
-
-### Auth token caching (minebot/auth/token_cache.py)
-
-The MSA refresh token is cached on disk at `~/.cache/minebot/msa_token.json`
-(0600 permissions) so repeat runs skip the interactive device-code sign-in
--- matching how real launchers behave. `MicrosoftAuthenticator.get_profile()`
-tries `msa.refresh_msa_tokens()` against the cached refresh token first;
-if that fails (expired/revoked), it falls back to the normal device-code
-flow and re-caches the new refresh token afterward. Only the MSA refresh
-token is persisted, not the downstream Xbox/XSTS/Minecraft tokens -- those
-are cheap to re-derive each run (a handful of HTTP calls) and caching them
-too would mean tracking several more independent expiry clocks for little
-benefit. `MicrosoftAuthenticator(cache_path=...)` accepts a custom path,
-mainly so tests don't touch the real `~/.cache`.
-
-Check `git log` / current file state for what's actually been built since —
-this doc captures research findings, not a live progress tracker.
-
-## Key external paths referenced (outside this repo)
-
-- `/home/colaila/git/mindcraft` — Node.js reference project (mineflayer-based
-  bot with an LLM in the loop). We're porting the non-LLM action/command
-  layer conceptually, not the code. See prior conversation turns for the
-  full architecture writeup (command regex grammar, skills.js action
-  implementations, action-manager/modes pattern) if that detail is needed
-  again — not duplicated here since it's orthogonal to the protocol problem.
-- `/home/colaila/git/mods/VillagerHelper` — source of the decompiled 26.1.2
-  jar; also a good reference for modern Fabric networking API shape
-  (`PayloadTypeRegistry`, `CustomPacketPayload`, `StreamCodec`) if we ever
-  need a companion Fabric mod again.
-- `/home/colaila/git/fabric-loom`, `/home/colaila/git/yarn`,
-  `/home/colaila/git/fabric-loader`, `/home/colaila/git/fabric-example-mod` —
-  cloned but only fabric-loom's own source and fabric-example-mod's
-  `origin/26.1.2` branch ended up being relevant; yarn was a dead end for
-  this version (no matching branch, and turned out to be unnecessary).
+for basic actions) that connects to a real server, parses chat commands, and
+does movement/mining/placing/combat/inventory.
+
+## Architecture pivot: client mod + Python brain, not raw protocol
+
+This project spent its first several sessions building a from-scratch Python
+implementation of the Minecraft protocol (protocol 775 / version 26.1.2,
+online-mode auth, chunk parsing, A* pathfinding, a full physics-simulation
+port of prismarine-physics for movement execution...). That work is fully
+preserved on the **`pure-protocol-backend` branch** if this architecture is
+ever abandoned and that approach needs to be picked back up.
+
+It was abandoned for a simpler, more robust design: **a real Minecraft
+client + a Fabric mod does the actual playing** (movement, physics,
+collision -- all real game code, not a reimplementation of it), and Python
+is purely the brain/controller, talking to the mod over a local WebSocket
+control channel. Motivation: repeatedly re-deriving vanilla's exact
+movement-validation and physics behavior from a decompiled-source
+reimplementation kept surfacing new live-only edge cases (server rejecting
+subtly-wrong reported positions, diagonal moves clipping through geometry
+under a naive movement model, ...) -- using the real client sidesteps that
+whole class of problem entirely, since there's no possibility of the physics
+being subtly wrong when it's the actual game's own code running.
+
+Two repos now make up this project:
+- **`/home/colaila/git/minebot`** (this repo) -- the Python side. No longer
+  speaks the Minecraft protocol at all; connects to the mod's local
+  WebSocket and does chat-command parsing/dispatch and decision-making
+  (currently: `!follow`/`!stop`).
+- **`/home/colaila/git/mods/minebot-mod`** -- a separate Fabric mod repo.
+  Runs inside a real Minecraft client, logged into the bot's account via
+  normal Microsoft/Mojang auth (nothing custom -- just sign into the actual
+  launcher/client like a human would). It's the only thing that actually
+  connects to the Minecraft server. Exposes a local WebSocket server
+  (`ControlServer`, `127.0.0.1:47893` by default) that Python connects to.
+
+## How the mod drives real movement
+
+The key technical unlock (confirmed by reading the 26.1.2 decompiled source,
+via the same Fabric Loom setup as `mods/VillagerHelper`): `LocalPlayer`
+(`net.minecraft.client.player.LocalPlayer`) has a public `input` field of
+type `ClientInput`. Every client tick, `LocalPlayer.aiStep()` calls
+`this.input.tick()` unconditionally, then reads the resulting
+`keyPresses`/`moveVector` and feeds them through the *exact same* real
+physics/collision pipeline (`Entity.moveRelative` -> real gravity/friction/
+collision) that a human pressing W/Space would drive. Normally `input` is a
+`KeyboardInput` that fills those fields from real keybind state
+(`Options.keyUp.isDown()` etc.) every tick.
+
+`minebot-mod`'s `MinebotInput` (`ClientInput` subclass) replaces that: each
+tick, it first checks a *real* `KeyboardInput` delegate's own key state --
+if the human is actually pressing anything (forward/strafe/jump/sneak/
+sprint), that wins and passes straight through unmodified (**manual
+override** -- found necessary live: the first version locked out WASD
+entirely, which the user immediately flagged). Only when the keyboard is
+idle does the bot's own resolved `MovementIntent` (forward/jump, computed
+from the current goal) drive input instead. Yaw/pitch aren't part of
+`Input` at all in this version -- they're set directly via
+`Entity.setYRot()`/`setXRot()` on the player each tick.
+
+Goal resolution (`MinebotMod.resolveMovementIntent`, called every client
+tick): Python sends a high-level goal over the WebSocket
+(`{"type":"goto",x,y,z}` or `{"type":"follow",entity_id}`, both with a
+`stop_distance`), and the mod's own tick loop resolves it against live
+game state -- aim yaw at the target (`atan2(-dx, dz)`, vanilla's yaw
+convention), hold forward while still farther than `stop_distance`, hold
+jump whenever the target sits meaningfully above us. This deliberately
+mirrors the same heuristic the earlier from-scratch physics port used (see
+`pure-protocol-backend`'s FINDINGS.md history) for the same reason: it's a
+reasonable substitute for a full jump-arc/pathfinding model without needing
+one yet. No A* pathfinding exists on this side yet -- `follow`/`goto` walk
+in a straight line toward the target and rely on vanilla's own step-height
+(0.6 blocks) to handle small ledges; a real obstacle will just stall
+forward progress against it, not route around it. Porting the old A*
+pathfinding (`pure-protocol-backend`'s `minebot/pathfinding/`) to run
+against real block data the mod could expose is the natural next step if
+that's needed.
+
+Entity/chat/health awareness: the mod diffs its own live `ClientLevel`
+player list every tick (`ClientLevel.players()`/`.getEntity(int)`,
+confirmed via decompiled source) and broadcasts add/move/remove JSON
+events with id/name/position -- this is how Python resolves a chat-typed
+name ("!follow Steve") to an entity id, without needing any packet parsing
+of its own. Chat is forwarded via Fabric API's
+`ClientReceiveMessageEvents.CHAT`/`GAME` (confirmed present in the pinned
+`fabric-api:0.151.0+26.1.2`). Health changes are polled once per tick
+(`LivingEntity.getHealth()`) and broadcast on change.
+
+## Control channel wire format (WebSocket, one JSON object per message)
+
+Commands, Python -> mod:
+- `{"type":"goto","x":..,"y":..,"z":..,"stop_distance":2.0}`
+- `{"type":"follow","entity_id":..,"stop_distance":2.0}`
+- `{"type":"stop"}`
+- `{"type":"chat","text":".."}`
+
+Events, mod -> Python:
+- `{"type":"position","x":..,"y":..,"z":..,"yaw":..,"pitch":..,"on_ground":..}`
+  (every client tick)
+- `{"type":"chat","sender":"name-or-omitted","text":".."}`
+- `{"type":"entity","action":"add"|"move"|"remove","id":..,"name":"...","x":..,"y":..,"z":..}`
+  (name/position omitted on `remove`; name omitted on `move`, since it never
+  changes)
+- `{"type":"health","health":..}`
+
+## Repo layout (Python side, `master`)
+
+- `minebot/bridge/client.py` -- `ModBridge`: the WebSocket connection to
+  the mod, `events()` async-iterates parsed `ModEvent`s, `send_goto`/
+  `send_follow`/`send_stop`/`send_chat` for commands.
+- `minebot/bridge/entities.py` -- `EntityTracker`: id/name -> position,
+  fed purely from the mod's own `entity` events (no packet parsing).
+- `minebot/bot/movement.py` -- `MovementController`: `!follow`/`!stop`
+  chat-command handlers, translating to `ModBridge` goal calls. `!follow`
+  with no name follows the chat sender; an explicit name resolves through
+  `EntityTracker`.
+- `minebot/bot/run_loop.py` -- the main event loop: iterates
+  `bridge.events()`, feeds `entity` events to the tracker, dispatches
+  `chat` text through `CommandRegistry`, logs `position`/`health`.
+- `minebot/commands/parser.py`/`registry.py` -- unchanged from the old
+  architecture; both were already protocol-agnostic (`!name(args)` chat
+  grammar and name->handler dispatch), so they carried over as-is.
+- `minebot/config.py` -- now just `MINEBOT_MOD_HOST`/`MINEBOT_MOD_PORT`
+  (default `127.0.0.1:47893`, matching the mod's `ControlServer.DEFAULT_PORT`).
+- `minebot/main.py` -- wires it all together: connect the bridge, build
+  the registry/tracker/movement controller, run the loop.
+
+Deleted from `master` (fully preserved on `pure-protocol-backend`):
+`minebot/protocol/` (packet parsing, chunk/block-registry, chat/NBT),
+`minebot/net/` (raw TCP connection + wire-format primitives),
+`minebot/auth/` (the full MSA device-code -> Xbox -> XSTS -> Mojang
+online-mode login chain), `minebot/pathfinding/` (A* port of
+mineflayer-pathfinder), `minebot/physics/` (prismarine-physics port),
+`minebot/bot/play_loop.py`, the old `minebot/bot/movement.py` (physics-
+based follow), `tools/extract_packet_ids.py`, and all their tests. None of
+this is needed anymore since the mod is the thing that actually speaks the
+protocol and runs physics now.
+
+## Repo layout (mod side, `minebot-mod`, separate repo)
+
+Scaffolded from the same Fabric Loom + Minecraft 26.1.2 pin already
+working in the sibling `mods/VillagerHelper` project (same toolchain, same
+one-shot Fabric-mod-dump tricks used earlier for the block registry --
+see `pure-protocol-backend`'s FINDINGS.md if that's ever needed again).
+
+- `ControlServer.java` -- embeds Java-WebSocket (shaded via Loom's
+  jar-in-jar `include`, since nothing else provides it), bound to
+  `127.0.0.1` only (no auth of its own -- fine only as long as it's
+  unreachable from outside the machine).
+- `ControlState.java` -- the current goal (`IDLE`/`GOTO`/`FOLLOW` +
+  target), set by incoming WebSocket commands.
+- `MovementIntent.java` -- the concrete per-tick forward/jump/yaw resolved
+  from the current goal against live game state; separates goal
+  resolution (needs live entity/player state) from input plumbing (doesn't).
+- `MinebotInput.java` -- the `ClientInput` replacement described above
+  (keyboard-override + `MovementIntent`-driven fallback).
+- `MinebotMod.java` -- entry point: starts the control server, registers
+  the client-tick hook (resolves the goal, updates `MinebotInput`, sets
+  yaw, broadcasts position/entity/health events), registers chat-event
+  forwarding.
+
+`fabric.mod.json` declares `"environment": "client"` (no server-side
+component -- this only makes sense running inside an actual client).
+
+## Known gaps / next steps
+
+- No A* pathfinding wired up on the mod side yet -- `follow`/`goto` are
+  straight-line-plus-step-height only. Real obstacles (walls, gaps wider
+  than a single step) will just stall the bot rather than route around
+  them. The old A*/movements cost-model port on `pure-protocol-backend`
+  could be adapted to run against real block data the mod could expose
+  (e.g. `ClientLevel.getBlockState(pos)`), if/when that's needed.
+- Mining/placing/combat/inventory are not implemented on either side yet.
+- Not yet load-tested for WebSocket reconnection -- if the mod restarts
+  (e.g. game crash) while Python is running, `ModBridge` has no retry/
+  reconnect logic yet; Python would need to be restarted too.
+- The control channel has no authentication -- anything that can open a
+  TCP connection to `127.0.0.1:47893` can drive the bot. Fine on a
+  single-user machine; would need hardening before ever exposing this
+  differently.
+
+## Key external paths referenced (outside these two repos)
+
+- `/home/colaila/git/mindcraft` -- Node.js reference project (mineflayer-
+  based bot with an LLM in the loop). Original architecture reference for
+  the command-grammar/skills-layer pattern (`minebot/commands/`
+  mirrors this), not for movement anymore.
+- `/home/colaila/git/mods/VillagerHelper` -- source of the decompiled
+  26.1.2 jar (via Fabric Loom's `genSources`), and the reference project
+  for the exact Fabric/Loom/fabric-api version pin `minebot-mod` uses.
+- `/home/colaila/git/mineflayer-pathfinder` -- cloned repo, pinned to the
+  `2.4.5` tag, used as the real source for the A* port on
+  `pure-protocol-backend` (not currently in use on `master`).

@@ -44,8 +44,8 @@ async def test_dispatch_passes_context_args_before_parsed_args():
 @pytest.mark.asyncio
 async def test_dispatch_swallows_handler_exceptions():
     # Regression test: a bug in one command handler must not propagate out
-    # of dispatch() and kill the caller's read loop (run_play_loop reads
-    # every subsequent packet, including keepalives -- an uncaught
+    # of dispatch() and kill the caller's event loop (bot/run_loop.py reads
+    # every subsequent event from the mod's control channel -- an uncaught
     # exception here would silently stop the bot responding to anything).
     async def broken_handler():
         raise RuntimeError("boom")
