@@ -5,10 +5,13 @@ metadata, which existed there only to be shown to a language model.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Awaitable, Callable
 
 from minebot.commands.parser import ParsedCommand, parse_command
+
+log = logging.getLogger("minebot.commands")
 
 
 @dataclass
@@ -27,6 +30,13 @@ class CommandRegistry:
     async def dispatch(self, message: str, *context_args) -> bool:
         """Parses `message` for a !command and runs it if recognized.
         Returns True if a recognized command was found and dispatched.
+
+        A handler exception is logged and swallowed here rather than
+        propagating -- a bug in one command must not kill the entire PLAY
+        loop (which reads every subsequent packet, including keepalives)
+        for an uncaught exception several calls away. `dispatch` still
+        returns True in this case: the command *was* recognized and did
+        run, it just failed partway through.
         """
         parsed: ParsedCommand | None = parse_command(message)
         if parsed is None:
@@ -36,5 +46,8 @@ class CommandRegistry:
         if command is None:
             return False
 
-        await command.handler(*context_args, *parsed.args)
+        try:
+            await command.handler(*context_args, *parsed.args)
+        except Exception:
+            log.exception("command handler for !%s raised", parsed.name)
         return True

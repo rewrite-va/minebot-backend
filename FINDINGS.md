@@ -401,6 +401,96 @@ Decided to land the tick-rate fix now (self-contained, already done above)
 and treat the chunk-parsing foundation as its own dedicated follow-up
 rather than half-wiring jump physics on top of no block data.
 
+### Step (1) done: heightmap-based ground-height tracking (minebot/protocol/chunks.py)
+
+Implemented the "cheaper first step" from the plan above: parses
+`ClientboundLevelChunkWithLightPacket`'s **heightmaps** only (not the raw
+per-section paletted block buffer that follows them in the packet --
+deliberately not parsed, and not needed for this). This answers "what's
+the ground height at (x, z)" without needing full block-type data.
+
+Key implementation details, all cross-checked against the decompiled source
+rather than assumed:
+- Heightmap bit-packing (`net.minecraft.util.SimpleBitStorage`): 256
+  entries (16x16 columns), `bits`-wide fields, `valuesPerLong = 64 // bits`
+  values per `long`, entry `index` at `data[index // valuesPerLong]`, bit
+  offset `(index % valuesPerLong) * bits`. The class's actual division
+  logic uses a lookup-table "magic number" multiply-shift optimization
+  (for fast non-power-of-2 division), which is mathematically identical to
+  plain integer floor division -- didn't need to replicate the optimization
+  itself, just its semantics.
+- `bits = ceil(log2(dimension_height + 1))`, where `dimension_height` is
+  part of the dimension-type registry data we don't parse (part of
+  `CLIENTBOUND_REGISTRY_DATA`). Rather than hardcode a specific dimension's
+  height, `bits` is reverse-derived from the observed heightmap `long[]`
+  array's length (`_infer_bits_from_long_count`), which is unambiguous for
+  any realistic Minecraft world height (bits 1-10, i.e. heights up to 1023
+  blocks -- verified this holds; it stops being unique somewhere past
+  `bits=10`, but no real dimension is anywhere near that tall).
+- The stored raw value means `getFirstAvailable` (first empty Y above the
+  ground) when added to `min_y`, **not** the topmost solid block itself --
+  confirmed via `Heightmap.getFirstAvailable`/`getHighestTaken` in the
+  decompiled source (`getHighestTaken = getFirstAvailable - 1`). Our
+  `ground_height_at()` returns the highest solid/matching block's Y
+  (`getHighestTaken` equivalent); a player's feet rest one block above that.
+- `min_y` itself is also dimension-registry data we don't parse; defaults
+  to `-64` (the standard modern overworld since the 1.18 height expansion).
+  Wrong for the Nether (`min_y=0`), a custom dimension, or pre-1.18 world
+  format -- acceptable for now since we're only using this to follow a
+  player who's presumably also in the overworld.
+
+`ChunkHeightmapCache` holds `(chunk_x, chunk_z) -> ChunkHeightmap` and
+answers `ground_height_at(world_x, world_z)`, handling negative-coordinate
+chunk/local-index math correctly (Python's `>>`/`&` on negative ints already
+give the right floor-division/modulo semantics here, verified explicitly
+rather than assumed). Wired into `run_play_loop` (feeds
+`ClientboundLevelChunkWithLightPacket`s in); still built and fed every run
+as useful groundwork for future pathfinding work, but **not currently used
+by `MovementController`** -- see the correction below for why.
+
+**Correction from live testing**: the first version of the follow fix
+snapped `self.y` to `ChunkHeightmapCache.ground_height_at()` every tick.
+Live testing surfaced a real bug this approach can't solve: standing
+indoors under a roof, the bot teleported *up to the roof* instead of
+matching the player's actual (lower, indoor) Y. The reason is structural,
+not a parsing bug: `MOTION_BLOCKING` heightmaps only ever store the single
+highest solid/liquid block in an entire (x,z) column -- they have no way
+to represent "the floor under whatever's above it." Any player standing
+under a roof, overhang, or upper floor will always resolve to the
+roof/ceiling's height, never the floor they're actually standing on.
+
+Fixed by switching the follow loop's Y-source from the heightmap to the
+**target's own tracked Y** (`EntityTracker`'s `TrackedEntity.y`, fed by
+`AddEntity`/`TeleportEntity`/`EntityPositionSync`/`MoveEntity` -- see the
+entity-tracking section above). This has no such ambiguity: it's simply
+wherever the server says the target actually is, indoors or out.
+`MovementController._step_toward_target_height()` ramps `self.y` toward
+`target.y` by at most `FOLLOW_MAX_VERTICAL_STEP` (1.2 blocks) per tick,
+rather than snapping instantly -- also fixes a related complaint from live
+testing ("it's just teleporting to the target Y").
+
+One more bug caught while fixing this: the follow loop's original
+structure gated *all* per-tick updates (both x/z movement and the Y step)
+behind "are we still further than `FOLLOW_STOP_DISTANCE` away
+horizontally?" -- meaning once the bot was standing right next to the
+target, it would stop reacting entirely, including to a pure vertical
+difference (e.g. the target hopping onto a ledge right beside the bot).
+Fixed by decoupling the two: horizontal movement is still gated on
+distance, but the Y step now runs independently whenever `target.y !=
+self.y`, even with zero horizontal distance left to close.
+
+Net effect: `ChunkHeightmapCache`/heightmap parsing remains implemented,
+tested, and wired into the PLAY loop (it's real, correct groundwork for
+when full pathfinding is eventually built and needs terrain-height
+estimation for *unvisited* columns where no live entity position exists)
+but is not currently consulted for following a tracked player, since that
+player's own reported position is always the better signal. Steps (2)-(5)
+from the plan above (block-registry lookup, real jump timing, the
+movements cost model, and A*) remain unimplemented. This still isn't real
+physics: no jump animation, no "too high to climb" detection, and the
+server may reject/correct a position that isn't a plausible single step
+from where it last placed us -- not yet observed/handled.
+
 ### Our own position: ClientboundPlayerPositionPacket
 
 Field layout: `id: varint` (a teleport id, echoed back), then
@@ -473,9 +563,144 @@ more than one packet:
 `EntityTracker` (in `minebot/protocol/entities.py`) holds `by_id: {entity_id
 -> position}` and `name_to_uuid`, fed by `apply_entity_packet()` from the
 PLAY loop; `MovementController.follow()` (in `minebot/bot/movement.py`)
-runs a background `asyncio.Task` that polls the tracker every 0.5s and
+runs a background `asyncio.Task` that polls the tracker every
+`FOLLOW_STEP_INTERVAL_SECONDS` (0.15s, see the tick-rate fix above) and
 steps toward the target's last known position, stopping within ~2 blocks;
 `!stop` cancels that task.
+
+## Death and respawn (minebot/protocol/health.py)
+
+Found via live testing: a baby zombie killed the bot, and it never
+recovered -- died server-side and just sat there indefinitely. Even a
+subsequent `/tp` from another player didn't make it visibly reappear,
+which makes sense in retrospect: a dead player that never requests respawn
+isn't a normal tickable/visible entity to other clients, so nothing we did
+afterward (including moving our internally-tracked x/y/z, which we kept
+right on updating) would show up in-game. This is why the bot could
+"report it's with you" while being invisible: our process-local state
+(`MovementController.x/y/z`) never knew anything was wrong, only the
+server-side entity did.
+
+Implemented in `minebot/protocol/health.py`:
+- `CLIENTBOUND_LOGIN` (the PLAY-phase spawn packet -- distinct from the
+  LOGIN-state's `CLIENTBOUND_LOGIN_FINISHED`, and previously entirely
+  unparsed by us): its first field is `playerId: i32`, our own entity ID.
+  We now capture this in `run_play_loop` as `own_entity_id`.
+- `CLIENTBOUND_PLAYER_COMBAT_KILL`: `playerId: varint, message: Component`
+  (message not parsed -- we don't need the death message text). This
+  packet fires for **any** player's death broadcast visible to us, not
+  just our own -- confirmed via the decompiled client's own
+  `handlePlayerCombatKill`, which only reacts
+  `if (packet.playerId() == this.minecraft.player's entity id)`. We do the
+  same comparison against our tracked `own_entity_id` before reacting;
+  regression-tested in `tests/test_play_loop.py` (someone else's death is
+  a no-op, ours triggers a respawn request).
+- On our own death: send `SERVERBOUND_CLIENT_COMMAND` with
+  `action=PERFORM_RESPAWN` (0) -- mirrors the real client's
+  `shouldShowDeathScreen()`-false branch (we have no UI, so we always
+  respawn immediately rather than waiting on user input we can't receive).
+- `CLIENTBOUND_RESPAWN` arrives once the respawn completes; not parsed
+  (it carries spawn info but no position -- the fresh position always
+  arrives separately via the `ClientboundPlayerPositionPacket` handling we
+  already had), just used as a signal.
+- Both the death and the respawn events call
+  `MovementController.mark_position_stale()`, which clears `has_position`
+  (our tracked x/y/z is from wherever we died, not the new spawn point --
+  every movement command already guards on `has_position` and raises if
+  it's false) and cancels any in-progress `!follow` task (continuing to
+  chase someone using stale pre-death coordinates would be actively wrong).
+
+**Correction from a second round of live testing**: the first version only
+listened for `CLIENTBOUND_PLAYER_COMBAT_KILL`. A real death was still
+missed entirely (no respawn log line at all) -- turns out `COMBAT_KILL` is
+not sent for every death path; the decompiled client's actual death
+detection lives in `Minecraft.java`'s own per-tick game loop, which polls
+`player.isDeadOrDying()` (`health <= 0`, set from
+`ClientboundSetHealthPacket` via `hurtTo()`) every frame, entirely separate
+from any death-message packet. Fixed by triggering respawn from
+`CLIENTBOUND_SET_HEALTH` reaching `health <= 0` as well (matching what the
+real client actually does), keeping `COMBAT_KILL` as a second, harmless
+trigger for the same death. Guarded with an `awaiting_respawn` flag in
+`run_play_loop` so receiving both signals for one death (a real
+possibility) sends exactly one `PERFORM_RESPAWN`, not two -- regression
+tested in `tests/test_play_loop.py` alongside a health-only-death test.
+
+## Robustness gaps found from "the bot went silent after !follow" (third live-testing round)
+
+After the health-based respawn fix, the bot respawned correctly and became
+visible, but then went silent: `!follow` was typed three times across the
+session, no movement was ever observed, and the log simply stopped
+producing lines after the last `!follow` (no traceback, no further
+activity logged). Two real bugs, found by inspection since the exact
+runtime cause couldn't be reproduced/confirmed live in the moment:
+
+1. **`MovementController._follow_loop` had two silent-forever-idle paths**:
+   if `has_position` was `False` (e.g. right after a respawn that hasn't
+   yet gotten a fresh `ClientboundPlayerPositionPacket`) or the target
+   wasn't in `EntityTracker` (e.g. out of range, or a lookup gap), the loop
+   just `continue`d forever with zero logging -- indistinguishable from
+   "working but nothing to do" versus "stuck". Fixed: both conditions now
+   log a one-time `logging.warning` (re-armed once the condition clears),
+   so a stuck follow is now visible in the log instead of silent.
+2. **`CommandRegistry.dispatch()` had no exception handling around the
+   handler call at all.** Since `run_play_loop` awaits `dispatch()` inline
+   inside its main `while True: read_packet()` loop (the same loop that
+   answers every keepalive), an uncaught exception from *any* command
+   handler -- not just movement -- would propagate out of `dispatch`,
+   out of `run_play_loop`, and kill the entire read loop silently (no
+   traceback would even reach the log if something upstream swallowed it,
+   e.g. depending on how the process is being supervised). This is a
+   plausible explanation for total unresponsiveness after a single bad
+   command, though it could not be confirmed as *the* cause of this
+   specific incident. Fixed regardless, since it's a real gap either way:
+   `dispatch()` now catches and logs (`log.exception`) any handler
+   exception rather than propagating it, so a bug in one command can never
+   take down chat responsiveness or keepalive handling.
+
+Also added: a `position sync: (x, y, z) yaw=...` log line for every
+`ClientboundPlayerPositionPacket` (previously silent), so a future
+"is our position actually updating" question can be answered directly from
+the log rather than inferred.
+
+Net effect: even if the exact trigger for this incident is never fully
+pinned down, the system can no longer fail silently in either of these two
+ways again.
+
+**Root cause found (first incident)**: with the new logging in place,
+`!follow` consistently logged
+`follow(...) idling: target not found in entity tracker` right after
+`!follow` was typed. Added `MINEBOT_LOG_LEVEL=DEBUG` (env var, read in
+`main.py` -- see `.env.example`) to log every
+`CLIENTBOUND_ADD_ENTITY`/`CLIENTBOUND_REMOVE_ENTITIES`/
+`CLIENTBOUND_PLAYER_INFO_UPDATE` seen.
+
+**Follow-up round with debug logging on**: `!follow` worked, but the user
+reported it "freezes for some seconds, then works again," and noticed it
+correlated with losing line of sight. The debug log explains this
+precisely: `CLIENTBOUND_REMOVE_ENTITIES` fired **161 times** in a single
+session (alongside 308 `ADD_ENTITY`s), i.e. the server is actively
+removing and re-adding the target's entity from our view repeatedly as
+they move (out of render distance, or possibly server-side occlusion/
+visibility culling -- both plausible, not distinguished). This is expected
+protocol behavior, not a bug: `EntityTracker.handle_remove_entities` and
+`MovementController._follow_loop`'s "target not found" idle-and-retry
+already handle this exactly as intended -- the "freeze" the user saw *is*
+the idle period, and it self-recovers via the warning-then-clear logic
+already in place once a fresh `AddEntity` arrives, matching what was
+observed live. No further fix needed for this specific behavior; it's an
+inherent limitation of following-by-last-known-position without real
+pathfinding/prediction (see "Why this needs real pathfinding" above) --
+during a visibility gap we simply don't know where the target is, so
+idling is the only honest option available at this level of implementation.
+
+The original hypothesis (from the very first symptom report, before debug
+logging existed) that `AddEntity` "genuinely never arrived at all" for the
+target turned out to be specific to that earlier session/moment, not a
+structural gap -- once observed with proper logging, `AddEntity` for the
+target does arrive reliably; it also gets removed and re-added
+intermittently as a normal consequence of the server's own entity
+visibility bookkeeping. `MINEBOT_LOG_LEVEL=DEBUG` remains available for
+any future "is entity X being tracked" troubleshooting.
 
 ## Tooling: uv, not raw venv/pip
 
@@ -550,6 +775,19 @@ minebot/
                                   # TeleportEntity/EntityPositionSync/MoveEntity + PlayerInfoUpdate's
                                   # name<->uuid mapping) — done, tested. See "Movement + follow-player"
                                   # section above for the two Instant/nullable-parsing bugs caught here.
+    chunks.py                     # ClientboundLevelChunkWithLightPacket's heightmaps only (not the
+                                   # raw per-section block buffer) — done, tested. ChunkHeightmapCache
+                                   # answers ground_height_at(world_x, world_z); fed by the PLAY loop
+                                   # as groundwork for future pathfinding, but not currently consulted
+                                   # by MovementController -- see "Correction from live testing" in the
+                                   # movement section above for why (heightmaps can't tell a floor
+                                   # under a roof from the roof itself; the target's own tracked Y is
+                                   # used instead).
+    health.py                     # death/respawn — done, tested. Tracks our own entity id (from
+                                   # CLIENTBOUND_LOGIN), requests respawn on our own death (ignores
+                                   # other players' deaths), and tells MovementController to distrust
+                                   # its tracked position until a fresh sync arrives. See "Death and
+                                   # respawn" section above for the live-testing bug this fixes.
   net/
     types.py                # VarInt/UTF/UUID/byte-array encode-decode — done, tested
     connection.py            # framing + zlib compression + AES/CFB8 encryption — done, proven live

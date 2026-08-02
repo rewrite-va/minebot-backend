@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 
 from minebot.auth.base import MicrosoftAuthenticator, OfflineAuthenticator
 from minebot.bot.movement import MovementController, register_movement_commands
@@ -9,11 +10,15 @@ from minebot.bot.play_loop import run_play_loop
 from minebot.commands.registry import CommandRegistry
 from minebot.config import BotConfig
 from minebot.net.connection import Connection
+from minebot.protocol.chunks import ChunkHeightmapCache
 from minebot.protocol.configuration import run_configuration_phase
 from minebot.protocol.entities import EntityTracker
 from minebot.protocol.login_flow import perform_login
 
-logging.basicConfig(level=logging.INFO)
+# MINEBOT_LOG_LEVEL lets a troubleshooting session flip on debug logging
+# (e.g. entity-tracking packet visibility in bot/play_loop.py) without a
+# code change: `MINEBOT_LOG_LEVEL=DEBUG uv run python -m minebot.main`.
+logging.basicConfig(level=os.environ.get("MINEBOT_LOG_LEVEL", "INFO").upper())
 log = logging.getLogger("minebot")
 
 
@@ -42,13 +47,14 @@ async def run(config: BotConfig) -> None:
 
     registry = CommandRegistry()
     tracker = EntityTracker()
+    heightmaps = ChunkHeightmapCache()
     movement = MovementController(tracker)
     register_movement_commands(registry, movement)
 
     # Mining/placing/combat/inventory command handlers are not implemented
     # yet -- chat receive/dispatch, keepalive, and basic movement
     # (forward/backward/left/right/follow/stop) are functional.
-    await run_play_loop(conn, registry, movement, tracker)
+    await run_play_loop(conn, registry, movement, tracker, heightmaps)
 
 
 def main() -> None:
