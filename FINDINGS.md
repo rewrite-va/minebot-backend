@@ -131,6 +131,13 @@ own docstring on the mod side for the exact translation between the two,
 confirmed by disassembling `AbstractContainerMenu`).
 
 Events, mod -> Python:
+- `{"type":"hello","commit":"..","built_at":".."}` -- sent once, the
+  moment the control channel connects, reporting exactly what code the
+  connected mod is running (its git commit + build timestamp, baked into
+  the jar at build time -- see `BuildInfo`/`generateBuildInfo` below).
+  The backend compares `commit` against `minebot-mod`'s own current
+  `git rev-parse HEAD` (see `minebot/mod_version.py`) and logs a loud
+  WARNING on mismatch.
 - `{"type":"position","x":..,"y":..,"z":..,"yaw":..,"pitch":..,"on_ground":..}`
   (every client tick)
 - `{"type":"chat","sender":"name-or-omitted","text":".."}`
@@ -254,6 +261,17 @@ decision entirely lives in the Python backend, matching the design intent
   stale configuration -- caught by a real test failure where pytest's own
   log-capture plugin had already attached a root handler before either
   test in `test_logging_setup.py` ran).
+- `minebot/mod_version.py` -- `check_hello(commit, built_at,
+  mod_repo_path)`: logs the connected mod's reported build, and if
+  `mod_repo_path` (config field `mod_repo_path`, env
+  `MINEBOT_MOD_REPO_PATH`, defaults to the sibling `minebot-mod` repo
+  path used throughout development) resolves to a real git repo,
+  compares its current `git rev-parse HEAD` against the mod's reported
+  commit (stripping a trailing `-dirty` suffix first) and logs a loud
+  WARNING on mismatch. Called from `run_loop.run` on the mod's `hello`
+  event. This is the fix for the stale-jar-deploy trap documented
+  above and in `AGENTS.md` -- previously that failure mode was silent
+  and required manually diffing jar files to diagnose.
 - `minebot/main.py` -- wires it all together: configure logging, connect
   the bridge, build the `ActionRegistry`/trackers/movement+inventory
   controllers, build an `LLMController` (no provider configured), run
@@ -391,6 +409,24 @@ see `pure-protocol-backend`'s FINDINGS.md if that's ever needed again).
   interaction needed, so the bot no longer needs a human to click
   Respawn. `MinebotMod.onClientTick` also skips `FoodEater.maybeEat`
   while `isDeadOrDying()` is true (no point trying to eat at 0 health).
+- `BuildInfo.java` -- reads `commit`/`built_at` out of a
+  `minebot-mod-build-info.properties` file baked into the jar at build
+  time (`build.gradle`'s `generateBuildInfo` task, which shells out to
+  `git rev-parse HEAD`/`git status --porcelain` -- appends `-dirty` to
+  the commit if the working tree had uncommitted changes at build time).
+  `MinebotMod.onControlChannelConnected` broadcasts this as a one-shot
+  `hello` event. Added directly in response to a real live-debugging
+  session where a jar was rebuilt with a genuine fix (twice) but the
+  running game client was never fully restarted to pick it up -- from
+  the backend's logs alone that looked identical to "the fix doesn't
+  work". **Gradle gotcha hit building this**: `generateBuildInfo`
+  initially had no declared task inputs, so Gradle treated it as
+  UP-TO-DATE after its first run and never re-executed -- every build
+  after the first baked in the *same* stale commit forever, regardless
+  of what actually changed. Fixed with `outputs.upToDateWhen { false }`
+  to force it to always re-run (there's no meaningful "input" to declare
+  here since the whole point is capturing current repo/build state, not
+  reacting to a changed file).
 - `StatusHud.java` -- a HUD text overlay showing whether the control
   channel is currently connected.
 - `MinebotMod.java` -- entry point: starts the control client, registers
@@ -398,7 +434,8 @@ see `pure-protocol-backend`'s FINDINGS.md if that's ever needed again).
   `MinebotInput`, sets yaw, checks GIVE-goal completion, ticks
   `RespawnHandler`, calls `FoodEater` unless dead, broadcasts
   position/entity/inventory/health/death/respawn events),
-  registers chat-event forwarding, registers the HUD. `ControlState`
+  registers chat-event forwarding, registers the HUD, broadcasts
+  `hello` on connect (see `BuildInfo` above). `ControlState`
   gained a `GIVE` mode (walks toward a target entity like `FOLLOW`,
   reusing `followEntityId`; once within `stopDistance`,
   `maybeCompleteGive` drops the requested slot/count and clears back to
@@ -420,10 +457,12 @@ component -- this only makes sense running inside an actual client).
   running (no eating, no chat lines, health silently reaching 2 hearts
   with nothing logged) because the installed jar in the PrismLauncher
   instance's `mods/` folder was hours stale relative to the rebuilt one.
-  See `AGENTS.md` for the exact rebuild+copy+relaunch steps -- always
-  verify the deployed jar's mtime/diff against a fresh build before
-  trusting a "why isn't this working" report is a logic bug and not a
-  stale-deploy issue.
+  See `AGENTS.md` for the exact rebuild+copy+relaunch steps. **Now
+  automatically detected**: the mod's `hello` event + `minebot/
+  mod_version.py`'s check (see above) logs a WARNING the moment a
+  mismatched build connects, instead of this needing manual jar-diffing
+  to catch -- still requires the actual restart to fix, but no longer
+  requires guessing whether that's the problem.
 - No real `LLMProvider` is wired up yet (see the LLM trigger + brain
   layer section above) -- `NullLLMProvider` always declines, so
   addressing the bot by name in chat currently gets silence, not a

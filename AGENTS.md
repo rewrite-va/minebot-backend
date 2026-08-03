@@ -32,6 +32,15 @@ jar on disk changes. A stale-jar deploy is a common silent-failure mode:
 symptoms look like "the bot isn't doing anything I just added" even
 though the source change and backend are both correct.
 
+The backend now catches this automatically: the mod broadcasts its own
+git commit (baked into the jar at build time) the moment it connects,
+and the backend compares it against `minebot-mod`'s current `git
+rev-parse HEAD` (see `minebot/mod_version.py`), logging a loud WARNING
+on mismatch. Check the backend's log right after a relaunch if
+something still doesn't seem to be working -- if it warns about a
+commit mismatch, the client wasn't actually restarted (or is still
+running a jar built from an older/different commit), not a logic bug.
+
 ## Running the backend
 
 ```bash
