@@ -48,8 +48,18 @@ class ActionRegistry:
         if action is None:
             return None
 
+        # The bare space-separated chat grammar has no natural stopping
+        # point (see actions/parser.py), so "!follow asd awdawd" happily
+        # parses two args even though follow only accepts one -- found
+        # live: that crashed with a TypeError (too many positional args),
+        # caught below only as a generic "something went wrong". Extra
+        # trailing words beyond what the action declares are silently
+        # dropped instead -- a human typing extra words after a command
+        # almost certainly didn't mean them as a second argument.
+        args = parsed.args[: len(action.params)]
+
         try:
-            return await action.handler(sender, *parsed.args)
+            return await action.handler(sender, *args)
         except Exception:
             log.exception("action handler for !%s raised", parsed.name)
             return ActionResult(message=f"something went wrong running !{parsed.name}")

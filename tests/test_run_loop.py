@@ -1,7 +1,7 @@
 import pytest
 
 from minebot.actions.registry import ActionRegistry
-from minebot.actions.types import Action, ActionResult
+from minebot.actions.types import Action, ActionParam, ActionResult
 from minebot.bot.movement import FOLLOW_STOP_DISTANCE, MovementController, register_movement_actions
 from minebot.bot.run_loop import run
 from minebot.bridge.client import ModEvent
@@ -102,7 +102,10 @@ async def test_run_loop_sends_action_result_message_to_chat():
         ModEvent(type="chat", data={"sender": "Alex", "text": '!give("bread")'}),
     ])
     actions = ActionRegistry()
-    actions.register(Action(name="give", description="", handler=give_handler))
+    actions.register(Action(
+        name="give", description="", handler=give_handler,
+        params=[ActionParam("item", "string", "")],
+    ))
     tracker = EntityTracker()
 
     await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, _movement(bridge, tracker))

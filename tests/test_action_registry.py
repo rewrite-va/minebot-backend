@@ -1,7 +1,7 @@
 import pytest
 
 from minebot.actions.registry import ActionRegistry
-from minebot.actions.types import Action, ActionResult
+from minebot.actions.types import Action, ActionParam, ActionResult
 
 
 @pytest.mark.asyncio
@@ -13,7 +13,10 @@ async def test_dispatch_chat_calls_registered_handler_positionally():
         return ActionResult()
 
     registry = ActionRegistry()
-    registry.register(Action(name="forward", description="", handler=handler))
+    registry.register(Action(
+        name="forward", description="", handler=handler,
+        params=[ActionParam("distance", "int", "")],
+    ))
 
     result = await registry.dispatch_chat("!forward(3)", "Alex")
 
@@ -41,11 +44,41 @@ async def test_dispatch_chat_returns_handler_result():
         return ActionResult(message=f"gave {count}x {item}")
 
     registry = ActionRegistry()
-    registry.register(Action(name="give", description="", handler=handler))
+    registry.register(Action(
+        name="give", description="", handler=handler,
+        params=[ActionParam("item", "string", ""), ActionParam("count", "int", "")],
+    ))
 
     result = await registry.dispatch_chat('!give("stick", 1)', "Alex")
 
     assert result == ActionResult(message="gave 1x stick")
+
+
+@pytest.mark.asyncio
+async def test_dispatch_chat_truncates_extra_bare_args_beyond_the_declared_params():
+    # Regression test: "!follow asd awdawd" (the bare space-separated
+    # grammar has no natural stopping point) used to crash with a
+    # TypeError (too many positional args) whenever a handler declared
+    # fewer params than the player happened to type -- found live.
+    # Trailing extra words are now silently dropped instead, since a
+    # human typing extra words almost certainly didn't mean them as a
+    # second argument.
+    calls = []
+
+    async def handler(sender, player_name):
+        calls.append((sender, player_name))
+        return ActionResult(message=f"ok, following {player_name}")
+
+    registry = ActionRegistry()
+    registry.register(Action(
+        name="follow", description="", handler=handler,
+        params=[ActionParam("player_name", "string", "", required=False)],
+    ))
+
+    result = await registry.dispatch_chat("!follow asd awdawd", "Alex")
+
+    assert calls == [("Alex", "asd")]
+    assert result == ActionResult(message="ok, following asd")
 
 
 @pytest.mark.asyncio
