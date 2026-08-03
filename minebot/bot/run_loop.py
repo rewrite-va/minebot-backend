@@ -6,9 +6,9 @@ driven by the mod's JSON events instead of raw packets.
 Chat dispatch order: try it as a !command first (ActionRegistry.
 dispatch_chat), and only if that finds nothing, hand it to the LLM
 trigger check (should_trigger_llm) -- a player addressing the bot by name
-("hey minebot, got food?") should still work as an LLM conversation even
-though it isn't a !command, but an actual !command always takes priority
-over LLM interpretation of the same text.
+or a trigger word ("hey minebot, got food?") should still work as an LLM
+conversation even though it isn't a !command, but an actual !command
+always takes priority over LLM interpretation of the same text.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from minebot.actions.registry import ActionRegistry
 from minebot.bridge.client import ModBridge
 from minebot.bridge.entities import EntityTracker
 from minebot.bridge.inventory import InventoryTracker
+from minebot.config import BotConfig
 from minebot.llm.controller import LLMController
 from minebot.llm.trigger import should_trigger_llm
 
@@ -31,7 +32,7 @@ async def run(
     tracker: EntityTracker,
     inventory: InventoryTracker,
     llm: LLMController,
-    bot_name: str,
+    config: BotConfig,
 ) -> None:
     async for event in bridge.events():
         if event.type == "entity":
@@ -59,7 +60,7 @@ async def run(
                 await bridge.send_chat(f"unknown command: {text}")
                 continue
 
-            if should_trigger_llm(text, sender, bot_name):
+            if should_trigger_llm(text, sender, config.bot_name, config.trigger_words):
                 await llm.handle_chat(sender, text)
             continue
 

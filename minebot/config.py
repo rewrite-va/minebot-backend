@@ -25,6 +25,12 @@ class BotConfig:
     # currently forwarded by the mod, see FINDINGS.md's known gaps).
     bot_name: str
 
+    # Additional words/phrases that also trigger an LLM call, beyond the
+    # bot's own name -- e.g. a nickname the bot is known by, or a
+    # catch-all like "hey bot". Matched the same way (case-insensitive
+    # substring), same as bot_name.
+    trigger_words: tuple[str, ...]
+
     @classmethod
     def from_env(cls) -> "BotConfig":
         load_dotenv()  # loads .env into os.environ if present; no-op otherwise
@@ -32,4 +38,9 @@ class BotConfig:
             mod_host=os.environ.get("MINEBOT_MOD_HOST", "0.0.0.0"),
             mod_port=int(os.environ.get("MINEBOT_MOD_PORT", "47893")),
             bot_name=os.environ.get("MINEBOT_BOT_NAME", "minebot"),
+            trigger_words=_parse_trigger_words(os.environ.get("MINEBOT_TRIGGER_WORDS", "")),
         )
+
+
+def _parse_trigger_words(raw: str) -> tuple[str, ...]:
+    return tuple(word.strip() for word in raw.split(",") if word.strip())

@@ -35,7 +35,7 @@ async def run_bot(config: BotConfig) -> None:
     llm = LLMController(bridge, actions)  # no provider configured yet -- see llm/controller.py
 
     try:
-        await run(bridge, actions, tracker, inventory, llm, config.bot_name)
+        await run(bridge, actions, tracker, inventory, llm, config)
     finally:
         await bridge.close()
 

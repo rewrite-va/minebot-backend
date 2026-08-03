@@ -6,9 +6,11 @@ from minebot.bot.run_loop import run
 from minebot.bridge.client import ModEvent
 from minebot.bridge.entities import EntityTracker
 from minebot.bridge.inventory import InventoryTracker
+from minebot.config import BotConfig
 from minebot.llm.controller import LLMController
 
 BOT_NAME = "minebot"
+CONFIG = BotConfig(mod_host="0.0.0.0", mod_port=0, bot_name=BOT_NAME, trigger_words=())
 
 
 class FakeBridge:
@@ -40,7 +42,7 @@ async def test_run_loop_feeds_entity_events_into_tracker():
     tracker = EntityTracker()
     actions = ActionRegistry()
 
-    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), BOT_NAME)
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG)
 
     assert tracker.find_by_name("Alex") is not None
 
@@ -53,7 +55,7 @@ async def test_run_loop_feeds_inventory_events_into_tracker():
     inventory = InventoryTracker()
     actions = ActionRegistry()
 
-    await run(bridge, actions, EntityTracker(), inventory, _llm(bridge, actions), BOT_NAME)
+    await run(bridge, actions, EntityTracker(), inventory, _llm(bridge, actions), CONFIG)
 
     assert inventory.count_of("minecraft:bread") == 5
 
@@ -72,7 +74,7 @@ async def test_run_loop_dispatches_chat_commands():
     actions = ActionRegistry()
     actions.register(Action(name="ping", description="", handler=ping_handler))
 
-    await run(bridge, actions, EntityTracker(), InventoryTracker(), _llm(bridge, actions), BOT_NAME)
+    await run(bridge, actions, EntityTracker(), InventoryTracker(), _llm(bridge, actions), CONFIG)
 
     assert calls == ["Alex"]
 
@@ -88,7 +90,7 @@ async def test_run_loop_sends_action_result_message_to_chat():
     actions = ActionRegistry()
     actions.register(Action(name="give", description="", handler=give_handler))
 
-    await run(bridge, actions, EntityTracker(), InventoryTracker(), _llm(bridge, actions), BOT_NAME)
+    await run(bridge, actions, EntityTracker(), InventoryTracker(), _llm(bridge, actions), CONFIG)
 
     assert bridge.sent_chat == ["here's your bread"]
 
@@ -100,7 +102,7 @@ async def test_run_loop_replies_to_unknown_commands():
     ])
     actions = ActionRegistry()
 
-    await run(bridge, actions, EntityTracker(), InventoryTracker(), _llm(bridge, actions), BOT_NAME)
+    await run(bridge, actions, EntityTracker(), InventoryTracker(), _llm(bridge, actions), CONFIG)
 
     assert bridge.sent_chat == ["unknown command: !doesnotexist"]
 
@@ -112,7 +114,7 @@ async def test_run_loop_does_not_reply_to_unaddressed_non_command_chat():
     ])
     actions = ActionRegistry()
 
-    await run(bridge, actions, EntityTracker(), InventoryTracker(), _llm(bridge, actions), BOT_NAME)
+    await run(bridge, actions, EntityTracker(), InventoryTracker(), _llm(bridge, actions), CONFIG)
 
     assert bridge.sent_chat == []
 
@@ -130,9 +132,28 @@ async def test_run_loop_routes_bot_addressed_chat_to_the_llm_controller():
     ])
     actions = ActionRegistry()
 
-    await run(bridge, actions, EntityTracker(), InventoryTracker(), RecordingLLM(), BOT_NAME)
+    await run(bridge, actions, EntityTracker(), InventoryTracker(), RecordingLLM(), CONFIG)
 
     assert handled == [("Alex", f"hey {BOT_NAME}, got food?")]
+
+
+@pytest.mark.asyncio
+async def test_run_loop_routes_trigger_word_chat_to_the_llm_controller():
+    handled = []
+
+    class RecordingLLM:
+        async def handle_chat(self, sender, text):
+            handled.append((sender, text))
+
+    bridge = FakeBridge([
+        ModEvent(type="chat", data={"sender": "Alex", "text": "hey buddy, got food?"}),
+    ])
+    actions = ActionRegistry()
+    config = BotConfig(mod_host="0.0.0.0", mod_port=0, bot_name=BOT_NAME, trigger_words=("buddy",))
+
+    await run(bridge, actions, EntityTracker(), InventoryTracker(), RecordingLLM(), config)
+
+    assert handled == [("Alex", "hey buddy, got food?")]
 
 
 @pytest.mark.asyncio
@@ -144,4 +165,4 @@ async def test_run_loop_ignores_position_and_health_events_without_crashing():
     ])
     actions = ActionRegistry()
 
-    await run(bridge, actions, EntityTracker(), InventoryTracker(), _llm(bridge, actions), BOT_NAME)  # should not raise
+    await run(bridge, actions, EntityTracker(), InventoryTracker(), _llm(bridge, actions), CONFIG)  # should not raise
