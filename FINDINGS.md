@@ -240,6 +240,30 @@ following them. Entirely a Python-side fix -- the mod already sent a
 correct fresh `add` event with the right name on rejoin, Python just
 wasn't listening for it to resume the goal.
 
+`MovementController` also has `remember`/`goto` (see `PENDING.md` for
+the full mindcraft-command-parity gap analysis this came out of --
+tracks every mindcraft command, what's implemented here, and a
+`**Want it?**` review line per pending item). `goto <target> [y z]`
+resolves in order: explicit x y z coordinates (all three given as
+numbers) -> a known player's current position (`EntityTracker`) -> a
+remembered place -> gives up with a clear "I don't know where that is"
+reply. `remember <name>` saves the bot's current position (read from
+the new `minebot/bridge/self_position.py`'s `SelfPositionTracker`,
+fed from the mod's per-tick `position` events -- nothing tracked the
+bot's own live position before this) under a name in
+`minebot/places.py`'s `PlaceMemory`, a small JSON-backed store
+(`places.json`, gitignored -- the first persistence layer in this
+project) so remembered places survive a backend restart. Both actions
+were scoped deliberately narrow for their first pass: block-type and
+entity-type resolution (`!goto stone`, `!goto cow`) aren't implemented,
+since neither block-scanning nor entity-type-widening (the mod only
+tracks *players*, not mobs/animals) exists on the mod side yet --
+`goto`'s handler is structured so adding those later is just two more
+resolution branches, no interface change needed. No mod-side changes
+were needed for `goto`/`remember` at all -- the mod's existing one-shot
+`GOTO` goal (`ControlState.setGoto`) already accepts arbitrary
+coordinates.
+
 ## LLM trigger + brain layer (structure built, no provider wired up yet)
 
 `minebot/llm/trigger.py` -- `should_trigger_llm(text, sender, bot_name,
