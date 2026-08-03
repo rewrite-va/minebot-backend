@@ -463,17 +463,57 @@ component -- this only makes sense running inside an actual client).
   TCP connection to `127.0.0.1:47893` can drive the bot. Fine on a
   single-user machine; would need hardening before ever exposing this
   differently.
-- `FoodEater` triggers on health, not hunger (`FoodData`/the hunger bar
-  isn't polled at all yet) -- it eats reactively once already low on
-  health rather than proactively maintaining hunger before that happens.
-  It also doesn't check saturation/hunger before eating (a real player
-  eating at full hunger just wastes the item -- vanilla blocks this via
-  `Player.canEat`, worth checking if this bites in practice), doesn't
-  prefer higher-nutrition food when multiple edible types are held, and
-  has no test coverage on the mod side. **Confirmed working live** (both
-  the "eating..." and "no food!" lines fired correctly in a real
-  playtest) -- see FoodEater's hearts-formatting fix below, found in that
-  same playtest.
+- `FoodEater` still triggers on health, not hunger -- it eats reactively
+  once already low on health rather than proactively maintaining hunger
+  before that happens, and doesn't prefer higher-nutrition food when
+  multiple edible types are held. It has no test coverage on the mod
+  side. The "worth checking if this bites in practice" hunger-gating
+  concern flagged in an earlier version of this note *did* bite in
+  practice -- see the confirmed root cause and fix below -- so it's now
+  actually handled, not just a theoretical gap.
+- **`FoodEater` hunger-gating bug, found and fixed via a real playtest**:
+  a second player watching the bot reported it "spamming right-click"
+  instead of holding it down to eat, even after being given food while
+  critically low on health. Root cause, confirmed by decompiling
+  `Player.canEat`/`Consumable.startConsuming` (not guessed): vanilla
+  gates eating on *hunger*, not health -- `canEat(canAlwaysEat) ==
+  invulnerable || canAlwaysEat || foodData.needsFood()` where
+  `needsFood() == foodLevel < 20`. Health and hunger are separate bars,
+  so a bot at critical health from combat damage with a still-full
+  hunger bar had `canEat(false) == false` for every normal food item --
+  `useItem()` was a **silent no-op every single tick, forever**, which
+  is exactly what looked like spamming right-click with no progress
+  (the item's own `Item.use()`/`Consumable.startConsuming()` never even
+  reached `startUsingItem()`). The only food that bypasses this is one
+  with `FoodProperties.canAlwaysEat() == true` (golden apple, golden
+  carrot). Fixed in `FoodEater.isEatableNow()`, which mirrors the real
+  `Player.canEat()` gate before ever calling `useItem()`: prefers a
+  `canAlwaysEat` item first, skips calling `useItem()` entirely on food
+  that `canEat()` would currently reject (no more pointless per-tick
+  no-op attempts), and reports the real reason
+  (`food_eater.hunger_full`, a new message key in both `en.json`/
+  `es.json`) distinctly from "no food" when the bot has food but can't
+  currently eat any of it.
+  **Open question, not yet resolved**: the same live session, the user
+  separately observed that passive health regeneration (which vanilla
+  normally does automatically whenever hunger is at/near full,
+  regardless of eating) also didn't seem to be happening. That's
+  entirely server-side vanilla behavior (gated by the `naturalRegeneration`
+  game rule) -- neither this mod nor the Python backend touch it at all,
+  so if it's genuinely not happening this isn't a minebot bug, but it's
+  unconfirmed whether it's actually absent (vs. just slow enough,
+  roughly one half-heart per ~4s, to be easy to miss in a short
+  playtest) or whether hunger genuinely wasn't full at the time. Worth
+  confirming directly (check the gamerule, or just watch health over a
+  longer idle window with hunger visibly full) before assuming
+  anything's broken on the server side.
+- **Confirmed working live overall** (mod-side death detection,
+  auto-respawn, low-health chat announcements, and now real eating with
+  the hunger-gating fix above) -- both the "eating..." and correctly-now-
+  actually-succeeding eat, or the new "hunger full" message, are the
+  expected behaviors going forward; verify all of this again on the next
+  playtest since the hunger-gating fix itself hasn't been live-tested
+  yet (only compiled/deployed so far).
 - `RespawnHandler` (death detection + auto-respawn + `death`/`respawn`
   events) has no test coverage on the mod side, but **is confirmed
   working live**: a real playtest showed the bot correctly detecting
