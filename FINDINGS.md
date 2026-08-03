@@ -199,13 +199,16 @@ normalized to `"minecraft:bread"` to match `InventoryTracker`/the mod's
 
 ## LLM trigger + brain layer (structure built, no provider wired up yet)
 
-`minebot/llm/trigger.py` -- `should_trigger_llm(text, sender, bot_name)`:
-deliberately narrow, fires only when the bot's own name is mentioned
-(case-insensitive substring) in a message with a real sender (not a
-system/game message). Ordinary chat between other players is ignored, so
-the bot isn't calling out to a model on every unrelated line. A real
-whisper/DM signal would be a stronger trigger than a name mention, but
-the control channel doesn't carry that distinction yet -- see Known gaps.
+`minebot/llm/trigger.py` -- `should_trigger_llm(text, sender, bot_name,
+trigger_words=())`: deliberately narrow, fires only when the bot's own
+name *or* one of a configurable list of extra trigger words/phrases
+(`MINEBOT_TRIGGER_WORDS`, comma-separated -- a nickname, a catch-all like
+"hey bot", etc.) is mentioned (case-insensitive substring) in a message
+with a real sender (not a system/game message). Ordinary chat between
+other players is ignored, so the bot isn't calling out to a model on
+every unrelated line. A real whisper/DM signal would be a stronger
+trigger than a name/word mention, but the control channel doesn't carry
+that distinction yet -- see Known gaps.
 
 `minebot/llm/controller.py` -- `LLMController.handle_chat(sender, text)`:
 calls an `LLMProvider` (a `Protocol`, not a concrete class) with the
@@ -231,7 +234,12 @@ decision entirely lives in the Python backend, matching the design intent
 - `minebot/config.py` -- `MINEBOT_MOD_HOST`/`MINEBOT_MOD_PORT` (default
   `0.0.0.0:47893` -- Python binds as the server now; see the
   WSL2-networking note above) plus `MINEBOT_BOT_NAME` (default
-  `"minebot"`), used by the LLM trigger check above.
+  `"minebot"`) and `MINEBOT_TRIGGER_WORDS` (comma-separated, default
+  empty), both used by the LLM trigger check above.
+  `run_loop.run()` takes the whole `BotConfig`, not individual fields --
+  threading each config value through as its own positional param got
+  fragile once there were two, and there will likely be more (LLM
+  provider/model selection, etc.) as the LLM piece grows.
 - `minebot/main.py` -- wires it all together: connect the bridge, build
   the `ActionRegistry`/trackers/movement+inventory controllers, build an
   `LLMController` (no provider configured), run the loop.
@@ -375,14 +383,15 @@ component -- this only makes sense running inside an actual client).
   response. Next step: implement `LLMProvider.respond` for a real
   provider (Anthropic/OpenAI/etc. -- deliberately not chosen yet) and
   build that provider's tool-schema format from `Action.params`.
-- `should_trigger_llm` only checks for the bot's name being mentioned --
-  there's no way to trigger it via whisper/DM, since `MinebotMod`'s
-  `CHAT`/`GAME` chat forwarding collapses every message into the same
-  `{"type":"chat"}` shape with no message-type flag. Would need a
-  mod-side change (a `whisper: bool` field on the `chat` event, sourced
-  from Fabric API's chat-type info) if that turns out to matter in
-  practice -- worth revisiting once a real LLM provider is live and it's
-  clearer whether name-mention-only is too broad or too narrow.
+- `should_trigger_llm` only checks for the bot's name or a configured
+  trigger word being mentioned -- there's no way to trigger it via
+  whisper/DM, since `MinebotMod`'s `CHAT`/`GAME` chat forwarding
+  collapses every message into the same `{"type":"chat"}` shape with no
+  message-type flag. Would need a mod-side change (a `whisper: bool`
+  field on the `chat` event, sourced from Fabric API's chat-type info) if
+  that turns out to matter in practice -- worth revisiting once a real
+  LLM provider is live and it's clearer whether name/word-mention-only is
+  too broad or too narrow.
 - No conversation history/context -- `LLMController.handle_chat` is
   called fresh per message with no memory of prior turns from the same
   (or any) sender. A real provider integration will likely need some
