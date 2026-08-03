@@ -18,7 +18,7 @@ async def test_dispatch_chat_calls_registered_handler_positionally():
         params=[ActionParam("distance", "int", "")],
     ))
 
-    result = await registry.dispatch_chat("!forward(3)", "Alex")
+    result = await registry.dispatch_chat("!forward 3", "Alex")
 
     assert result == ActionResult()
     assert calls == [("Alex", 3)]
@@ -49,7 +49,7 @@ async def test_dispatch_chat_returns_handler_result():
         params=[ActionParam("item", "string", ""), ActionParam("count", "int", "")],
     ))
 
-    result = await registry.dispatch_chat('!give("stick", 1)', "Alex")
+    result = await registry.dispatch_chat("!give stick 1", "Alex")
 
     assert result == ActionResult(message="gave 1x stick")
 

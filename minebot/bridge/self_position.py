@@ -25,6 +25,12 @@ class SelfPosition:
 class SelfPositionTracker:
     def __init__(self) -> None:
         self._position: SelfPosition | None = None
+        # Every position event carries the account's own name (see
+        # broadcastPositionEvent) -- kept separately from `_position` so it
+        # stays known even if some future position event ever omitted it,
+        # rather than being bundled inside the dataclass that gets fully
+        # replaced on every update.
+        self._own_name: str | None = None
 
     def handle_event(self, event: ModEvent) -> None:
         if event.type != "position":
@@ -36,7 +42,14 @@ class SelfPositionTracker:
             yaw=event.data.get("yaw", 0.0),
             pitch=event.data.get("pitch", 0.0),
         )
+        name = event.data.get("name")
+        if name is not None:
+            self._own_name = name
 
     @property
     def current(self) -> SelfPosition | None:
         return self._position
+
+    @property
+    def own_name(self) -> str | None:
+        return self._own_name

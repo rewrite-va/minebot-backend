@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from minebot.actions.registry import ActionRegistry
@@ -38,6 +40,12 @@ class FakeBridge:
 
     async def send_stop(self):
         self.sent.append(("stop", {}))
+
+    async def send_find(self, query, radius=64):
+        self.sent.append(("find", {"query": query, "radius": radius}))
+
+    async def send_goto(self, x, y, z, stop_distance=2.0):
+        self.sent.append(("goto", {"x": x, "y": y, "z": z, "stop_distance": stop_distance}))
 
 
 def _llm(bridge: FakeBridge, actions: ActionRegistry) -> LLMController:
@@ -116,7 +124,7 @@ async def test_run_loop_sends_action_result_message_to_chat(tmp_path):
         return ActionResult(message=f"here's your {item}")
 
     bridge = FakeBridge([
-        ModEvent(type="chat", data={"sender": "Alex", "text": '!give("bread")'}),
+        ModEvent(type="chat", data={"sender": "Alex", "text": "!give bread"}),
     ])
     actions = ActionRegistry()
     actions.register(Action(
@@ -255,6 +263,84 @@ async def test_run_loop_does_not_resume_follow_for_an_unrelated_reconnecting_pla
     await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, movement, SelfPositionTracker())
 
     assert bridge.sent == [("follow", {"entity_id": 7, "stop_distance": FOLLOW_STOP_DISTANCE})]
+
+
+@pytest.mark.asyncio
+async def test_run_loop_routes_find_result_events_to_movement(tmp_path):
+    bridge = FakeBridge([
+        ModEvent(type="find_result", data={"query": "cow", "found": False}),
+    ])
+    actions = ActionRegistry()
+    tracker = EntityTracker()
+    movement = _movement(bridge, tracker, tmp_path)
+
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, movement, SelfPositionTracker())  # should not raise
+
+    assert movement._pending_find is None
+
+
+class FindReplyBridge(FakeBridge):
+    """Only yields the find_result event once send_find has actually been
+    called -- mirrors the real mod, which can't reply to a search it
+    hasn't received yet (true request/response causality over one
+    connection). A plain canned event list can't express this: it would
+    let the reader race ahead and observe find_result before the command
+    handler has even set up something to receive it, which is impossible
+    in the real system (the mod only replies to a query it was sent) and
+    was previously masking whether the actual fix works.
+    """
+
+    def __init__(self, find_result: ModEvent):
+        super().__init__([ModEvent(type="chat", data={"sender": "Alex", "text": "!find cow"})])
+        self._find_result = find_result
+        self._find_sent = asyncio.Event()
+        self._goto_sent = asyncio.Event()
+
+    async def send_find(self, query, radius=64):
+        await super().send_find(query, radius)
+        self._find_sent.set()
+
+    async def send_goto(self, x, y, z, stop_distance=2.0):
+        await super().send_goto(x, y, z, stop_distance)
+        self._goto_sent.set()
+
+    async def events(self):
+        async for event in super().events():
+            yield event
+        await self._find_sent.wait()
+        yield self._find_result
+        if self._find_result.data.get("found"):
+            await self._goto_sent.wait()
+            yield ModEvent(type="arrived", data={})
+
+
+@pytest.mark.asyncio
+async def test_run_loop_delivers_find_result_without_deadlocking(tmp_path):
+    # Regression test: find() suspends the chat handler awaiting a
+    # find_result event, and (before the reader/processor split) that
+    # suspended the *same* coroutine that reads events off the mod's
+    # connection -- so a find_result the mod already sent could never
+    # actually be read, and find() always fell through to its 10s timeout
+    # no matter how fast the mod replied. This test would hang for the
+    # full 10s (and fail via asyncio.wait_for below) if that regressed.
+    bridge = FindReplyBridge(
+        ModEvent(type="find_result", data={"query": "cow", "found": True, "kind": "entity", "x": 1.0, "y": 2.0, "z": 3.0}),
+    )
+    actions = ActionRegistry()
+    tracker = EntityTracker()
+    movement = _movement(bridge, tracker, tmp_path)
+    register_movement_actions(actions, movement)
+
+    await asyncio.wait_for(
+        run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, movement, SelfPositionTracker()),
+        timeout=2.0,
+    )
+
+    assert bridge.sent == [
+        ("find", {"query": "cow", "radius": 64}),
+        ("goto", {"x": 1.0, "y": 2.0, "z": 3.0, "stop_distance": 2.0}),
+    ]
+    assert bridge.sent_chat == ["found cow at (1, 2, 3), going there", "here is the cow"]
 
 
 @pytest.mark.asyncio

@@ -1,5 +1,5 @@
 """Core vocabulary for the action layer: a single declarative description
-of "a thing the bot can do", usable both as a chat command (!name(args))
+of "a thing the bot can do", usable both as a chat command (!name arg1 arg2)
 and as an LLM tool call -- one Action definition, two callers, instead of
 the LLM path needing its own separate copy of every capability.
 

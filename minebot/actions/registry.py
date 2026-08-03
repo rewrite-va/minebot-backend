@@ -1,5 +1,5 @@
 """ActionRegistry: the single source of truth for everything the bot can
-do, dispatched two ways -- dispatch_chat for the existing !name(args) chat
+do, dispatched two ways -- dispatch_chat for the !name arg1 arg2 chat
 grammar (a human typing in chat), dispatch_tool_call for an LLM's
 structured tool-call arguments. Both funnel through the same registered
 Action, so a capability only needs to be written once to be usable from

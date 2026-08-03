@@ -1,5 +1,8 @@
+import asyncio
+
 import pytest
 
+import minebot.bot.movement as movement_module
 from minebot.bot.movement import FOLLOW_STOP_DISTANCE, GOTO_STOP_DISTANCE, MovementController
 from minebot.bridge.client import ModEvent
 from minebot.bridge.entities import EntityTracker
@@ -27,6 +30,9 @@ class RecordingBridge:
 
     async def send_chat(self, text):
         self.sent.append(("chat", {"text": text}))
+
+    async def send_find(self, query, radius=64):
+        self.sent.append(("find", {"query": query, "radius": radius}))
 
 
 def _add_player(tracker: EntityTracker, entity_id: int, name: str, x=0.0, y=0.0, z=0.0) -> None:
@@ -240,3 +246,103 @@ async def test_goto_clears_the_followed_name(tmp_path):
     await movement.on_entity_added("Alex", 99)
 
     assert bridge.sent == []
+
+
+@pytest.mark.asyncio
+async def test_find_walks_to_a_found_result_and_confirms_arrival(tmp_path):
+    bridge = RecordingBridge()
+    movement = _movement(bridge, tmp_path=tmp_path)
+
+    find_task = asyncio.ensure_future(movement.find(None, "cow"))
+    await asyncio.sleep(0)  # let find() send the command and start awaiting the result
+    movement.on_find_result({"found": True, "kind": "entity", "x": 3.0, "y": 5.0, "z": 9.0})
+    await asyncio.sleep(0)  # let find() send the "found at" chat message and start awaiting arrival
+    movement.on_arrived()
+    result = await find_task
+
+    assert bridge.sent == [
+        ("find", {"query": "cow", "radius": 64}),
+        ("chat", {"text": "found cow at (3, 5, 9), going there"}),
+        ("goto", {"x": 3.0, "y": 5.0, "z": 9.0, "stop_distance": GOTO_STOP_DISTANCE}),
+    ]
+    assert result.message == "here is the cow"
+
+
+@pytest.mark.asyncio
+async def test_find_reports_when_it_never_arrives(tmp_path, monkeypatch):
+    # Regression test: a player reported the bot "seems stuck" after
+    # !find with no way to tell whether it was still en route or had
+    # actually given up -- find() now distinguishes "still walking" from
+    # "gave up" instead of silently going quiet either way.
+    monkeypatch.setattr(movement_module, "FIND_ARRIVAL_TIMEOUT", 0.01)
+    bridge = RecordingBridge()
+    movement = _movement(bridge, tmp_path=tmp_path)
+
+    find_task = asyncio.ensure_future(movement.find(None, "cow"))
+    await asyncio.sleep(0)
+    movement.on_find_result({"found": True, "kind": "entity", "x": 3.0, "y": 5.0, "z": 9.0})
+    result = await find_task  # on_arrived is never called -- should time out fast (patched to 0.01s)
+
+    assert "stuck" in result.message
+
+
+
+
+@pytest.mark.asyncio
+async def test_find_reports_when_nothing_is_found(tmp_path):
+    bridge = RecordingBridge()
+    movement = _movement(bridge, tmp_path=tmp_path)
+
+    find_task = asyncio.ensure_future(movement.find(None, "diamond_ore"))
+    await asyncio.sleep(0)
+    movement.on_find_result({"found": False})
+    result = await find_task
+
+    assert bridge.sent == [("find", {"query": "diamond_ore", "radius": 64})]
+    assert "couldn't find" in result.message
+
+
+@pytest.mark.asyncio
+async def test_find_reports_an_unrecognized_query_differently_from_not_found(tmp_path):
+    # Regression test: BLOCK/ENTITY_TYPE are DefaultedRegistry mod-side,
+    # so a genuinely unrecognized query (a typo, a made-up word) used to
+    # report the exact same "couldn't find X nearby" as a real block/
+    # entity type that's simply out of range -- a player asked for these
+    # to be told apart ("!find aaa" vs "!find allay" with none around).
+    bridge = RecordingBridge()
+    movement = _movement(bridge, tmp_path=tmp_path)
+
+    find_task = asyncio.ensure_future(movement.find(None, "aaa"))
+    await asyncio.sleep(0)
+    movement.on_find_result({"found": False, "recognized": False})
+    result = await find_task
+
+    assert "isn't a block or mob" in result.message
+    assert "couldn't find" not in result.message
+
+
+@pytest.mark.asyncio
+async def test_find_clears_the_followed_name(tmp_path):
+    tracker = EntityTracker()
+    _add_player(tracker, 7, "Alex", x=1.0, y=2.0, z=3.0)
+    bridge = RecordingBridge()
+    movement = _movement(bridge, tracker, tmp_path=tmp_path)
+    await movement.follow(None, "Alex")
+
+    find_task = asyncio.ensure_future(movement.find(None, "cow"))
+    await asyncio.sleep(0)
+    movement.on_find_result({"found": False})
+    await find_task
+    bridge.sent.clear()
+
+    await movement.on_entity_added("Alex", 99)
+
+    assert bridge.sent == []
+
+
+@pytest.mark.asyncio
+async def test_on_find_result_with_nothing_pending_is_ignored(tmp_path):
+    bridge = RecordingBridge()
+    movement = _movement(bridge, tmp_path=tmp_path)
+
+    movement.on_find_result({"found": True, "kind": "block", "x": 1.0, "y": 2.0, "z": 3.0})  # should not raise

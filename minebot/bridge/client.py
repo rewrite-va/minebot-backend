@@ -28,6 +28,8 @@ from typing import Any, AsyncIterator
 import websockets
 from websockets.asyncio.server import ServerConnection, serve
 
+from minebot.timing import log_timing, now
+
 log = logging.getLogger("minebot.bridge")
 
 
@@ -117,9 +119,19 @@ class ModBridge:
         if event_type is None:
             log.warning("ignoring event with no 'type' field: %r", data)
             return None
+        # DEBUG=true-gated (see minebot/timing.py) -- added to debug a
+        # suspected deadlock/reordering issue between !find's send and its
+        # find_result reply (the mod replied within milliseconds on the
+        # wire, but the reply wasn't *processed* until a 10s timeout
+        # elsewhere gave up). Timestamps on every send/receive make actual
+        # wall-clock gaps between "sent" and "received" (and between
+        # "received" and "processed", logged separately by run_loop)
+        # directly measurable instead of inferred from log line order alone.
+        log_timing(log, "recv @ %.3f: type=%s %s", now(), event_type, data)
         return ModEvent(type=event_type, data=data)
 
     async def _send(self, payload: dict[str, Any]) -> None:
+        log_timing(log, "send @ %.3f: %s", now(), payload)
         if self._connection is None:
             # A dropped `chat` command is a real user-visible silent
             # failure (a player's command "worked" on the backend's side
@@ -163,3 +175,6 @@ class ModBridge:
         await self._send({
             "type": "give", "entity_id": entity_id, "slot": slot, "count": count, "stop_distance": stop_distance,
         })
+
+    async def send_find(self, query: str, radius: int = 64) -> None:
+        await self._send({"type": "find", "query": query, "radius": radius})
