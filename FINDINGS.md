@@ -198,11 +198,21 @@ see `pure-protocol-backend`'s FINDINGS.md if that's ever needed again).
   `chat` commands use): once per low-health episode when it starts eating
   ("I have N hearts!, eating...", translated) and once if the inventory
   scan comes up empty ("oh, I have no food! aaaa"), each gated by its own
-  per-episode boolean so it doesn't spam chat every tick while health
-  stays low. Entirely autonomous on the mod side; no control-channel wire
+  `util.EdgeTrigger` (see below) so it doesn't spam chat every tick while
+  health stays low. Entirely autonomous on the mod side; no control-channel wire
   format changes, so Python has no visibility into any of this beyond the
   `health` events it already gets (and the chat lines showing up as
   regular `chat` events, same as any other player's chat).
+- `util/EdgeTrigger.java` -- small reusable primitive extracted out of
+  `FoodEater`'s original pair of hand-rolled `announcedX` booleans: feed
+  it a per-tick boolean condition via `fire(condition)`, and it returns
+  `true` exactly once, on the tick the condition transitions false->true,
+  then stays quiet on every following tick the condition holds, and
+  rearms itself the moment the condition goes false. This is the "state
+  changed, announce it once, don't spam every tick it holds" shape, which
+  is expected to recur for other bot behaviors beyond eating (e.g. "just
+  died", "just got attacked", "just went idle") -- reuse this instead of
+  growing another `announcedX`/`reset-in-the-else` boolean pair per case.
 - `config/Messages.java` -- dictionary for the bot's own outgoing chat
   text (`FoodEater`'s lines above), backed by
   `assets/minebot-mod/messages/{en,es}.json` (flat key -> template maps,
