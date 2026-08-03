@@ -61,29 +61,32 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
   place) -- player+coords+remembered-place done, block/entity pending
   their own prerequisites.
 
-- ⬜ **`!searchForBlock`** -- find and walk to the nearest block of a
+- ✅ **`!searchForBlock`** -- find and walk to the nearest block of a
   given type within a search range. mindcraft ref: `actions.js:127`, →
-  `skills.goToNearestBlock`, `skills.js:1237`. No block-scanning exists
-  on the mod side at all yet (the mod only tracks *entities*, not block
-  positions by type -- `InventoryReporter`/`broadcastEntityEvents` cover
-  items/players, nothing scans the world for a block type). Needs new
-  mod-side work: a chunk/block scan within radius, likely in a new
-  `minebot-mod` class alongside `pathfinding/`.
+  `skills.goToNearestBlock`, `skills.js:1237`. Implemented as part of the
+  unified `!find` below (`BlockFinder.java`, `BlockPos.findClosestMatch`).
   **Want it?**
   > yes
 
-- ⬜ **`!searchForEntity`** -- find and walk to the nearest entity of a
+- ✅ **`!searchForEntity`** -- find and walk to the nearest entity of a
   given type (mob, animal, etc.). mindcraft ref: `actions.js:142`, →
-  `skills.goToNearestEntity`, `skills.js:1274`. Closer to already-
-  possible: `broadcastEntityEvents` (`MinebotMod.java`) currently only
-  tracks *players*, not mobs/animals ("Only players are tracked (not
-  every entity type): the only thing minebot currently needs to path
-  toward is another player" -- `FINDINGS.md`) -- would need widening that
-  scan to other entity types first.
+  `skills.goToNearestEntity`, `skills.js:1274`. Implemented as part of the
+  unified `!find` below (`EntityFinder.java`, a one-shot on-demand scan --
+  the always-on `broadcastEntityEvents` player tracking was left
+  untouched, this is separate).
   **Want it?**
   > yes, implements aliases: `!findEntity`, `!findMob`, `!findAnimal`
   > actually I want an universal find, so `!find` should be the alias for both `!searchForBlock` and `!searchForEntity`, with a type param to distinguish which one to use.
   > for example, !find cow, is the entity one, there is no cow block, so it will use the entity one, but !find stone will use the block one.
+  >
+  > **Done**: `!find <query>` (`minebot/bot/movement.py`'s `find`,
+  > `MinebotMod.handleFind`/`runFind`) tries entity type first, falls
+  > back to block type, and walks to the result -- matching mindcraft's
+  > behavior per the "Walk there" decision. Wire protocol: Python sends
+  > `{"type": "find", "query", "radius"}`, mod replies with a
+  > `find_result` event (`found`, `kind`, `x/y/z`); `MovementController`
+  > awaits it via a single-slot pending future (`_pending_find`) since
+  > only one `!find` is ever in flight at a time.
 
 - ⬜ **`!moveAway`** -- move away from the current position by a distance,
   in any direction. mindcraft ref: `actions.js:153`, → `skills.moveAway`,
@@ -470,7 +473,7 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
   **Want it?**
   > no, llm will respond with wiki information if needed, so no need for a separate command.
 
-- ⬜ **`!help`** -- list all available commands and their descriptions.
+- ✅ **`!help`** -- list all available commands and their descriptions.
   mindcraft ref: `queries.js:340`, → `getCommandDocs`
   (`commands/index.js:232`). Straightforward: `ActionRegistry.
   list_actions()` (`minebot/actions/registry.py:31`) already returns

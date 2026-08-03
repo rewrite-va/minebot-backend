@@ -36,7 +36,7 @@ async def run_bot(config: BotConfig) -> None:
 
     movement = MovementController(bridge, tracker, places, self_position)
     register_movement_actions(actions, movement)
-    inventory_controller = InventoryController(bridge, inventory, tracker)
+    inventory_controller = InventoryController(bridge, inventory, tracker, self_position)
     register_inventory_actions(actions, inventory_controller)
     register_help_action(actions)
 

@@ -63,3 +63,6 @@ class EntityTracker:
     def find_by_name(self, name: str) -> TrackedEntity | None:
         entity_id = self._name_to_id.get(name)
         return self._by_id.get(entity_id) if entity_id is not None else None
+
+    def all(self) -> list[TrackedEntity]:
+        return list(self._by_id.values())

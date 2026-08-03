@@ -25,12 +25,41 @@ class InventoryTracker:
     def __init__(self) -> None:
         self._by_slot: dict[int, InventorySlot] = {}
         self._selected_slot: int | None = None
+        # !give ("drop back whatever was just grabbed") needs to know the
+        # most recently *gained* item -- there's no dedicated pickup event
+        # anywhere (checked: no Fabric API hook exists for it, since real
+        # pickups happen server-side and the client only ever observes the
+        # resulting inventory change, indistinguishable at that point from
+        # crafting/trading/being given something).
+        #
+        # Two pointers, not an eagerly-recomputed single field: `_previous`
+        # is the per-item-total snapshot from before the most recent
+        # `inventory` event, `_current` from the most recent one. Whatever
+        # changed between them is computed on demand (last_gained_item),
+        # comparing exactly these two snapshots -- not "whichever item
+        # increased the most" (that heuristic broke live: the bot already
+        # carried a large stack of golden carrots, was given a single
+        # phantom membrane, and "biggest increase" mistakenly attributed
+        # the pre-existing carrots -- present in both snapshots, so a real
+        # per-item diff shows zero change for them -- as the latest gain).
+        # `_previous`/`_current` both start empty -- the very first
+        # `inventory` event this tracker ever sees has nothing genuine to
+        # diff against, so everything in it reads as "gained" that one
+        # time (accepted as unavoidable: there's no way to know what the
+        # bot carried before the mod started reporting). The mod now
+        # sends one snapshot immediately on connect (see
+        # InventoryReporter.forceNextBroadcast) specifically so this
+        # baseline gets established right away instead of waiting for the
+        # first real change after connecting.
+        self._previous: dict[str, int] = {}
+        self._current: dict[str, int] = {}
 
     def handle_event(self, event: ModEvent) -> None:
         if event.type != "inventory":
             return
 
         self._selected_slot = event.data.get("selected_slot")
+
         self._by_slot = {}
         for raw_slot in event.data.get("slots", []):
             slot = InventorySlot(
@@ -42,9 +71,36 @@ class InventoryTracker:
             )
             self._by_slot[slot.slot] = slot
 
+        self._previous = self._current
+        self._current = self._totals_by_item()
+
+    def _totals_by_item(self) -> dict[str, int]:
+        totals: dict[str, int] = {}
+        for entry in self._by_slot.values():
+            totals[entry.item] = totals.get(entry.item, 0) + entry.count
+        return totals
+
     @property
     def selected_slot(self) -> int | None:
         return self._selected_slot
+
+    @property
+    def last_gained_item(self) -> str | None:
+        """The item whose total count is higher in the most recent
+        `inventory` snapshot than in the one before it -- None if nothing
+        increased. If more than one item increased between the same two
+        snapshots, which one this returns is arbitrary; callers that need
+        to detect and handle that ambiguity (rather than silently guess)
+        should use gained_items() instead.
+        """
+        gained = self.gained_items()
+        return next(iter(gained), None)
+
+    def gained_items(self) -> list[str]:
+        """Every item whose total count increased between the last two
+        `inventory` snapshots, in no particular order.
+        """
+        return [item for item, count in self._current.items() if count > self._previous.get(item, 0)]
 
     def slots(self) -> list[InventorySlot]:
         return list(self._by_slot.values())

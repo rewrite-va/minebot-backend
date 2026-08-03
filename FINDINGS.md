@@ -122,6 +122,16 @@ Commands, Python -> mod:
 - `{"type":"give","entity_id":..,"slot":..,"count":..,"stop_distance":2.0}`
   -- walks toward `entity_id` (FOLLOW-style pathing) and, once within
   `stop_distance`, drops `count` of `slot`'s contents and returns to IDLE.
+- `{"type":"find","query":"cow","radius":64}` -- backs `!find`: `query`
+  is tried as an entity type first (`minecraft:` prefix added if not
+  already namespaced), falling back to a block type if no entity type by
+  that name exists. Answered asynchronously by a `find_result` event (see
+  below), not a direct reply -- see "The find_result deadlock" below for
+  why that matters. Runs the actual `BlockPos.findClosestMatch`/
+  `getEntitiesOfClass` scan via `Minecraft.getInstance().execute(...)`,
+  not inline in `handleMessage` -- these iterate live chunk/entity
+  collections, which (unlike the simpler inventory commands) is genuinely
+  unsafe off the render/tick thread.
 
 All four inventory commands address slots using `Inventory`'s own 0-42
 numbering (0-8 hotbar, 9-35 main storage, 36-42 armor/offhand/body/
@@ -138,8 +148,25 @@ Events, mod -> Python:
   The backend compares `commit` against `minebot-mod`'s own current
   `git rev-parse HEAD` (see `minebot/mod_version.py`) and logs a loud
   WARNING on mismatch.
-- `{"type":"position","x":..,"y":..,"z":..,"yaw":..,"pitch":..,"on_ground":..}`
-  (every client tick)
+- `{"type":"position","name":"..","x":..,"y":..,"z":..,"yaw":..,"pitch":..,"on_ground":..}`
+  (every client tick) -- `name` is the bot's own account name
+  (`player.getScoreboardName()`), tracked Python-side by
+  `SelfPositionTracker.own_name` so the run loop can recognize and ignore
+  the bot's *own* chat messages (see "The chat self-echo loop" below).
+- `{"type":"find_result","query":"..","found":true|false,"recognized":true|false,"kind":"entity"|"block","x":..,"y":..,"z":..}`
+  -- reply to a `find` command; `kind`/`x`/`y`/`z` are omitted when
+  `found` is `false`. Fire-and-forget, no request id: only one `!find` is
+  ever in flight at a time (chat commands are dispatched one at a time on
+  the Python side), so `MovementController` just resolves whichever
+  single pending future is waiting, if any (`_pending_find`).
+  `recognized` distinguishes "that's a real block/entity type, just none
+  within range" from "that's not a registered type at all" -- `BLOCK`/
+  `ENTITY_TYPE` are `DefaultedRegistry`, so a lookup for an unknown key
+  silently falls back to a default instead of failing, and both cases
+  used to report the identical "not found nearby" (a player asked for
+  these to be told apart live: `!find aaa` vs `!find allay` with none
+  around). Checked via `Registry.containsKey`, independent of the
+  defaulting behavior.
 - `{"type":"chat","sender":"name-or-omitted","text":".."}`
 - `{"type":"entity","action":"add"|"move"|"remove","id":..,"name":"...","x":..,"y":..,"z":..}`
   (name/position omitted on `remove`; name omitted on `move`, since it never
@@ -151,11 +178,169 @@ Events, mod -> Python:
   below), no manual "click Respawn" needed.
 - `{"type":"respawn"}` -- fires exactly once after a `death` when the bot
   has actually respawned (health back above 0).
+- `{"type":"arrived"}` -- fires exactly once when a GOTO goal's distance-
+  to-target first drops under `stop_distance` (`ControlState.gotoArrived`,
+  an `EdgeTrigger`; reset on every `setGoto`/`setFollow`/`setGive`/`clear`
+  so a fresh goal always reports its own arrival, not a stale one from a
+  previous goal). Deliberately general-purpose, not `!find`-specific --
+  FOLLOW/GIVE never fire it (no single "arrival": FOLLOW tracks a moving
+  target forever, GIVE's completion is `maybeCompleteGive` dropping the
+  item, a different concept). `!find` is the first consumer: it sends an
+  immediate "found X at (coords), going there" chat message when
+  `find_result` resolves, then separately awaits `arrived` before sending
+  a final "here is the X" (falling back to "having trouble reaching X,
+  might be stuck" after `FIND_ARRIVAL_TIMEOUT`, 60s) -- added after a
+  player watched the bot walk toward a found block with no way to tell
+  whether it had arrived or was stuck.
 - `{"type":"inventory","selected_slot":..,"slots":[{"slot":..,"item":"minecraft:...","count":..,"damage":..,"max_damage":..}, ...]}`
   -- a full snapshot (only non-empty slots listed), broadcast whenever it
   differs from the last one sent (change-only, same shape as `health`).
   `damage`/`max_damage` are only present for damaged (not full-durability)
   items.
+
+## The find_result deadlock (run_loop.py's reader/processor split)
+
+`!find`'s handler (`MovementController.find`) sends a `find` command and
+then suspends, awaiting a future that only gets resolved when a later
+`find_result` event is processed. The very first implementation just
+awaited `dispatch_chat` inline inside `run()`'s single
+`async for event in bridge.events()` loop -- which means the coroutine
+reading events off the socket was the *same* coroutine suspended waiting
+for one of those events to arrive. The mod actually replies within
+~100-200ms in practice (confirmed live with `time.monotonic()`
+instrumentation on every send/recv), but Python never looked at the
+already-buffered reply until `find()`'s own 10s timeout gave up and the
+loop finally got back around to reading the next message -- a true
+self-deadlock, not a real latency problem. `!find` always failed with
+"no response" live even though the mod never failed to reply.
+
+Fixed by splitting `run()` into two concurrent tasks joined by an
+`asyncio.Queue` (see `run_loop.py`'s `_read_events`/`_process_event`):
+- `_read_events` is the *only* coroutine that ever awaits the next raw
+  event off `bridge.events()`. It never blocks on anything that itself
+  waits for a later event. `find_result` gets a fast-path here --
+  resolved into `MovementController._pending_find` the instant it's
+  read, before the event even reaches the queue.
+- The main loop in `run()` drains that queue and processes everything
+  else exactly as before (one event at a time, in order), so ordering
+  guarantees other logic depends on (e.g. `!follow`'s `send_follow`
+  happens-before a later entity-reconnect event is processed) are
+  unchanged.
+
+A background-task approach (running each chat command as its own
+`asyncio.Task` instead of awaiting it inline) was considered and
+rejected: it also unblocks `find_result`, but lets a slow command's side
+effects land *after* later events have already been processed, which
+broke the `!follow`-resumes-after-reconnect ordering guarantee in
+practice (verified by writing that version and watching a real test
+fail on event order, not just correctness).
+
+`tests/test_run_loop.py::test_run_loop_delivers_find_result_without_deadlocking`
+is a regression test for this specifically -- it uses a `FindReplyBridge`
+that only yields its canned `find_result` event once `send_find` has
+actually been called (modeling the real request/response causality a
+plain canned event list can't express), and fails via `asyncio.wait_for`'s
+2s timeout if the deadlock ever comes back.
+
+## The chat self-echo loop
+
+The mod's `ClientReceiveMessageEvents.CHAT` listener hears the bot's
+*own* chat messages the same as any other player's (they go through the
+normal server chat broadcast) -- discovered live when a command's own
+error reply ("something went wrong running !find") got re-parsed as a
+fresh `!find` with no arguments, which itself errored and replied again,
+forever. Fixed by having `position` events also report the bot's own
+account name (`SelfPositionTracker.own_name`, sourced from
+`player.getScoreboardName()`), and `run_loop.py`'s chat handling ignores
+any chat event whose `sender` matches it.
+
+Note: this server also appears to render the `<username> ` prefix into
+the message text itself (`message.getString()` returns
+`"<riterite> !find cow"`, not just `"!find cow"`, alongside a separately-
+correct `sender: "riterite"` field) -- harmless for the current parser
+(`!name` is found by regex search anywhere in the string), but worth
+knowing about if a future change ever assumes `text` is just the raw
+command with no prefix.
+
+## Chat command grammar simplified to bare args only
+
+`actions/parser.py` used to accept two forms: `!name("arg1", 2)`
+(parenthesized, mirroring mindcraft's own parser) and `!name arg1 arg2`
+(bare space-separated, this project's own addition for how a human
+actually types in chat). The parenthesized form was dropped entirely --
+a chat-typing human never used it, and it only added grammar surface (a
+more complex regex, `_ARG_RE`, an "which form is this" branch) with zero
+benefit once the bare form covered every real use. `!name` is now just a
+plain `!(\w+)` regex followed by the same bare-arg tokenizer as before;
+quoted tokens (`"multi word"`) are still supported within the bare form
+for a single arg containing spaces.
+
+## Missing-required-argument errors are now caught before dispatch
+
+`ActionRegistry.dispatch_chat`/`dispatch_tool_call` used to call the
+handler directly and rely on catching whatever `Exception` fell out --
+a missing required argument (e.g. `!find` with no query, `!give` when
+its old signature required an item) crashed as a bare Python `TypeError`
+from argument binding, reported only as a generic "something went wrong
+running !X" with no indication of *what* was wrong. Both dispatch paths
+now check `Action.params`' `required` flags against what was actually
+given *before* calling the handler, and report exactly which argument(s)
+are missing (`"!find needs query -- see !help find"`) instead.
+
+## !give redesigned: can give back the last picked-up item, not just a chosen one
+
+Originally `give(player_name, item, count=1)` -- a general-purpose "hand
+this specific item to this specific player" command. Extended (not
+replaced) to `give(item=None, player_name=None)`: `!give <item>
+[player_name]` still works exactly as before, but `item` is now
+optional -- omitting it drops back whatever the bot most recently
+*gained* instead (a live report of the bot auto-picking up items and
+slowly hoarding them prompted this -- a fast "give back what you just
+grabbed" alongside the general form, not a replacement for it). A single
+bare arg is ambiguous (item or player?), resolved the same way `!find`
+resolves entity-vs-block: try it as a currently-visible player name
+first, fall back to treating it as an item name if it isn't one. No
+player given at all resolves to whoever's currently closest
+(`InventoryController._closest_player`, needs `SelfPositionTracker`,
+threaded into `InventoryController`'s constructor).
+
+`InventoryTracker` gained `gained_items()`/`last_gained_item`: there's no
+dedicated pickup event anywhere (checked -- no Fabric API hook exists
+for real item pickups specifically, since they happen server-side and
+the client only ever observes the resulting inventory change,
+indistinguishable at that point from crafting/trading/being given
+something). Approximated instead via two named pointers, `_previous`/
+`_current` (each a per-item-total dict), updated on every `inventory`
+event as `_previous = _current; _current = <new totals>` -- `gained_items()`
+compares exactly these two snapshots on demand, returning every item
+whose total is higher in `_current` than in `_previous`.
+
+This replaced an earlier, buggier version that picked whichever item's
+count increased *the most* as a tiebreak -- found live: the bot already
+carried a large stack of golden carrots, was given a single phantom
+membrane, and "biggest increase" mistakenly attributed the pre-existing
+(unchanged) carrot stack as the latest gain, since its raw size
+outranked the freshly-received membrane. The real bug wasn't same-tick
+ambiguity (a single client tick is atomic enough that two unrelated
+inventory changes essentially never land in the same broadcast) -- it
+was that "biggest increase" is simply the wrong question; the right one
+is "which item's count is different at all between exactly these two
+snapshots," with no magnitude comparison. If more than one item
+genuinely does increase between the same two snapshots, `!give` reports
+the ambiguity explicitly and asks the player to specify which one
+(`!give <item>`) rather than silently guessing again.
+
+Also fixed as part of this: `InventoryReporter.maybeBroadcast` used to
+dedupe by comparing the *serialized JSON string* against the last one
+sent -- workable for "should I send this," but conflated serialization
+with change-detection. `forceNextBroadcast()` (called from
+`onControlChannelConnected`) now makes the mod send one full snapshot
+immediately on every fresh connection, regardless of whether it matches
+whatever was last sent to a *previous* (now-gone) connection -- without
+this, a freshly (re)started Python backend had no way to learn the bot's
+already-carried inventory until something *changed* after it connected,
+during which `InventoryTracker` (and so `gained_items()`) reads as
+carrying nothing at all.
 
 ## Repo layout (Python side, `master`)
 
@@ -573,6 +758,10 @@ see `pure-protocol-backend`'s FINDINGS.md if that's ever needed again).
   reacting to a changed file).
 - `StatusHud.java` -- a HUD text overlay showing whether the control
   channel is currently connected.
+- `PathVisualizer.java` -- draws the currently planned A* path
+  (`PathTracker.waypoints()`, a new read-only accessor) as a connected
+  line through each waypoint, local-client-only debug visualization (see
+  "Path visualization" below).
 - `MinebotMod.java` -- entry point: starts the control client, registers
   the client-tick hook (resolves the goal via `PathTracker`, updates
   `MinebotInput`, sets yaw, checks GIVE-goal completion, ticks
@@ -588,6 +777,87 @@ see `pure-protocol-backend`'s FINDINGS.md if that's ever needed again).
 
 `fabric.mod.json` declares `"environment": "client"` (no server-side
 component -- this only makes sense running inside an actual client).
+
+## Path visualization: MC 26.1.2's Gizmo debug-draw API
+
+Requested: visualize the currently planned pathfinding waypoints in the
+bot's own client, local-only (not visible to other players, not
+networked). This MC version turned out to have moved to a genuinely
+different world-render architecture than older Fabric-modding knowledge
+assumes -- the classic `WorldRenderEvents.END` + immediate-mode
+`Tesselator` pattern doesn't exist in `fabric-rendering-v1` here at all,
+replaced by `net.fabricmc.fabric.api.client.rendering.v1.level.
+LevelRenderEvents` (hooks: `AFTER_BLOCK_OUTLINE_EXTRACTION`,
+`END_EXTRACTION`, `START_MAIN`, `AFTER_OPAQUE_TERRAIN`,
+`COLLECT_SUBMITS`, `AFTER_SOLID_FEATURES`, `AFTER_TRANSLUCENT_FEATURES`,
+`BEFORE_BLOCK_OUTLINE`, `BEFORE_GIZMOS`, `BEFORE_TRANSLUCENT_TERRAIN`,
+`AFTER_TRANSLUCENT_TERRAIN`, `END_MAIN`).
+
+Confirmed (by reading real decompiled vanilla source from Loom's
+`genSources` cache, `~/.gradle/caches/fabric-loom/decompile/v1.zip`, not
+guessed) that MC 26.1.2 has a first-class **Gizmo** debug-draw system
+(`net.minecraft.gizmos.Gizmos`) -- this is the modern built-in equivalent
+of hand-tesselating a line, and what vanilla itself uses for exactly
+this kind of overlay. No manual `VertexConsumer`/`BufferBuilder` work is
+needed for a simple colored line:
+
+```java
+LevelRenderEvents.BEFORE_GIZMOS.register(context -> {
+    try (var ignored = context.levelRenderer().collectPerFrameGizmos()) {
+        Gizmos.line(startVec3, endVec3, argbColor, width).setAlwaysOnTop();
+    }
+});
+```
+
+- `BEFORE_GIZMOS` fires immediately before vanilla's own
+  `LevelRenderer.finalizeGizmoCollection()` drains its per-frame
+  collector, so anything added during this callback renders that same
+  frame. (`COLLECT_SUBMITS` is unrelated -- fires earlier, for
+  `SubmitNodeCollector`-style entity/block-entity submissions, not
+  gizmos.)
+- `Gizmos.line`/`cuboid`/`point`/etc. require an active collector
+  (a `ThreadLocal`) or they throw `IllegalStateException`;
+  `LevelRenderer.collectPerFrameGizmos()` returns an `AutoCloseable` that
+  sets one up for the try-with-resources block's duration.
+- Gizmos default to depth-tested (hidden behind terrain) unless
+  `.setAlwaysOnTop()` is called on the returned `GizmoProperties` --
+  used here since a pathfinding overlay is only useful if visible
+  through walls/underground, the same reason a route is often worth
+  checking in the first place.
+- Confirmed real (via `javap`) against this project's actual pinned
+  `fabric-api` version (`0.151.0+26.1.2`, `gradle.properties`), not just
+  the general MC version -- exact method signatures matched a fresh
+  independent `javap` check before writing `PathVisualizer.java`.
+
+`Gizmos.point(pos, argb, size)`'s `size` gotcha (found live, then root-
+caused via decompiled shader source): unlike `Gizmos.line`'s `width`,
+`point`'s `size` is **not** a world-space or even a generically-scaled
+value -- it's assigned completely raw to `gl_PointSize` (a real GL point
+sprite, `GL_POINTS`/`VertexFormat.Mode.POINTS`), in literal screen
+pixels, with no division by screen size the way the line shader
+(`rendertype_lines.vsh`) explicitly does to build real expanded-quad
+line geometry from its own `width`. A `size` of `0.25f` (chosen by
+analogy to `LineGizmo`'s `width=3.0f` default) requested a quarter-
+pixel-diameter dot -- rasterizes to nothing on any real display. Fixed
+by using `10.0f` instead (`PathVisualizer.MARKER_SIZE`) -- comparably
+sized to how a small dot actually reads on screen. Side effect worth
+knowing: `point` markers are constant-*pixel*-size regardless of camera
+distance (a screen-space point sprite), unlike `line`/`cuboid` gizmos
+which are real world-space geometry that shrinks with distance --
+`Gizmos.cuboid` would be the alternative if a marker that scales
+naturally with distance is ever wanted instead.
+
+## Level horizon while walking a waypoint
+
+`resolveMovementIntent` only ever set `intent.yaw` while actively
+walking toward a pathfinding waypoint -- `intent.pitch` was simply never
+touched there, so it stayed at whatever `NearbyPlayerLookAt`'s last
+glance had left it at (tilted up/down toward whoever was nearby a moment
+before movement started), rather than looking level. Fixed by explicitly
+setting `intent.pitch = 0f` in the same branch that sets `intent.yaw`
+(`MinebotMod.resolveMovementIntent`, guarded by
+`horizontalDistance > distanceToStopAt` -- only while actually stepping
+forward, not merely "a goal exists").
 
 ## Known gaps / next steps
 
