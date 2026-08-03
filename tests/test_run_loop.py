@@ -3,6 +3,7 @@ import pytest
 from minebot.bot.run_loop import run
 from minebot.bridge.client import ModEvent
 from minebot.bridge.entities import EntityTracker
+from minebot.bridge.inventory import InventoryTracker
 from minebot.commands.registry import CommandRegistry
 
 
@@ -31,9 +32,22 @@ async def test_run_loop_feeds_entity_events_into_tracker():
     tracker = EntityTracker()
     registry = CommandRegistry()
 
-    await run(bridge, registry, tracker)
+    await run(bridge, registry, tracker, InventoryTracker())
 
     assert tracker.find_by_name("Alex") is not None
+
+
+@pytest.mark.asyncio
+async def test_run_loop_feeds_inventory_events_into_tracker():
+    bridge = FakeBridge([
+        ModEvent(type="inventory", data={"selected_slot": 0, "slots": [{"slot": 0, "item": "minecraft:bread", "count": 5}]}),
+    ])
+    inventory = InventoryTracker()
+    registry = CommandRegistry()
+
+    await run(bridge, registry, EntityTracker(), inventory)
+
+    assert inventory.count_of("minecraft:bread") == 5
 
 
 @pytest.mark.asyncio
@@ -49,7 +63,7 @@ async def test_run_loop_dispatches_chat_commands():
     registry = CommandRegistry()
     registry.register("ping", ping_handler)
 
-    await run(bridge, registry, EntityTracker())
+    await run(bridge, registry, EntityTracker(), InventoryTracker())
 
     assert calls == ["Alex"]
 
@@ -61,7 +75,7 @@ async def test_run_loop_replies_to_unknown_commands():
     ])
     registry = CommandRegistry()
 
-    await run(bridge, registry, EntityTracker())
+    await run(bridge, registry, EntityTracker(), InventoryTracker())
 
     assert bridge.sent_chat == ["unknown command: !doesnotexist"]
 
@@ -73,7 +87,7 @@ async def test_run_loop_does_not_reply_to_non_command_chat():
     ])
     registry = CommandRegistry()
 
-    await run(bridge, registry, EntityTracker())
+    await run(bridge, registry, EntityTracker(), InventoryTracker())
 
     assert bridge.sent_chat == []
 
@@ -87,4 +101,4 @@ async def test_run_loop_ignores_position_and_health_events_without_crashing():
     ])
     registry = CommandRegistry()
 
-    await run(bridge, registry, EntityTracker())  # should not raise
+    await run(bridge, registry, EntityTracker(), InventoryTracker())  # should not raise

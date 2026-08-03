@@ -136,3 +136,17 @@ class ModBridge:
 
     async def send_chat(self, text: str) -> None:
         await self._send({"type": "chat", "text": text})
+
+    async def send_move_to_hotbar(self, slot: int, hotbar_slot: int) -> None:
+        await self._send({"type": "move_to_hotbar", "slot": slot, "hotbar_slot": hotbar_slot})
+
+    async def send_equip(self, slot: int) -> None:
+        await self._send({"type": "equip", "slot": slot})
+
+    async def send_drop(self, slot: int, count: int) -> None:
+        await self._send({"type": "drop", "slot": slot, "count": count})
+
+    async def send_give(self, entity_id: int, slot: int, count: int, stop_distance: float = 2.0) -> None:
+        await self._send({
+            "type": "give", "entity_id": entity_id, "slot": slot, "count": count, "stop_distance": stop_distance,
+        })

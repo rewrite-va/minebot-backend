@@ -10,16 +10,24 @@ import logging
 
 from minebot.bridge.client import ModBridge
 from minebot.bridge.entities import EntityTracker
+from minebot.bridge.inventory import InventoryTracker
 from minebot.commands.registry import CommandRegistry
 
 log = logging.getLogger("minebot.run_loop")
 
 
-async def run(bridge: ModBridge, commands: CommandRegistry, tracker: EntityTracker) -> None:
+async def run(
+    bridge: ModBridge, commands: CommandRegistry, tracker: EntityTracker, inventory: InventoryTracker,
+) -> None:
     async for event in bridge.events():
         if event.type == "entity":
             log.debug("entity event: %s", event.data)
             tracker.handle_event(event)
+            continue
+
+        if event.type == "inventory":
+            log.debug("inventory event: %s", event.data)
+            inventory.handle_event(event)
             continue
 
         if event.type == "chat":

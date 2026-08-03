@@ -36,8 +36,12 @@ async def test_send_methods_produce_correctly_shaped_json():
         await bridge.send_follow(42, stop_distance=3.0)
         await bridge.send_stop()
         await bridge.send_chat("hello")
+        await bridge.send_move_to_hotbar(12, 3)
+        await bridge.send_equip(5)
+        await bridge.send_drop(5, 2)
+        await bridge.send_give(42, 5, 2, stop_distance=1.5)
 
-        for _ in range(4):
+        for _ in range(8):
             received.append(json.loads(await mod_client.recv()))
 
         await bridge.close()
@@ -47,6 +51,10 @@ async def test_send_methods_produce_correctly_shaped_json():
         {"type": "follow", "entity_id": 42, "stop_distance": 3.0},
         {"type": "stop"},
         {"type": "chat", "text": "hello"},
+        {"type": "move_to_hotbar", "slot": 12, "hotbar_slot": 3},
+        {"type": "equip", "slot": 5},
+        {"type": "drop", "slot": 5, "count": 2},
+        {"type": "give", "entity_id": 42, "slot": 5, "count": 2, "stop_distance": 1.5},
     ]
 
 

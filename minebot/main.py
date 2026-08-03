@@ -4,10 +4,12 @@ import asyncio
 import logging
 import os
 
+from minebot.bot.inventory import InventoryController, register_inventory_commands
 from minebot.bot.movement import MovementController, register_movement_commands
 from minebot.bot.run_loop import run
 from minebot.bridge.client import ModBridge
 from minebot.bridge.entities import EntityTracker
+from minebot.bridge.inventory import InventoryTracker
 from minebot.commands.registry import CommandRegistry
 from minebot.config import BotConfig
 
@@ -22,11 +24,14 @@ async def run_bot(config: BotConfig) -> None:
 
     registry = CommandRegistry()
     tracker = EntityTracker()
+    inventory = InventoryTracker()
     movement = MovementController(bridge, tracker)
     register_movement_commands(registry, movement)
+    inventory_controller = InventoryController(bridge, inventory, tracker)
+    register_inventory_commands(registry, inventory_controller)
 
     try:
-        await run(bridge, registry, tracker)
+        await run(bridge, registry, tracker, inventory)
     finally:
         await bridge.close()
 
