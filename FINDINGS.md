@@ -345,16 +345,23 @@ see `pure-protocol-backend`'s FINDINGS.md if that's ever needed again).
 - `MovementIntent.java` -- the concrete per-tick forward/jump/yaw/pitch
   resolved from the current goal against live game state; separates goal
   resolution (needs live entity/player state) from input plumbing
-  (doesn't). `resolveMovementIntent` (in `MinebotMod.java`) picks between
-  two look-direction behaviors: while a pathfinding waypoint is still
-  queued, yaw keeps aiming at the next waypoint (needed to actually walk
-  the route); once the waypoint queue empties (arrived, or pathfinding
-  failed and it's falling back to the raw target) and there's a live
-  `FOLLOW`/`GIVE` entity, yaw+pitch instead aim directly at that entity's
-  eye level (`Entity.getEyeY()` on both sides) -- so the bot looks at
-  whoever it's following once close, rather than continuing to face
-  wherever the last waypoint was. Pitch sign (positive = looking down)
-  confirmed via decompiled `Entity.calculateViewVector`.
+  (doesn't). `resolveMovementIntent` (in `MinebotMod.java`) only sets yaw
+  while actively walking toward a pathfinding waypoint (yaw doubles as
+  "which way to walk forward" then) -- it no longer knows anything about
+  looking at a FOLLOW/GIVE target specifically, see `NearbyPlayerLookAt`
+  below for where look-at-a-player now lives instead.
+- `NearbyPlayerLookAt.java` -- looks at whoever's closest within 8
+  blocks, yaw+pitch aimed at their eye level (`Entity.getEyeY()` on both
+  sides; pitch sign, positive = looking down, confirmed via decompiled
+  `Entity.calculateViewVector`), entirely independent of any movement
+  goal -- the bot glances at a nearby player whether idle, mid-`!goto`,
+  or following someone else entirely, the way a real player naturally
+  would. `MinebotMod.onClientTick` only applies this when
+  `resolveMovementIntent` left yaw unset for the tick (i.e. not actively
+  walking toward a waypoint), so it never fights the pathfinding --
+  originally this lived inside `resolveMovementIntent` tied specifically
+  to the `FOLLOW`/`GIVE` goal, then was pulled out and generalized after
+  a follow-up request to decouple it from following specifically.
 - `MinebotInput.java` -- the `ClientInput` replacement described above
   (keyboard-override + `MovementIntent`-driven fallback).
 - `FoodEater.java` -- autonomous eating: every client tick, if health is
