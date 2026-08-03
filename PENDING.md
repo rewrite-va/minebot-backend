@@ -37,6 +37,7 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
   param the way mindcraft's does (stop distance is a fixed constant,
   `FOLLOW_STOP_DISTANCE` in `movement.py:26`).
   **Want it?** already done.
+  > fix the auto-resume on reconnect gap
 
 - ✅ **`!stop`** -- cancel the current action/movement. → **`stop`**,
   `movement.py:51`. mindcraft ref: `actions.js:53` (note: mindcraft's
@@ -45,23 +46,20 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
   reconciling once there are other running actions to cancel).
   **Want it?** already done.
 
-- ⬜ **`!goToPlayer`** -- walk to a player once, without continuing to
-  follow them (one-shot, unlike `!followPlayer`). mindcraft ref:
-  `actions.js:92`, → `skills.goToPlayer`, `skills.js:1294`. Land in
-  `movement.py`; the mod side already supports a one-shot `GOTO` goal to
-  arbitrary coordinates (`ControlState.setGoto`, `MinebotMod.java`
-  `handleMessage`'s `"goto"` case) -- this would resolve a player name to
-  their current position via `EntityTracker` and send that, no new
-  mod-side work needed.
-  **Want it?**
-
-- ⬜ **`!goToCoordinates`** -- walk to an explicit x,y,z position.
-  mindcraft ref: `actions.js:114`, → `skills.goToPosition`,
-  `skills.js:1181`. The mod's `goto` wire command + `ModBridge.
-  send_goto` (`minebot/bridge/client.py:141`) already exist end-to-end
-  -- this is purely a missing Python-side chat `Action` wrapper in
-  `movement.py`, no mod work at all.
-  **Want it?**
+- 🟡 **`!goToPlayer`** / **`!goToCoordinates`** -- walk to a player once
+  (no continued following), or to explicit x,y,z. → **`goto`**,
+  `minebot/bot/movement.py:84` (commit `c75685b`). mindcraft ref:
+  `actions.js:92` / `114`, → `skills.goToPlayer`/`skills.goToPosition`,
+  `skills.js:1294`/`1181`. Implements the player-name and explicit-
+  coordinate legs of the universal `!goto` you asked for (below), plus
+  remembered-place resolution. **Still missing**: block-type and
+  entity-type resolution (`!goto stone`, `!goto cow`) -- blocked on
+  `!searchForBlock`/`!searchForEntity`'s own prerequisites below; the
+  handler is already structured to add those as two more resolution
+  branches with no interface change once those exist.
+  **Want it?** universal `!goto` (player/block/entity/coords/remembered
+  place) -- player+coords+remembered-place done, block/entity pending
+  their own prerequisites.
 
 - ⬜ **`!searchForBlock`** -- find and walk to the nearest block of a
   given type within a search range. mindcraft ref: `actions.js:127`, →
@@ -72,6 +70,7 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
   mod-side work: a chunk/block scan within radius, likely in a new
   `minebot-mod` class alongside `pathfinding/`.
   **Want it?**
+  > yes
 
 - ⬜ **`!searchForEntity`** -- find and walk to the nearest entity of a
   given type (mob, animal, etc.). mindcraft ref: `actions.js:142`, →
@@ -82,6 +81,9 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
   toward is another player" -- `FINDINGS.md`) -- would need widening that
   scan to other entity types first.
   **Want it?**
+  > yes, implements aliases: `!findEntity`, `!findMob`, `!findAnimal`
+  > actually I want an universal find, so `!find` should be the alias for both `!searchForBlock` and `!searchForEntity`, with a type param to distinguish which one to use.
+  > for example, !find cow, is the entity one, there is no cow block, so it will use the entity one, but !find stone will use the block one.
 
 - ⬜ **`!moveAway`** -- move away from the current position by a distance,
   in any direction. mindcraft ref: `actions.js:153`, → `skills.moveAway`,
@@ -89,16 +91,18 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
   `ControlState` mode or reuse `GOTO` with a computed away-from-here
   point.
   **Want it?**
+  > no
 
-- ⬜ **`!rememberHere`** / **`!goToRememberedPlace`** -- save the bot's
+- ✅ **`!rememberHere`** / **`!goToRememberedPlace`** -- save the bot's
   current location under a name, and later walk back to it by that name.
-  mindcraft ref: `actions.js:161` / `actions.js:171`, backed by
-  `agent.memory_bank` (in-memory + persisted, not skills.js). No
-  persistence layer exists in this project at all yet -- would be a new
-  Python-side store (e.g. a simple JSON file or in-memory dict on
-  `BotConfig`/a new module), paired with the existing `goto` wire command
-  for recall.
-  **Want it?**
+  → **`remember`**, `movement.py:74`, + resolved as part of **`goto`**'s
+  chain, `movement.py:84` (commit `c75685b`). Backed by
+  `minebot/places.py`'s `PlaceMemory` (new: JSON-backed, `places.json`,
+  gitignored -- the first persistence layer in this project). mindcraft
+  ref: `actions.js:161` / `actions.js:171`, backed by `agent.memory_bank`
+  (in-memory + persisted, not skills.js).
+  **Want it?** already done, with the shorter `!remember <name>` /
+  `!goto <name>` aliases you asked for (not the longer mindcraft names).
 
 - ⬜ **`!goToBed`** -- walk to the nearest bed and sleep in it. mindcraft
   ref: `actions.js:332`, → `skills.goToBed`, `skills.js:1543`. No
@@ -107,6 +111,7 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
   following `DoorOpener.java`'s `useItemOn` pattern for the actual sleep
   interaction).
   **Want it?**
+  > yes, but !sleep would be a better alias for it, since it's shorter and more intuitive.
 
 - ⬜ **`!stay`** -- stay in place, pausing all autonomous behavior, for N
   seconds (-1 = forever). mindcraft ref: `actions.js:339`, →
@@ -115,6 +120,7 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
   concept, `modes.js`) -- lower priority until there's actual autonomous
   behavior worth pausing.
   **Want it?**
+  > not for now
 
 - ⬜ **`!goToSurface`** -- move to the highest block directly above the
   bot (usually the surface, e.g. climbing out of a cave/mine).
@@ -122,6 +128,7 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
   `skills.js:1963`. Straightforward once basic Y-scanning exists; no
   current mod-side equivalent.
   **Want it?**
+  > no
 
 ## Mining / digging
 
@@ -140,6 +147,7 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
   interaction (`MultiPlayerGameMode`-based, likely a new
   `BlockBreaker.java` alongside `DoorOpener.java`).
   **Want it?**
+  yes, but I want it to be a universal `!collect` command that can take either a block type or an entity type, and collect the nearest N of that type. For example, `!collect stone 10` will collect 10 stone blocks, and `!collect cow 5` will collect 5 cows (by killing them and collecting their drops).
 
 - ⬜ **`!digDown`** -- dig straight down N blocks, stopping at
   lava/water/a big drop. mindcraft ref: `actions.js:476`, →
@@ -147,6 +155,7 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
   `!collectBlocks` above, but simpler (no pathfinding needed, just
   straight down).
   **Want it?**
+  > yes
 
 ## Building / placing
 
@@ -160,6 +169,7 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
   hotbar-selection logic `FoodEater`/`InventoryActions` already have for
   "get the right item into hand first."
   **Want it?**
+  > yes, shorter alias: `!place <block>` would be nice, since it's shorter and more intuitive, or just `!place` if the block type is already in hand.
 
 ## Combat
 
@@ -177,6 +187,7 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
   type -- needs the same entity-type-widening `!searchForEntity` needs,
   since `broadcastEntityEvents` only tracks players today).
   **Want it?**
+  > yes, but only hostiles by default if no argument passed, so `!attack` will attack the nearest hostile mob, and `!attack cow` will attack the nearest cow. Also, I want an alias `!kill` for it, since it's shorter and more intuitive
 
 - ⬜ **`!attackPlayer`** -- attack a specific player by name until they
   die or run away. mindcraft ref: `actions.js:319`, →
@@ -188,6 +199,7 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
   before implementing -- attacking players unprompted (vs. only when
   instructed) needs care.
   **Want it?**
+  > no
 
 ## World interaction
 
@@ -203,6 +215,7 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
   this as a fourth, more general case for anything not covered by a
   dedicated action).
   **Want it?**
+  > yes, but I want it to be a universal `!use` command that can take either a block type, an entity type, or "hand" for no tool. For example, `!use lever` will use the nearest lever, `!use cow` will use the nearest cow (e.g. milk it), and `!use hand` will use the item in hand on the nearest target.
 
 ## Inventory / items
 
@@ -213,6 +226,7 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
   they'd show up in the flat item list since `InventoryReporter.java`
   reports armor/offhand slots too).
   **Want it?** already done.
+  > yes
 
 - ✅ **`!equip`** -- equip a given item (armor/offhand). → **`equip`**,
   `inventory.py:82`. mindcraft ref: `actions.js:204`, → `skills.equip`,
@@ -247,6 +261,7 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
   `FoodEater` uses (see `FoodEater.holdUseKey`/`releaseUseKey`) if a
   player should be able to explicitly tell the bot to eat on demand.
   **Want it?** already done (auto-eat); on-demand chat trigger --
+  > yes, I want a `!eat <item>` command that will eat the specified item from the inventory, if it's edible, if no argument is passed, it will eat the item in hand, if edible
 
 - ⬜ **`!putInChest`** / **`!takeFromChest`** / **`!viewChest`** -- put
   items into, take items from, or list the contents of the nearest
@@ -261,6 +276,7 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
   container menu open server-side before container clicks against it
   would work.
   **Want it?**
+  > yes, but I want a universal `!chest` command that can take either `put`, `take`, or `view` as the first argument, and the item type and quantity as the second and third arguments. For example, `!chest put stone 10` will put 10 stone blocks into the nearest chest, `!chest take cow 5` will take 5 cows from the nearest chest (if they are stored as spawn eggs), and `!chest view` will list the contents of the nearest chest.
 
 ## Crafting
 
@@ -270,17 +286,20 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
   crafting for simple recipes) plus recipe-lookup logic; likely the
   single largest remaining feature area after mining/combat.
   **Want it?**
+  > yes, but I want a universal `!craft` command that can take either a recipe name or an item name as the first argument, and the quantity as the second argument. For example, `!craft stone_pickaxe 1` will craft 1 stone pickaxe, and `!craft stone 10` will craft 10 stone blocks (if the recipe exists).
 
 - ⬜ **`!smeltItem`** -- smelt an item N times via furnace. mindcraft
   ref: `actions.js:278`, → `skills.smeltItem`, `skills.js:142`. Depends
   on furnace container interaction, same prerequisite as chest
   interaction above.
   **Want it?**
+  > yes, but I want a universal the `!craft` command to also handle smelting, so `!craft iron_ingot 10` will smelt 10 iron ore into 10 iron ingots, if the bot has a furnace and the necessary fuel, explain back why it can not craft it if there is no materials or furnaces, same as craft
 
 - ⬜ **`!clearFurnace`** -- empty all items out of the nearest furnace.
   mindcraft ref: `actions.js:294`, → `skills.clearNearestFurnace`,
   `skills.js:275`. Same furnace-container prerequisite.
   **Want it?**
+  > yes, but I want a universal `!clear` command that can take either `furnace`, `chest`, or `inventory` as the first argument, and will clear the specified container. For example, `!clear furnace` will empty all items out of the nearest furnace, `!clear chest` will empty all items out of the nearest chest, and `!clear inventory` will drop all items from the bot's inventory onto the ground. also, when interacting with chests or anything, we need an argument to specify which one, wither in coordinates or by name, so `!clear chest 10 64 -5` will clear the chest at those coordinates, and if not specified, it will clear the nearest one.
 
 - ⬜ **`!craftable`** (query) -- list items craftable with the bot's
   current inventory. mindcraft ref: `queries.js:132`, →
@@ -289,6 +308,7 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
   known contents -- could be built before real crafting is implemented,
   as a standalone query.
   **Want it?**
+  > yes
 
 - ⬜ **`!getCraftingPlan`** (query) -- full ingredient breakdown /
   missing-items analysis for crafting a target item. mindcraft ref:
@@ -296,6 +316,7 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
   (`src/utils/mcdata.js`). Same recipe-database prerequisite as
   `!craftable`.
   **Want it?**
+  > yes, only if needed, since `!craftable` already gives a list of what can be crafted, and `!craft` will fail if the materials are not enough, also, craft should have access to a recipe database to know what materials are needed for a specific item, and if the bot does not have enough materials, it should explain back what is missing.
 
 ## Communication / social
 
@@ -306,6 +327,7 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
   -- this project currently runs a single bot; low priority until that
   changes.
   **Want it?**
+  > no for now
 
 - ⬜ **`!lookAtPlayer`** -- look at a specific player, or match their
   look direction. mindcraft ref: `actions.js:436`, →
@@ -317,11 +339,13 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
   player (not just "closest") would still be a useful, easy addition
   reusing the same eye-level math already proven there.
   **Want it?**
+  > yes, but I want a universal `!look` command that can take either a player name, an entity type, or explicit coordinates as the first argument. For example, `!look Steve` will look at the player named Steve, `!look cow` will look at the nearest cow, and `!look 10 64 -5` will look at the coordinates (10, 64, -5), and if no argument is passed, it will look at the nearest player, also it can look at places, so `!look home` will look at the remembered place called "home".
 
 - ⬜ **`!lookAtPosition`** -- look at an explicit x,y,z point. mindcraft
   ref: `actions.js:459`. Same eye-level-math reuse as above, aimed at a
   fixed point instead of a tracked entity.
   **Want it?**
+  > yes, check universal `!look` command above
 
 - ⬜ **`!stfu`** -- stop all chat/self-prompting, but keep the current
   action running. mindcraft ref: `actions.js:68`. No self-prompting/
@@ -329,12 +353,14 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
   reactive only, triggered per-message -- see `FINDINGS.md`'s LLM
   trigger section) -- not yet applicable until that exists.
   **Want it?**
+  > I want a universal `!ai` command that can take either `on` or `off` as the first argument, to turn the LLM self-prompting on or off. For example, `!ai on` will enable the LLM self-prompting, and `!ai off` will disable it, `on` will be the default state, and if no argument is passed, it will toggle the current state.
 
 - ⬜ **`!clearChat`** -- clear the bot's conversation history. mindcraft
   ref: `actions.js:84`. Not yet applicable: `LLMController.handle_chat`
   has no conversation history at all yet (a known gap already listed in
   `FINDINGS.md`) -- there's nothing to clear until that's built.
   **Want it?**
+  > no, I prefer to pass the entire chat to llm, but only the last 10 messages, so it can have context, but not too much context to be confused, configurable
 
 ## Villager trading
 
@@ -349,6 +375,7 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
   mechanics, even though it's a human-facing helper mod rather than a
   bot-control one.
   **Want it?**
+  > yes
 
 ## Meta / control
 
@@ -360,6 +387,7 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
   (arbitrary code execution) worth a deliberate decision, not an assumed
   port.
   **Want it?**
+  > no, never
 
 - ⬜ **`!setMode`** / **`!modes`** (query) -- toggle a named autonomous
   behavior mode on/off, or list all modes and their state. mindcraft
@@ -369,6 +397,7 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
   framework (enable/disable named autonomous behaviors) yet; worth
   designing once there's more than one autonomous behavior to toggle.
   **Want it?**
+  > no, not yet, but I want a universal `!mode` command that can take either `!mode <mode_name> on` or `!mode <mode_name> off` to enable or disable a specific mode, and `!mode list` to list all available modes and their current state, example models: `defense`, `farming`, `exploration`, `building`, `navigation`
 
 - ⬜ **`!goal`** / **`!endGoal`** -- start/stop self-prompting toward a
   continuous goal, without needing a human to keep prompting. mindcraft
@@ -376,12 +405,14 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
   until `LLMController` supports multi-turn autonomous behavior beyond
   single-message reactive responses.
   **Want it?**
+  > not sure, not for now
 
 - ⬜ **`!restart`** -- restart the whole bot process. mindcraft ref:
   `actions.js:77`, → `agent.cleanKill()`. Straightforward if ever
   needed -- Python's own process could just `os.execv`/exit-and-let-a-
   supervisor-restart-it; no mod-side work.
   **Want it?**
+  > yes
 
 ## Info queries (read-only)
 
@@ -395,12 +426,14 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
   broadcast at all though, so a full port needs a small mod-side
   addition for those specifically.
   **Want it?**
+  > yes, but I want a universal `!info` command that can take either `stats`, `inventory`, `nearby`, or `location` as the first argument, and will return the corresponding information. For example, `!info stats` will return the bot's current stats, `!info inventory` will return the bot's current inventory, `!info nearby` will return a list of nearby players and entities, and `!info location` will return the bot's current coordinates and biome, `info` will be the default command if no argument is passed, and it will return the bot's current stats, also `!info players` will return a list of all nearby players, and `!info entities` will return a list of all nearby entities, and `!info blocks` will return a list of all nearby blocks.
 
 - ⬜ **`!nearbyBlocks`** -- list nearby block types. mindcraft ref:
   `queries.js:103`. Needs the same block-scanning capability
   `!searchForBlock` needs -- no block-type awareness exists on the mod
   side yet at all (only entities/inventory are tracked).
   **Want it?**
+  > yes, but I want the universal `!info` command to also handle nearby blocks, so `!info nearby blocks` will return a list of nearby block types and their coordinates.
 
 - ⬜ **`!entities`** -- list nearby players/entities (with villager
   profession info). mindcraft ref: `queries.js:147`. Python already has
@@ -410,11 +443,13 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
   entity types (mobs/animals/villagers) -- same widening
   `!searchForEntity` needs for full parity.
   **Want it?**
+  > check universal `!info` command above, so `!info nearby entities` will return a list of nearby players and entities, with their coordinates and types.
 
 - ⬜ **`!savedPlaces`** -- list all saved location names. mindcraft ref:
   `queries.js:222`. Depends on the same location-memory prerequisite as
   `!rememberHere`/`!goToRememberedPlace` above.
   **Want it?**
+  > check universal `!info` command above, so `!info saved` will return a list of all saved location names and their coordinates.
 
 - ⬜ **`!checkBlueprintLevel`** / **`!checkBlueprint`** /
   **`!getBlueprint`** / **`!getBlueprintLevel`** -- check progress on, or
@@ -425,6 +460,7 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
   equivalent here at all -- lowest priority, only relevant if this
   project ever gets a similar guided-building-task feature.
   **Want it?**
+  > no, not for now
 
 - ⬜ **`!searchWiki`** -- fetch and summarize a Minecraft Wiki page for a
   query term. mindcraft ref: `queries.js:311`, raw `fetch()` + cheerio
@@ -432,6 +468,7 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
   -- could be built as a pure Python HTTP-fetch query action independent
   of everything else in this list, whenever useful.
   **Want it?**
+  > no, llm will respond with wiki information if needed, so no need for a separate command.
 
 - ⬜ **`!help`** -- list all available commands and their descriptions.
   mindcraft ref: `queries.js:340`, → `getCommandDocs`
@@ -442,6 +479,7 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
   exist soon since it's also exactly the data the (still-unbuilt) LLM
   tool-schema adapter will need to consume.
   **Want it?**
+  > yes, but I want a universal `!help` command that can take either no arguments, or a specific command name as the first argument. If no arguments are passed, it will return a list of all available commands and their descriptions. If a specific command name is passed, it will return the description and usage of that command.
 
 ## Not exposed as commands in mindcraft either (informational only)
 
@@ -468,3 +506,4 @@ commands to add, just background/reference:
 - `defendSelf` -- fight back when attacked. skills.js:370
 - `breakBlockAt` -- break a specific block by coordinates. skills.js:561
 - `wait` -- pause for a number of ticks. skills.js:117
+- `waitUntil` -- pause until a condition is met
