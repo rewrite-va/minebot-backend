@@ -1,5 +1,6 @@
 import pytest
 
+from minebot.actions.types import ActionResult
 from minebot.bot.movement import FOLLOW_STOP_DISTANCE, MovementController
 from minebot.bridge.client import ModEvent
 from minebot.bridge.entities import EntityTracker
@@ -38,9 +39,10 @@ async def test_follow_with_explicit_name_sends_follow_for_that_entity():
     bridge = RecordingBridge()
     movement = MovementController(bridge, tracker)
 
-    await movement.follow(None, "Alex")
+    result = await movement.follow(None, "Alex")
 
     assert bridge.sent == [("follow", {"entity_id": 7, "stop_distance": FOLLOW_STOP_DISTANCE})]
+    assert result == ActionResult()
 
 
 @pytest.mark.asyncio
@@ -50,9 +52,10 @@ async def test_follow_with_no_name_follows_the_chat_sender():
     bridge = RecordingBridge()
     movement = MovementController(bridge, tracker)
 
-    await movement.follow("Alex")
+    result = await movement.follow("Alex")
 
     assert bridge.sent == [("follow", {"entity_id": 7, "stop_distance": FOLLOW_STOP_DISTANCE})]
+    assert result == ActionResult()
 
 
 @pytest.mark.asyncio
@@ -66,14 +69,15 @@ async def test_follow_with_no_name_and_no_sender_raises():
 
 
 @pytest.mark.asyncio
-async def test_follow_unknown_player_does_not_send_anything():
+async def test_follow_unknown_player_sends_nothing_and_returns_a_message():
     tracker = EntityTracker()
     bridge = RecordingBridge()
     movement = MovementController(bridge, tracker)
 
-    await movement.follow(None, "NobodyHome")
+    result = await movement.follow(None, "NobodyHome")
 
     assert bridge.sent == []
+    assert result.message is not None
 
 
 @pytest.mark.asyncio
@@ -81,6 +85,7 @@ async def test_stop_sends_stop_command():
     bridge = RecordingBridge()
     movement = MovementController(bridge, EntityTracker())
 
-    await movement.stop(None)
+    result = await movement.stop(None)
 
     assert bridge.sent == [("stop", {})]
+    assert result == ActionResult()

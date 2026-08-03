@@ -1,4 +1,4 @@
-from minebot.commands.parser import parse_command
+from minebot.actions.parser import parse_command
 
 
 def test_parses_bare_command():

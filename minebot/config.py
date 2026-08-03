@@ -18,10 +18,18 @@ class BotConfig:
     mod_host: str
     mod_port: int
 
+    # The bot's own in-game username -- used to decide whether a chat
+    # message is addressed to the bot (see llm/trigger.py's
+    # should_trigger_llm), since the control channel has no other signal
+    # for "this message is meant for you" (no whisper/DM flag is
+    # currently forwarded by the mod, see FINDINGS.md's known gaps).
+    bot_name: str
+
     @classmethod
     def from_env(cls) -> "BotConfig":
         load_dotenv()  # loads .env into os.environ if present; no-op otherwise
         return cls(
             mod_host=os.environ.get("MINEBOT_MOD_HOST", "0.0.0.0"),
             mod_port=int(os.environ.get("MINEBOT_MOD_PORT", "47893")),
+            bot_name=os.environ.get("MINEBOT_BOT_NAME", "minebot"),
         )

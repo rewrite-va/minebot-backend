@@ -1,10 +1,14 @@
 import pytest
 
+from minebot.actions.registry import ActionRegistry
+from minebot.actions.types import Action, ActionResult
 from minebot.bot.run_loop import run
 from minebot.bridge.client import ModEvent
 from minebot.bridge.entities import EntityTracker
 from minebot.bridge.inventory import InventoryTracker
-from minebot.commands.registry import CommandRegistry
+from minebot.llm.controller import LLMController
+
+BOT_NAME = "minebot"
 
 
 class FakeBridge:
@@ -24,15 +28,19 @@ class FakeBridge:
         self.sent_chat.append(text)
 
 
+def _llm(bridge: FakeBridge, actions: ActionRegistry) -> LLMController:
+    return LLMController(bridge, actions)  # default NullLLMProvider -- never replies
+
+
 @pytest.mark.asyncio
 async def test_run_loop_feeds_entity_events_into_tracker():
     bridge = FakeBridge([
         ModEvent(type="entity", data={"action": "add", "id": 1, "name": "Alex", "x": 0.0, "y": 0.0, "z": 0.0}),
     ])
     tracker = EntityTracker()
-    registry = CommandRegistry()
+    actions = ActionRegistry()
 
-    await run(bridge, registry, tracker, InventoryTracker())
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), BOT_NAME)
 
     assert tracker.find_by_name("Alex") is not None
 
@@ -43,9 +51,9 @@ async def test_run_loop_feeds_inventory_events_into_tracker():
         ModEvent(type="inventory", data={"selected_slot": 0, "slots": [{"slot": 0, "item": "minecraft:bread", "count": 5}]}),
     ])
     inventory = InventoryTracker()
-    registry = CommandRegistry()
+    actions = ActionRegistry()
 
-    await run(bridge, registry, EntityTracker(), inventory)
+    await run(bridge, actions, EntityTracker(), inventory, _llm(bridge, actions), BOT_NAME)
 
     assert inventory.count_of("minecraft:bread") == 5
 
@@ -56,16 +64,33 @@ async def test_run_loop_dispatches_chat_commands():
 
     async def ping_handler(sender):
         calls.append(sender)
+        return ActionResult()
 
     bridge = FakeBridge([
         ModEvent(type="chat", data={"sender": "Alex", "text": "!ping"}),
     ])
-    registry = CommandRegistry()
-    registry.register("ping", ping_handler)
+    actions = ActionRegistry()
+    actions.register(Action(name="ping", description="", handler=ping_handler))
 
-    await run(bridge, registry, EntityTracker(), InventoryTracker())
+    await run(bridge, actions, EntityTracker(), InventoryTracker(), _llm(bridge, actions), BOT_NAME)
 
     assert calls == ["Alex"]
+
+
+@pytest.mark.asyncio
+async def test_run_loop_sends_action_result_message_to_chat():
+    async def give_handler(sender, item):
+        return ActionResult(message=f"here's your {item}")
+
+    bridge = FakeBridge([
+        ModEvent(type="chat", data={"sender": "Alex", "text": '!give("bread")'}),
+    ])
+    actions = ActionRegistry()
+    actions.register(Action(name="give", description="", handler=give_handler))
+
+    await run(bridge, actions, EntityTracker(), InventoryTracker(), _llm(bridge, actions), BOT_NAME)
+
+    assert bridge.sent_chat == ["here's your bread"]
 
 
 @pytest.mark.asyncio
@@ -73,23 +98,41 @@ async def test_run_loop_replies_to_unknown_commands():
     bridge = FakeBridge([
         ModEvent(type="chat", data={"sender": "Alex", "text": "!doesnotexist"}),
     ])
-    registry = CommandRegistry()
+    actions = ActionRegistry()
 
-    await run(bridge, registry, EntityTracker(), InventoryTracker())
+    await run(bridge, actions, EntityTracker(), InventoryTracker(), _llm(bridge, actions), BOT_NAME)
 
     assert bridge.sent_chat == ["unknown command: !doesnotexist"]
 
 
 @pytest.mark.asyncio
-async def test_run_loop_does_not_reply_to_non_command_chat():
+async def test_run_loop_does_not_reply_to_unaddressed_non_command_chat():
     bridge = FakeBridge([
         ModEvent(type="chat", data={"sender": "Alex", "text": "hello there"}),
     ])
-    registry = CommandRegistry()
+    actions = ActionRegistry()
 
-    await run(bridge, registry, EntityTracker(), InventoryTracker())
+    await run(bridge, actions, EntityTracker(), InventoryTracker(), _llm(bridge, actions), BOT_NAME)
 
     assert bridge.sent_chat == []
+
+
+@pytest.mark.asyncio
+async def test_run_loop_routes_bot_addressed_chat_to_the_llm_controller():
+    handled = []
+
+    class RecordingLLM:
+        async def handle_chat(self, sender, text):
+            handled.append((sender, text))
+
+    bridge = FakeBridge([
+        ModEvent(type="chat", data={"sender": "Alex", "text": f"hey {BOT_NAME}, got food?"}),
+    ])
+    actions = ActionRegistry()
+
+    await run(bridge, actions, EntityTracker(), InventoryTracker(), RecordingLLM(), BOT_NAME)
+
+    assert handled == [("Alex", f"hey {BOT_NAME}, got food?")]
 
 
 @pytest.mark.asyncio
@@ -99,6 +142,6 @@ async def test_run_loop_ignores_position_and_health_events_without_crashing():
         ModEvent(type="health", data={"health": 20.0}),
         ModEvent(type="health", data={"health": 0.0}),
     ])
-    registry = CommandRegistry()
+    actions = ActionRegistry()
 
-    await run(bridge, registry, EntityTracker(), InventoryTracker())  # should not raise
+    await run(bridge, actions, EntityTracker(), InventoryTracker(), _llm(bridge, actions), BOT_NAME)  # should not raise

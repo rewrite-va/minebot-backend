@@ -7,14 +7,16 @@ from minebot.bridge.inventory import InventoryTracker
 
 
 class RecordingBridge:
-    """Stands in for a real ModBridge -- records every sent command and
-    every chat message instead of touching a socket, matching
-    test_movement_controller.py's RecordingBridge shape.
+    """Stands in for a real ModBridge -- records every sent command
+    instead of touching a socket, matching test_movement_controller.py's
+    RecordingBridge shape. Handlers now return ActionResult instead of
+    calling send_chat themselves (see actions/types.py), so there's no
+    `chats` list here anymore -- tests assert on the returned
+    ActionResult's message instead.
     """
 
     def __init__(self):
         self.sent: list[tuple[str, dict]] = []
-        self.chats: list[str] = []
 
     async def send_equip(self, slot):
         self.sent.append(("equip", {"slot": slot}))
@@ -24,9 +26,6 @@ class RecordingBridge:
 
     async def send_give(self, entity_id, slot, count, stop_distance=2.0):
         self.sent.append(("give", {"entity_id": entity_id, "slot": slot, "count": count, "stop_distance": stop_distance}))
-
-    async def send_chat(self, text):
-        self.chats.append(text)
 
 
 def _inventory_with(inventory: InventoryTracker, slot: int, item: str, count: int) -> None:
@@ -44,9 +43,9 @@ async def test_inventory_report_lists_carried_items():
     bridge = RecordingBridge()
     controller = InventoryController(bridge, inventory, EntityTracker())
 
-    await controller.inventory_report(None)
+    result = await controller.inventory_report(None)
 
-    assert bridge.chats == ["inventory: 5x bread"]
+    assert result.message == "inventory: 5x bread"
 
 
 @pytest.mark.asyncio
@@ -54,9 +53,9 @@ async def test_inventory_report_when_empty():
     bridge = RecordingBridge()
     controller = InventoryController(bridge, InventoryTracker(), EntityTracker())
 
-    await controller.inventory_report(None)
+    result = await controller.inventory_report(None)
 
-    assert bridge.chats == ["my inventory is empty"]
+    assert result.message == "my inventory is empty"
 
 
 @pytest.mark.asyncio
@@ -66,9 +65,10 @@ async def test_equip_resolves_bare_item_name_to_slot():
     bridge = RecordingBridge()
     controller = InventoryController(bridge, inventory, EntityTracker())
 
-    await controller.equip(None, "diamond_sword")
+    result = await controller.equip(None, "diamond_sword")
 
     assert bridge.sent == [("equip", {"slot": 10})]
+    assert result.message is None
 
 
 @pytest.mark.asyncio
@@ -78,9 +78,10 @@ async def test_equip_accepts_already_namespaced_item_name():
     bridge = RecordingBridge()
     controller = InventoryController(bridge, inventory, EntityTracker())
 
-    await controller.equip(None, "minecraft:diamond_sword")
+    result = await controller.equip(None, "minecraft:diamond_sword")
 
     assert bridge.sent == [("equip", {"slot": 10})]
+    assert result.message is None
 
 
 @pytest.mark.asyncio
@@ -88,10 +89,10 @@ async def test_equip_unknown_item_sends_no_command():
     bridge = RecordingBridge()
     controller = InventoryController(bridge, InventoryTracker(), EntityTracker())
 
-    await controller.equip(None, "diamond_sword")
+    result = await controller.equip(None, "diamond_sword")
 
     assert bridge.sent == []
-    assert bridge.chats == ["I don't have any diamond_sword"]
+    assert result.message == "I don't have any diamond_sword"
 
 
 @pytest.mark.asyncio
@@ -101,9 +102,10 @@ async def test_drop_defaults_to_one():
     bridge = RecordingBridge()
     controller = InventoryController(bridge, inventory, EntityTracker())
 
-    await controller.drop(None, "cobblestone")
+    result = await controller.drop(None, "cobblestone")
 
     assert bridge.sent == [("drop", {"slot": 3, "count": 1})]
+    assert result.message is None
 
 
 @pytest.mark.asyncio
@@ -113,9 +115,10 @@ async def test_drop_with_explicit_count():
     bridge = RecordingBridge()
     controller = InventoryController(bridge, inventory, EntityTracker())
 
-    await controller.drop(None, "cobblestone", 32)
+    result = await controller.drop(None, "cobblestone", 32)
 
     assert bridge.sent == [("drop", {"slot": 3, "count": 32})]
+    assert result.message is None
 
 
 @pytest.mark.asyncio
@@ -127,9 +130,10 @@ async def test_give_walks_to_recipient_and_drops():
     bridge = RecordingBridge()
     controller = InventoryController(bridge, inventory, tracker)
 
-    await controller.give(None, "Alex", "bread", 2)
+    result = await controller.give(None, "Alex", "bread", 2)
 
     assert bridge.sent == [("give", {"entity_id": 7, "slot": 3, "count": 2, "stop_distance": GIVE_STOP_DISTANCE})]
+    assert result.message is None
 
 
 @pytest.mark.asyncio
@@ -139,10 +143,10 @@ async def test_give_unknown_player_sends_no_command():
     bridge = RecordingBridge()
     controller = InventoryController(bridge, inventory, EntityTracker())
 
-    await controller.give(None, "NobodyHome", "bread")
+    result = await controller.give(None, "NobodyHome", "bread")
 
     assert bridge.sent == []
-    assert bridge.chats == ["I can't see NobodyHome"]
+    assert result.message == "I can't see NobodyHome"
 
 
 @pytest.mark.asyncio
@@ -152,7 +156,7 @@ async def test_give_unknown_item_sends_no_command():
     bridge = RecordingBridge()
     controller = InventoryController(bridge, InventoryTracker(), tracker)
 
-    await controller.give(None, "Alex", "bread")
+    result = await controller.give(None, "Alex", "bread")
 
     assert bridge.sent == []
-    assert bridge.chats == ["I don't have any bread"]
+    assert result.message == "I don't have any bread"

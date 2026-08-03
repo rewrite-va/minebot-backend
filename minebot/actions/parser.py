@@ -1,7 +1,10 @@
 """Chat command grammar: !name or !name(arg1, "arg2", 3.5).
 
 Mirrors mindcraft's regex-based parser (src/agent/commands/index.js) but with
-no LLM in the loop — commands come straight from a human typing in chat.
+no LLM in the loop for this path -- commands come straight from a human
+typing in chat. Moved here (from the old commands/ package) since this is
+now specifically ActionRegistry.dispatch_chat's grammar, not a
+general-purpose command framework of its own.
 """
 
 from __future__ import annotations

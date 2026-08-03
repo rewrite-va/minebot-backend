@@ -2,22 +2,36 @@
 to whatever it reports (chat, entity, position, health events) -- the
 Python-side equivalent of the old protocol implementation's PLAY loop, but
 driven by the mod's JSON events instead of raw packets.
+
+Chat dispatch order: try it as a !command first (ActionRegistry.
+dispatch_chat), and only if that finds nothing, hand it to the LLM
+trigger check (should_trigger_llm) -- a player addressing the bot by name
+("hey minebot, got food?") should still work as an LLM conversation even
+though it isn't a !command, but an actual !command always takes priority
+over LLM interpretation of the same text.
 """
 
 from __future__ import annotations
 
 import logging
 
+from minebot.actions.registry import ActionRegistry
 from minebot.bridge.client import ModBridge
 from minebot.bridge.entities import EntityTracker
 from minebot.bridge.inventory import InventoryTracker
-from minebot.commands.registry import CommandRegistry
+from minebot.llm.controller import LLMController
+from minebot.llm.trigger import should_trigger_llm
 
 log = logging.getLogger("minebot.run_loop")
 
 
 async def run(
-    bridge: ModBridge, commands: CommandRegistry, tracker: EntityTracker, inventory: InventoryTracker,
+    bridge: ModBridge,
+    actions: ActionRegistry,
+    tracker: EntityTracker,
+    inventory: InventoryTracker,
+    llm: LLMController,
+    bot_name: str,
 ) -> None:
     async for event in bridge.events():
         if event.type == "entity":
@@ -34,9 +48,19 @@ async def run(
             sender = event.data.get("sender")
             text = event.data.get("text", "")
             log.info("<%s> %s", sender or "system", text)
-            dispatched = await commands.dispatch(text, sender)
-            if not dispatched and text.strip().startswith("!"):
+
+            result = await actions.dispatch_chat(text, sender)
+            if result is not None:
+                if result.message:
+                    await bridge.send_chat(result.message)
+                continue
+
+            if text.strip().startswith("!"):
                 await bridge.send_chat(f"unknown command: {text}")
+                continue
+
+            if should_trigger_llm(text, sender, bot_name):
+                await llm.handle_chat(sender, text)
             continue
 
         if event.type == "health":
