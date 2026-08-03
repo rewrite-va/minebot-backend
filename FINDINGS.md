@@ -193,9 +193,38 @@ see `pure-protocol-backend`'s FINDINGS.md if that's ever needed again).
   interaction (offhand food first, else the first edible item found in the
   main inventory, selected into the hotbar first if necessary). "Edible"
   is a `DataComponents.FOOD` presence check -- the older
-  `Item.getFoodProperties()` API is gone in 26.1.2. Entirely autonomous on
-  the mod side; no control-channel wire format changes, so Python has no
-  visibility into it beyond the `health` events it already gets.
+  `Item.getFoodProperties()` API is gone in 26.1.2. Also sends real chat
+  lines via `player.connection.sendChat` (same path Python-originated
+  `chat` commands use): once per low-health episode when it starts eating
+  ("I have N hearts!, eating...", translated) and once if the inventory
+  scan comes up empty ("oh, I have no food! aaaa"), each gated by its own
+  per-episode boolean so it doesn't spam chat every tick while health
+  stays low. Entirely autonomous on the mod side; no control-channel wire
+  format changes, so Python has no visibility into any of this beyond the
+  `health` events it already gets (and the chat lines showing up as
+  regular `chat` events, same as any other player's chat).
+- `config/Messages.java` -- dictionary for the bot's own outgoing chat
+  text (`FoodEater`'s lines above), backed by
+  `assets/minebot-mod/messages/{en,es}.json` (flat key -> template maps,
+  `{placeholder}` substitution), selected by `config.Configs.botLanguage`
+  and cached per-language after first load. Deliberately separate from
+  Fabric's own lang-file/`Component.translatable` system (used by
+  `gui/ConfigScreen.java` for its own on-screen labels, under
+  `assets/minebot-mod/lang/en_us.json`/`es_es.json`) -- that system
+  follows the *viewing player's* client language setting, which is the
+  wrong axis for text the bot itself sends; the bot's language is instead
+  a settings toggle independent of whoever's looking at the screen.
+- `config/Configs.java` -- in-memory mod settings (currently just
+  `botLanguage`, `"en"`/`"es"`), not persisted to disk -- resets to the
+  default every launch. Modeled directly on
+  `/home/colaila/git/mods/VillagerHelper`'s `Configs`/`ConfigScreen`/
+  `ModMenuIntegration` pattern (same layout, same optional
+  `compileOnly`+`"suggests"` ModMenu dependency so the mod still works
+  with ModMenu absent, just with no in-game way to reach the screen).
+- `gui/ConfigScreen.java` / `config/ModMenuIntegration.java` -- a
+  ModMenu-hosted settings screen (reached via ModMenu's mod list, if
+  installed) with one button that cycles `Configs.botLanguage` between
+  `en`/`es`.
 - `StatusHud.java` -- a HUD text overlay showing whether the control
   channel is currently connected.
 - `MinebotMod.java` -- entry point: starts the control client, registers
@@ -233,6 +262,14 @@ component -- this only makes sense running inside an actual client).
   prefer higher-nutrition food when multiple edible types are held, and
   has no test coverage. Not yet confirmed by live testing (only compiled
   successfully so far).
+- `Configs.botLanguage` (bot chat language, en/es) is only changeable via
+  the ModMenu config screen, in-game -- there's no way to set it from
+  Python/the control channel or from a config file, and it resets to
+  `"en"` every client restart.
+- Only two languages are bundled (`en`, `es`), and only `FoodEater` has
+  any translated lines yet -- other mod-originated chat (if any gets
+  added later) would need its own `Messages.get(...)` calls and message
+  keys added to both JSON files.
 
 ## Key external paths referenced (outside these two repos)
 
