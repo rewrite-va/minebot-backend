@@ -62,11 +62,13 @@ async def run(
             result = await actions.dispatch_chat(text, sender)
             if result is not None:
                 if result.message:
-                    await bridge.send_chat(result.message)
+                    await _send_chat_reply(bridge, result.message)
+                else:
+                    log.debug("command !%s ran with no reply message", text.strip().lstrip("!"))
                 continue
 
             if text.strip().startswith("!"):
-                await bridge.send_chat(f"unknown command: {text}")
+                await _send_chat_reply(bridge, f"unknown command: {text}")
                 continue
 
             if should_trigger_llm(text, sender, config.bot_name, config.trigger_words):
@@ -92,3 +94,25 @@ async def run(
                 event.data.get("yaw", 0.0), event.data.get("on_ground"),
             )
             continue
+
+
+async def _send_chat_reply(bridge: ModBridge, message: str) -> None:
+    """Wraps bridge.send_chat with explicit before/after/exception logging
+    -- added to debug a live report of "!follow gives no confirmation or
+    error in chat" with nothing in the log to explain why. ModBridge._send
+    already logs (at WARNING for chat specifically) when it drops a
+    command because the mod isn't currently connected, but a `.send()`
+    call on a connection object that still *exists* but whose underlying
+    socket is already closing raises instead of hitting that check --
+    previously unhandled here, so such an exception would propagate
+    straight out of the run loop with no attribution to "a chat reply
+    failed to send", potentially ending run() entirely with a bare
+    traceback and no clear signal of which reply was lost.
+    """
+    log.debug("sending chat reply: %r", message)
+    try:
+        await bridge.send_chat(message)
+    except Exception:
+        log.exception("failed to send chat reply: %r", message)
+    else:
+        log.debug("sent chat reply: %r", message)

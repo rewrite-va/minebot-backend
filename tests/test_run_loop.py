@@ -235,3 +235,31 @@ async def test_run_loop_does_not_resume_follow_for_an_unrelated_reconnecting_pla
     await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, movement)
 
     assert bridge.sent == [("follow", {"entity_id": 7, "stop_distance": FOLLOW_STOP_DISTANCE})]
+
+
+@pytest.mark.asyncio
+async def test_run_loop_survives_a_chat_reply_that_fails_to_send(caplog):
+    # Regression test: a live report of "!follow gives no confirmation or
+    # error in chat" turned out to have nothing in the log explaining why
+    # -- ModBridge._send only logs a dropped command when the connection
+    # is None; a .send() call on a connection object that still exists
+    # but whose underlying socket is already closing raises instead, and
+    # that exception previously had no handler in the run loop at all, so
+    # it could propagate out of run() entirely with no attribution to
+    # "a chat reply failed to send". The loop must survive this and keep
+    # processing later events, with the failure clearly logged.
+    class FailingChatBridge(FakeBridge):
+        async def send_chat(self, text: str) -> None:
+            raise ConnectionError("simulated send failure")
+
+    bridge = FailingChatBridge([
+        ModEvent(type="chat", data={"sender": "Alex", "text": "!doesnotexist"}),
+        ModEvent(type="chat", data={"sender": "Alex", "text": "hello again"}),
+    ])
+    actions = ActionRegistry()
+    tracker = EntityTracker()
+
+    with caplog.at_level("ERROR"):
+        await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, _movement(bridge, tracker))
+
+    assert any("failed to send chat reply" in record.message for record in caplog.records)

@@ -121,7 +121,20 @@ class ModBridge:
 
     async def _send(self, payload: dict[str, Any]) -> None:
         if self._connection is None:
-            log.debug("dropping command, mod not connected: %r", payload)
+            # A dropped `chat` command is a real user-visible silent
+            # failure (a player's command "worked" on the backend's side
+            # -- the handler ran and returned a confirmation/error
+            # message -- but they never saw a reply at all), typically
+            # from a momentary reconnect window; found live, reported as
+            # "not giving me back messages of confirmation or error"
+            # with nothing in the log to explain why at the default INFO
+            # level. Movement commands (goto/follow/stop) drop far more
+            # routinely during normal reconnects (the mod resends its
+            # last goal isn't tracked, but a dropped one is usually
+            # superseded by the next tick's state anyway) so those stay
+            # at debug to avoid spamming the log every reconnect.
+            level = logging.WARNING if payload.get("type") == "chat" else logging.DEBUG
+            log.log(level, "dropping command, mod not connected: %r", payload)
             return
         await self._connection.send(json.dumps(payload))
 
