@@ -6,3 +6,4 @@ __pycache__/
 .env
 msa_token.json
 logs/
+places.json

@@ -20,6 +20,7 @@ from minebot.bot.movement import MovementController
 from minebot.bridge.client import ModBridge
 from minebot.bridge.entities import EntityTracker
 from minebot.bridge.inventory import InventoryTracker
+from minebot.bridge.self_position import SelfPositionTracker
 from minebot.config import BotConfig
 from minebot.llm.controller import LLMController
 from minebot.llm.trigger import should_trigger_llm
@@ -36,6 +37,7 @@ async def run(
     llm: LLMController,
     config: BotConfig,
     movement: MovementController,
+    self_position: SelfPositionTracker,
 ) -> None:
     async for event in bridge.events():
         if event.type == "hello":
@@ -93,6 +95,7 @@ async def run(
                 event.data.get("x", 0.0), event.data.get("y", 0.0), event.data.get("z", 0.0),
                 event.data.get("yaw", 0.0), event.data.get("on_ground"),
             )
+            self_position.handle_event(event)
             continue
 
 

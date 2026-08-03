@@ -11,9 +11,11 @@ from minebot.bot.run_loop import run
 from minebot.bridge.client import ModBridge
 from minebot.bridge.entities import EntityTracker
 from minebot.bridge.inventory import InventoryTracker
+from minebot.bridge.self_position import SelfPositionTracker
 from minebot.config import BotConfig
 from minebot.llm.controller import LLMController
 from minebot.logging_setup import configure_logging
+from minebot.places import PlaceMemory
 
 log_path = configure_logging(os.environ.get("MINEBOT_LOG_LEVEL", "INFO"))
 log = logging.getLogger("minebot")
@@ -28,8 +30,10 @@ async def run_bot(config: BotConfig) -> None:
     actions = ActionRegistry()
     tracker = EntityTracker()
     inventory = InventoryTracker()
+    places = PlaceMemory()
+    self_position = SelfPositionTracker()
 
-    movement = MovementController(bridge, tracker)
+    movement = MovementController(bridge, tracker, places, self_position)
     register_movement_actions(actions, movement)
     inventory_controller = InventoryController(bridge, inventory, tracker)
     register_inventory_actions(actions, inventory_controller)
@@ -37,7 +41,7 @@ async def run_bot(config: BotConfig) -> None:
     llm = LLMController(bridge, actions)  # no provider configured yet -- see llm/controller.py
 
     try:
-        await run(bridge, actions, tracker, inventory, llm, config, movement)
+        await run(bridge, actions, tracker, inventory, llm, config, movement, self_position)
     finally:
         await bridge.close()
 

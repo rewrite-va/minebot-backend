@@ -7,8 +7,10 @@ from minebot.bot.run_loop import run
 from minebot.bridge.client import ModEvent
 from minebot.bridge.entities import EntityTracker
 from minebot.bridge.inventory import InventoryTracker
+from minebot.bridge.self_position import SelfPositionTracker
 from minebot.config import BotConfig
 from minebot.llm.controller import LLMController
+from minebot.places import PlaceMemory
 
 BOT_NAME = "minebot"
 CONFIG = BotConfig(mod_host="0.0.0.0", mod_port=0, bot_name=BOT_NAME, trigger_words=(), mod_repo_path=None)
@@ -42,25 +44,25 @@ def _llm(bridge: FakeBridge, actions: ActionRegistry) -> LLMController:
     return LLMController(bridge, actions)  # default NullLLMProvider -- never replies
 
 
-def _movement(bridge: FakeBridge, tracker: EntityTracker) -> MovementController:
-    return MovementController(bridge, tracker)
+def _movement(bridge: FakeBridge, tracker: EntityTracker, tmp_path) -> MovementController:
+    return MovementController(bridge, tracker, PlaceMemory(tmp_path / "places.json"), SelfPositionTracker())
 
 
 @pytest.mark.asyncio
-async def test_run_loop_feeds_entity_events_into_tracker():
+async def test_run_loop_feeds_entity_events_into_tracker(tmp_path):
     bridge = FakeBridge([
         ModEvent(type="entity", data={"action": "add", "id": 1, "name": "Alex", "x": 0.0, "y": 0.0, "z": 0.0}),
     ])
     tracker = EntityTracker()
     actions = ActionRegistry()
 
-    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, _movement(bridge, tracker))
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, _movement(bridge, tracker, tmp_path), SelfPositionTracker())
 
     assert tracker.find_by_name("Alex") is not None
 
 
 @pytest.mark.asyncio
-async def test_run_loop_feeds_inventory_events_into_tracker():
+async def test_run_loop_feeds_inventory_events_into_tracker(tmp_path):
     bridge = FakeBridge([
         ModEvent(type="inventory", data={"selected_slot": 0, "slots": [{"slot": 0, "item": "minecraft:bread", "count": 5}]}),
     ])
@@ -68,13 +70,28 @@ async def test_run_loop_feeds_inventory_events_into_tracker():
     tracker = EntityTracker()
     actions = ActionRegistry()
 
-    await run(bridge, actions, tracker, inventory, _llm(bridge, actions), CONFIG, _movement(bridge, tracker))
+    await run(bridge, actions, tracker, inventory, _llm(bridge, actions), CONFIG, _movement(bridge, tracker, tmp_path), SelfPositionTracker())
 
     assert inventory.count_of("minecraft:bread") == 5
 
 
 @pytest.mark.asyncio
-async def test_run_loop_dispatches_chat_commands():
+async def test_run_loop_feeds_position_events_into_self_position_tracker(tmp_path):
+    bridge = FakeBridge([
+        ModEvent(type="position", data={"x": 10.0, "y": 64.0, "z": -5.0, "yaw": 0.0, "pitch": 0.0}),
+    ])
+    tracker = EntityTracker()
+    actions = ActionRegistry()
+    self_position = SelfPositionTracker()
+
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, _movement(bridge, tracker, tmp_path), self_position)
+
+    assert self_position.current is not None
+    assert (self_position.current.x, self_position.current.y, self_position.current.z) == (10.0, 64.0, -5.0)
+
+
+@pytest.mark.asyncio
+async def test_run_loop_dispatches_chat_commands(tmp_path):
     calls = []
 
     async def ping_handler(sender):
@@ -88,13 +105,13 @@ async def test_run_loop_dispatches_chat_commands():
     actions.register(Action(name="ping", description="", handler=ping_handler))
     tracker = EntityTracker()
 
-    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, _movement(bridge, tracker))
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, _movement(bridge, tracker, tmp_path), SelfPositionTracker())
 
     assert calls == ["Alex"]
 
 
 @pytest.mark.asyncio
-async def test_run_loop_sends_action_result_message_to_chat():
+async def test_run_loop_sends_action_result_message_to_chat(tmp_path):
     async def give_handler(sender, item):
         return ActionResult(message=f"here's your {item}")
 
@@ -108,39 +125,39 @@ async def test_run_loop_sends_action_result_message_to_chat():
     ))
     tracker = EntityTracker()
 
-    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, _movement(bridge, tracker))
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, _movement(bridge, tracker, tmp_path), SelfPositionTracker())
 
     assert bridge.sent_chat == ["here's your bread"]
 
 
 @pytest.mark.asyncio
-async def test_run_loop_replies_to_unknown_commands():
+async def test_run_loop_replies_to_unknown_commands(tmp_path):
     bridge = FakeBridge([
         ModEvent(type="chat", data={"sender": "Alex", "text": "!doesnotexist"}),
     ])
     actions = ActionRegistry()
     tracker = EntityTracker()
 
-    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, _movement(bridge, tracker))
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, _movement(bridge, tracker, tmp_path), SelfPositionTracker())
 
     assert bridge.sent_chat == ["unknown command: !doesnotexist"]
 
 
 @pytest.mark.asyncio
-async def test_run_loop_does_not_reply_to_unaddressed_non_command_chat():
+async def test_run_loop_does_not_reply_to_unaddressed_non_command_chat(tmp_path):
     bridge = FakeBridge([
         ModEvent(type="chat", data={"sender": "Alex", "text": "hello there"}),
     ])
     actions = ActionRegistry()
     tracker = EntityTracker()
 
-    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, _movement(bridge, tracker))
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, _movement(bridge, tracker, tmp_path), SelfPositionTracker())
 
     assert bridge.sent_chat == []
 
 
 @pytest.mark.asyncio
-async def test_run_loop_routes_bot_addressed_chat_to_the_llm_controller():
+async def test_run_loop_routes_bot_addressed_chat_to_the_llm_controller(tmp_path):
     handled = []
 
     class RecordingLLM:
@@ -153,13 +170,13 @@ async def test_run_loop_routes_bot_addressed_chat_to_the_llm_controller():
     actions = ActionRegistry()
     tracker = EntityTracker()
 
-    await run(bridge, actions, tracker, InventoryTracker(), RecordingLLM(), CONFIG, _movement(bridge, tracker))
+    await run(bridge, actions, tracker, InventoryTracker(), RecordingLLM(), CONFIG, _movement(bridge, tracker, tmp_path), SelfPositionTracker())
 
     assert handled == [("Alex", f"hey {BOT_NAME}, got food?")]
 
 
 @pytest.mark.asyncio
-async def test_run_loop_routes_trigger_word_chat_to_the_llm_controller():
+async def test_run_loop_routes_trigger_word_chat_to_the_llm_controller(tmp_path):
     handled = []
 
     class RecordingLLM:
@@ -173,13 +190,13 @@ async def test_run_loop_routes_trigger_word_chat_to_the_llm_controller():
     config = BotConfig(mod_host="0.0.0.0", mod_port=0, bot_name=BOT_NAME, trigger_words=("buddy",), mod_repo_path=None)
     tracker = EntityTracker()
 
-    await run(bridge, actions, tracker, InventoryTracker(), RecordingLLM(), config, _movement(bridge, tracker))
+    await run(bridge, actions, tracker, InventoryTracker(), RecordingLLM(), config, _movement(bridge, tracker, tmp_path), SelfPositionTracker())
 
     assert handled == [("Alex", "hey buddy, got food?")]
 
 
 @pytest.mark.asyncio
-async def test_run_loop_ignores_position_health_death_and_respawn_events_without_crashing():
+async def test_run_loop_ignores_position_health_death_and_respawn_events_without_crashing(tmp_path):
     bridge = FakeBridge([
         ModEvent(type="hello", data={"commit": "abc123", "built_at": "2026-01-01T00:00:00Z"}),
         ModEvent(type="position", data={"x": 1.0, "y": 2.0, "z": 3.0, "yaw": 0.0, "on_ground": True}),
@@ -191,12 +208,12 @@ async def test_run_loop_ignores_position_health_death_and_respawn_events_without
     actions = ActionRegistry()
     tracker = EntityTracker()
 
-    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, _movement(bridge, tracker))  # should not raise
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, _movement(bridge, tracker, tmp_path), SelfPositionTracker())  # should not raise
     assert bridge.sent_chat == []
 
 
 @pytest.mark.asyncio
-async def test_run_loop_resumes_follow_after_target_reconnects_with_a_new_entity_id():
+async def test_run_loop_resumes_follow_after_target_reconnects_with_a_new_entity_id(tmp_path):
     # Regression test: a followed player disconnecting and reconnecting
     # gets a brand new entity id on the mod side, but the mod's FOLLOW
     # goal was pinned to the old (now-gone) id -- found live: the bot
@@ -212,10 +229,10 @@ async def test_run_loop_resumes_follow_after_target_reconnects_with_a_new_entity
     ])
     actions = ActionRegistry()
     tracker = EntityTracker()
-    movement = _movement(bridge, tracker)
+    movement = _movement(bridge, tracker, tmp_path)
     register_movement_actions(actions, movement)
 
-    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, movement)
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, movement, SelfPositionTracker())
 
     assert bridge.sent == [
         ("follow", {"entity_id": 7, "stop_distance": FOLLOW_STOP_DISTANCE}),
@@ -224,7 +241,7 @@ async def test_run_loop_resumes_follow_after_target_reconnects_with_a_new_entity
 
 
 @pytest.mark.asyncio
-async def test_run_loop_does_not_resume_follow_for_an_unrelated_reconnecting_player():
+async def test_run_loop_does_not_resume_follow_for_an_unrelated_reconnecting_player(tmp_path):
     bridge = FakeBridge([
         ModEvent(type="entity", data={"action": "add", "id": 7, "name": "Alex", "x": 0.0, "y": 0.0, "z": 0.0}),
         ModEvent(type="chat", data={"sender": "Alex", "text": "!follow"}),
@@ -232,16 +249,16 @@ async def test_run_loop_does_not_resume_follow_for_an_unrelated_reconnecting_pla
     ])
     actions = ActionRegistry()
     tracker = EntityTracker()
-    movement = _movement(bridge, tracker)
+    movement = _movement(bridge, tracker, tmp_path)
     register_movement_actions(actions, movement)
 
-    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, movement)
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, movement, SelfPositionTracker())
 
     assert bridge.sent == [("follow", {"entity_id": 7, "stop_distance": FOLLOW_STOP_DISTANCE})]
 
 
 @pytest.mark.asyncio
-async def test_run_loop_survives_a_chat_reply_that_fails_to_send(caplog):
+async def test_run_loop_survives_a_chat_reply_that_fails_to_send(tmp_path, caplog):
     # Regression test: a live report of "!follow gives no confirmation or
     # error in chat" turned out to have nothing in the log explaining why
     # -- ModBridge._send only logs a dropped command when the connection
@@ -263,6 +280,6 @@ async def test_run_loop_survives_a_chat_reply_that_fails_to_send(caplog):
     tracker = EntityTracker()
 
     with caplog.at_level("ERROR"):
-        await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, _movement(bridge, tracker))
+        await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, _movement(bridge, tracker, tmp_path), SelfPositionTracker())
 
     assert any("failed to send chat reply" in record.message for record in caplog.records)
