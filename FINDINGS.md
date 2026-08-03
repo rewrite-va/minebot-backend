@@ -342,9 +342,19 @@ see `pure-protocol-backend`'s FINDINGS.md if that's ever needed again).
   and right-clicks them open via the real `useItemOn` interaction as the
   bot approaches, called each tick from `resolveMovementIntent` against
   the current waypoint.
-- `MovementIntent.java` -- the concrete per-tick forward/jump/yaw resolved
-  from the current goal against live game state; separates goal
-  resolution (needs live entity/player state) from input plumbing (doesn't).
+- `MovementIntent.java` -- the concrete per-tick forward/jump/yaw/pitch
+  resolved from the current goal against live game state; separates goal
+  resolution (needs live entity/player state) from input plumbing
+  (doesn't). `resolveMovementIntent` (in `MinebotMod.java`) picks between
+  two look-direction behaviors: while a pathfinding waypoint is still
+  queued, yaw keeps aiming at the next waypoint (needed to actually walk
+  the route); once the waypoint queue empties (arrived, or pathfinding
+  failed and it's falling back to the raw target) and there's a live
+  `FOLLOW`/`GIVE` entity, yaw+pitch instead aim directly at that entity's
+  eye level (`Entity.getEyeY()` on both sides) -- so the bot looks at
+  whoever it's following once close, rather than continuing to face
+  wherever the last waypoint was. Pitch sign (positive = looking down)
+  confirmed via decompiled `Entity.calculateViewVector`.
 - `MinebotInput.java` -- the `ClientInput` replacement described above
   (keyboard-override + `MovementIntent`-driven fallback).
 - `FoodEater.java` -- autonomous eating: every client tick, if health is
