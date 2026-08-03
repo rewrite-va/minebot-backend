@@ -157,12 +157,15 @@ async def test_run_loop_routes_trigger_word_chat_to_the_llm_controller():
 
 
 @pytest.mark.asyncio
-async def test_run_loop_ignores_position_and_health_events_without_crashing():
+async def test_run_loop_ignores_position_health_death_and_respawn_events_without_crashing():
     bridge = FakeBridge([
         ModEvent(type="position", data={"x": 1.0, "y": 2.0, "z": 3.0, "yaw": 0.0, "on_ground": True}),
         ModEvent(type="health", data={"health": 20.0}),
         ModEvent(type="health", data={"health": 0.0}),
+        ModEvent(type="death", data={}),
+        ModEvent(type="respawn", data={}),
     ])
     actions = ActionRegistry()
 
     await run(bridge, actions, EntityTracker(), InventoryTracker(), _llm(bridge, actions), CONFIG)  # should not raise
+    assert bridge.sent_chat == []

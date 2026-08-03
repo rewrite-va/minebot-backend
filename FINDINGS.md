@@ -138,6 +138,12 @@ Events, mod -> Python:
   (name/position omitted on `remove`; name omitted on `move`, since it never
   changes)
 - `{"type":"health","health":..}`
+- `{"type":"death"}` -- fires exactly once when the bot dies (distinct
+  from `health` hitting 0, which can be transient/edge-casey on its own);
+  the mod auto-respawns immediately when this fires (see `RespawnHandler`
+  below), no manual "click Respawn" needed.
+- `{"type":"respawn"}` -- fires exactly once after a `death` when the bot
+  has actually respawned (health back above 0).
 - `{"type":"inventory","selected_slot":..,"slots":[{"slot":..,"item":"minecraft:...","count":..,"damage":..,"max_damage":..}, ...]}`
   -- a full snapshot (only non-empty slots listed), broadcast whenever it
   differs from the last one sent (change-only, same shape as `health`).
@@ -359,12 +365,30 @@ see `pure-protocol-backend`'s FINDINGS.md if that's ever needed again).
   versions' layout might suggest; verify against the real bytecode again
   if this ever needs revisiting on a version bump, don't assume the
   layout carries over).
+- `RespawnHandler.java` -- detects death and auto-respawns. No
+  client-side Fabric API event exists for either (confirmed:
+  `ServerPlayerEvents.AFTER_RESPAWN`/`JOIN`/`LEAVE`/`ALLOW_DEATH` all take
+  `ServerPlayer`, server-side only -- unusable since minebot-mod isn't
+  the server; `ClientEntityEvents` only covers `ENTITY_LOAD`/`UNLOAD`),
+  so this polls every tick, same as `MinebotMod` already does for health
+  -- `LivingEntity.isDeadOrDying()` is itself just `getHealth() <= 0`
+  under the hood (confirmed via decompiled bytecode), so this reads the
+  same signal already being read every tick, just as an edge instead of
+  a value-changed check. Two `EdgeTrigger`s (`dead`/`alive`) fire
+  `onDeath`/`onRespawn` callbacks exactly once per transition; `onDeath`
+  also calls `player.respawn()` immediately, which sends the exact same
+  `ServerboundClientCommandPacket(PERFORM_RESPAWN)` the death screen's
+  Respawn button does (confirmed via decompiled bytecode) -- no GUI
+  interaction needed, so the bot no longer needs a human to click
+  Respawn. `MinebotMod.onClientTick` also skips `FoodEater.maybeEat`
+  while `isDeadOrDying()` is true (no point trying to eat at 0 health).
 - `StatusHud.java` -- a HUD text overlay showing whether the control
   channel is currently connected.
 - `MinebotMod.java` -- entry point: starts the control client, registers
   the client-tick hook (resolves the goal via `PathTracker`, updates
-  `MinebotInput`, sets yaw, checks GIVE-goal completion, calls
-  `FoodEater`, broadcasts position/entity/inventory/health events),
+  `MinebotInput`, sets yaw, checks GIVE-goal completion, ticks
+  `RespawnHandler`, calls `FoodEater` unless dead, broadcasts
+  position/entity/inventory/health/death/respawn events),
   registers chat-event forwarding, registers the HUD. `ControlState`
   gained a `GIVE` mode (walks toward a target entity like `FOLLOW`,
   reusing `followEntityId`; once within `stopDistance`,
@@ -377,6 +401,20 @@ component -- this only makes sense running inside an actual client).
 
 ## Known gaps / next steps
 
+- **Deploying a mod change requires a rebuild, a jar copy, AND a full
+  client restart** -- editing the mod's source and even rebuilding it
+  isn't enough on its own. Fabric loads mod jars once at client startup;
+  a jar changed on disk while the client is already running has zero
+  effect until the client is fully quit and relaunched. This bit a real
+  session: FoodEater/chat-announcements/inventory-actions/i18n all
+  worked and compiled correctly, but a live playtest showed *none* of it
+  running (no eating, no chat lines, health silently reaching 2 hearts
+  with nothing logged) because the installed jar in the PrismLauncher
+  instance's `mods/` folder was hours stale relative to the rebuilt one.
+  See `AGENTS.md` for the exact rebuild+copy+relaunch steps -- always
+  verify the deployed jar's mtime/diff against a fresh build before
+  trusting a "why isn't this working" report is a logic bug and not a
+  stale-deploy issue.
 - No real `LLMProvider` is wired up yet (see the LLM trigger + brain
   layer section above) -- `NullLLMProvider` always declines, so
   addressing the bot by name in chat currently gets silence, not a
@@ -424,7 +462,18 @@ component -- this only makes sense running inside an actual client).
   `Player.canEat`, worth checking if this bites in practice), doesn't
   prefer higher-nutrition food when multiple edible types are held, and
   has no test coverage. Not yet confirmed by live testing (only compiled
-  successfully so far).
+  successfully so far) -- note the stale-jar deploy trap above: a live
+  test that shows no eating happening could mean either an actual logic
+  bug or just an undeployed/unreloaded jar, check the deployed jar is
+  current before assuming the former.
+- `RespawnHandler` (death detection + auto-respawn + `death`/`respawn`
+  events) has no test coverage on the mod side and hasn't been confirmed
+  live yet either -- built and deployed in response to a live bug report
+  (bot sat dead on the death screen needing a manual Respawn click, and
+  no `death` event was ever sent -- turned out to be the stale-jar issue
+  above, not a logic bug, since the code hadn't existed at all in the
+  running jar yet), but the fix itself is still unverified against a
+  real death in-game.
 - `MinebotMod.handleMessage` (including the new `move_to_hotbar`/`equip`/
   `drop`/`give` cases) runs on the WebSocket's own network thread, not
   the client render/tick thread, and calls real client-internal APIs

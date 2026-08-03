@@ -65,9 +65,15 @@ async def run(
             continue
 
         if event.type == "health":
-            health = event.data.get("health")
-            if health is not None and health <= 0.0:
-                log.info("we died (health=%s)", health)
+            log.debug("health: %s", event.data.get("health"))
+            continue
+
+        if event.type == "death":
+            log.info("we died")
+            continue
+
+        if event.type == "respawn":
+            log.info("respawned")
             continue
 
         if event.type == "position":
