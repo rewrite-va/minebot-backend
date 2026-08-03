@@ -246,9 +246,18 @@ decision entirely lives in the Python backend, matching the design intent
   threading each config value through as its own positional param got
   fragile once there were two, and there will likely be more (LLM
   provider/model selection, etc.) as the LLM piece grows.
-- `minebot/main.py` -- wires it all together: connect the bridge, build
-  the `ActionRegistry`/trackers/movement+inventory controllers, build an
-  `LLMController` (no provider configured), run the loop.
+- `minebot/logging_setup.py` -- `configure_logging(level)`: console
+  output plus a timestamped file per run under `logs/<datetime>.log`
+  (gitignored). Needs `logging.basicConfig(..., force=True)` to actually
+  reconfigure if called more than once in the same process (its default
+  no-op-if-handlers-already-exist behavior otherwise silently keeps a
+  stale configuration -- caught by a real test failure where pytest's own
+  log-capture plugin had already attached a root handler before either
+  test in `test_logging_setup.py` ran).
+- `minebot/main.py` -- wires it all together: configure logging, connect
+  the bridge, build the `ActionRegistry`/trackers/movement+inventory
+  controllers, build an `LLMController` (no provider configured), run
+  the loop.
 
 Deleted from `master` (fully preserved on `pure-protocol-backend`):
 `minebot/protocol/` (packet parsing, chunk/block-registry, chat/NBT),
@@ -461,19 +470,22 @@ component -- this only makes sense running inside an actual client).
   eating at full hunger just wastes the item -- vanilla blocks this via
   `Player.canEat`, worth checking if this bites in practice), doesn't
   prefer higher-nutrition food when multiple edible types are held, and
-  has no test coverage. Not yet confirmed by live testing (only compiled
-  successfully so far) -- note the stale-jar deploy trap above: a live
-  test that shows no eating happening could mean either an actual logic
-  bug or just an undeployed/unreloaded jar, check the deployed jar is
-  current before assuming the former.
+  has no test coverage on the mod side. **Confirmed working live** (both
+  the "eating..." and "no food!" lines fired correctly in a real
+  playtest) -- see FoodEater's hearts-formatting fix below, found in that
+  same playtest.
 - `RespawnHandler` (death detection + auto-respawn + `death`/`respawn`
-  events) has no test coverage on the mod side and hasn't been confirmed
-  live yet either -- built and deployed in response to a live bug report
-  (bot sat dead on the death screen needing a manual Respawn click, and
-  no `death` event was ever sent -- turned out to be the stale-jar issue
-  above, not a logic bug, since the code hadn't existed at all in the
-  running jar yet), but the fix itself is still unverified against a
-  real death in-game.
+  events) has no test coverage on the mod side, but **is confirmed
+  working live**: a real playtest showed the bot correctly detecting
+  death (`ritebot was slain by riterite` -> `death` event logged) and
+  auto-respawning with no manual click needed (`respawn` event logged,
+  confirmed by the other player: "ok respawn worked").
+- That same playtest caught a real bug in `FoodEater`'s hearts display:
+  `Math.round(health / 2.0f)` rounded a genuine, nonzero 0.5 HP (a
+  quarter heart) down to 0, so chat said "I have 0 hearts!" while the
+  player was visibly still alive -- a player watching flagged it
+  directly ("bug: 0 hearts?, but I see you have 0.5"). Fixed to report
+  hearts to one decimal place instead of rounding to a whole number.
 - `MinebotMod.handleMessage` (including the new `move_to_hotbar`/`equip`/
   `drop`/`give` cases) runs on the WebSocket's own network thread, not
   the client render/tick thread, and calls real client-internal APIs
