@@ -318,22 +318,95 @@ see `pure-protocol-backend`'s FINDINGS.md if that's ever needed again).
 - `MinebotInput.java` -- the `ClientInput` replacement described above
   (keyboard-override + `MovementIntent`-driven fallback).
 - `FoodEater.java` -- autonomous eating: every client tick, if health is
-  at or below 20% of max and the player isn't already mid-eating-animation
-  (`isUsingItem()`, which also acts as the natural throttle -- no separate
-  cooldown needed), eats via the real `MultiPlayerGameMode.useItem`
-  interaction (offhand food first, else the first edible item found in the
-  main inventory, selected into the hotbar first if necessary). "Edible"
-  is a `DataComponents.FOOD` presence check -- the older
-  `Item.getFoodProperties()` API is gone in 26.1.2. Also sends real chat
-  lines via `player.connection.sendChat` (same path Python-originated
-  `chat` commands use): once per low-health episode when it starts eating
-  ("I have N hearts!, eating...", translated) and once if the inventory
-  scan comes up empty ("oh, I have no food! aaaa"), each gated by its own
-  `util.EdgeTrigger` (see below) so it doesn't spam chat every tick while
-  health stays low. Entirely autonomous on the mod side; no control-channel wire
-  format changes, so Python has no visibility into any of this beyond the
+  at or below 20% of max, eats real food (offhand first, else the first
+  edible+eatable-right-now item found in the main inventory, selected
+  into the hotbar first if necessary). "Edible" is a `DataComponents.FOOD`
+  presence check -- the older `Item.getFoodProperties()` API is gone in
+  26.1.2. "Eatable right now" mirrors `Player.canEat(canAlwaysEat)`
+  (hunger-gated, see below). Also sends real chat lines via
+  `player.connection.sendChat`: once per low-health episode when it
+  starts eating ("I have N.N hearts!, eating...", translated, one
+  decimal place -- `Math.round` previously misreported a real nonzero
+  0.5 HP as "0 hearts"), once if nothing edible is found at all
+  ("oh, I have no food! aaaa"), and once if food exists but hunger is
+  full and blocking every bit of it ("I have food but I'm not hungry...",
+  `food_eater.hunger_full`) -- each gated by its own `util.EdgeTrigger`
+  (see below) so it doesn't spam chat every tick while health stays low.
+  Entirely autonomous on the mod side; no control-channel wire format
+  changes, so Python has no visibility into any of this beyond the
   `health` events it already gets (and the chat lines showing up as
   regular `chat` events, same as any other player's chat).
+
+  **How it actually triggers eating -- the hard-won part.** `FoodEater`
+  does **not** call `MultiPlayerGameMode.useItem()` (the same client API
+  `DoorOpener` uses for its instant door interaction) -- it holds the
+  real `keyUse` keybind down instead
+  (`Minecraft.getInstance().options.keyUse.setDown(true)`), letting
+  vanilla's own per-tick `Minecraft.handleKeybinds()` drive the actual
+  interaction exactly as it would for a human physically holding
+  right-click, released (`setDown(false)`) once health recovers or
+  nothing eatable remains. `MinebotMod.onClientTick` also releases it
+  explicitly on death (`FoodEater.releaseUseKeyIfHeld()`), since
+  `FoodEater.maybeEat` itself isn't ticked while dead and the key could
+  otherwise stay stuck held through a respawn.
+
+  This exists because calling `useItem()` directly -- what every earlier
+  version of this class did -- **never actually completed a single eat**,
+  discovered live and root-caused only after an extensive investigation
+  (six separate decompiled-bytecode research passes over one debugging
+  session). Each attempt individually *looked* successful: `useItem()`
+  returned `InteractionResult.Success` and `player.isUsingItem()`
+  briefly read `true` -- but was reset back to `false` exactly one tick
+  later, every single time, forever, so the eat-duration timer never
+  progressed and the item was never consumed. From the outside this
+  looked exactly like "spamming right-click" (a player watching
+  described it that way independently, before any explanation existed).
+  Ruled out, one at a time, each confirmed via decompiled source/bytecode
+  (not guessed):
+  - Hunger gating (`Player.canEat()`) -- real, and now handled (see
+    above), but not the cause of *this* symptom; confirmed hunger was
+    genuinely not full during the failing attempts.
+  - Reselecting an already-selected hotbar slot every tick -- removed
+    entirely as a variable (eating only from whatever was already
+    selected/offhand, no `setSelectedSlot`/`pickSlot` at all) -- bug
+    persisted identically.
+  - Call rate -- added a hard 10-tick cooldown between `useItem()`
+    attempts (not just relying on `isUsingItem()`) -- bug persisted
+    identically, just at a slower, still-broken cadence.
+  - The mod's own synthetic movement input (`MinebotInput`, which
+    replaces `player.input` every tick even when idle) -- fully disabled
+    for a test build -- bug persisted identically.
+  - Vanilla server-side rate-limiting/cooldowns on
+    `ServerboundUseItemPacket` -- confirmed absent in
+    `ServerGamePacketListenerImpl.handleUseItem`'s bytecode (exactly 3
+    guards: client-loaded, item non-empty, feature-flag enabled).
+  - The hotbar-carried-item sync packet
+    (`MultiPlayerGameMode.ensureHasSentCarriedItem`, which *can* trigger
+    `stopUsingItem()` server-side on a genuine slot change) -- confirmed
+    inert here: it only sends a packet when the client's own
+    `Inventory.selected` actually changes, which the logs proved wasn't
+    happening.
+  - Server-side plugins -- checked the server's actual mod list
+    (`CustomPlayerModels`, `fabric-api`, `faster-copper-golem`,
+    `Jade`/`jade_trades`, `Ping-Wheel`, `jei`, `rewrite-villager-helper`)
+    and, for the two with local source access, confirmed neither touches
+    item-use interactions at all.
+
+  **The decisive test** (not bytecode -- a live A/B comparison): on the
+  exact same running game client, same account, same session, same
+  food item -- a human physically taking over mouse/keyboard control of
+  that window and holding right-click ate normally, while the mod's
+  direct `useItem()` call on the identical setup never completed a
+  single eat. That pinned the difference to "real input" vs.
+  "programmatic API call" specifically, which a follow-up bytecode pass
+  confirmed *shouldn't* matter (`Minecraft.startUseItem()`, real input's
+  own entry point, calls the exact same `MultiPlayerGameMode.useItem()`
+  the mod does, no hidden setup) -- leaving the actual reason for the
+  difference still unexplained at the vanilla-source level (see Known
+  gaps). Switching to holding the real keybind sidesteps needing to
+  know why; it was confirmed working by direct live observation (a
+  human watching the bot hold right-click and the food item actually
+  get consumed, health recovering).
 - `util/EdgeTrigger.java` -- small reusable primitive extracted out of
   `FoodEater`'s original pair of hand-rolled `announcedX` booleans: feed
   it a per-tick boolean condition via `fire(condition)`, and it returns
@@ -506,53 +579,33 @@ component -- this only makes sense running inside an actual client).
   once already low on health rather than proactively maintaining hunger
   before that happens, and doesn't prefer higher-nutrition food when
   multiple edible types are held. It has no test coverage on the mod
-  side. The "worth checking if this bites in practice" hunger-gating
-  concern flagged in an earlier version of this note *did* bite in
-  practice -- see the confirmed root cause and fix below -- so it's now
-  actually handled, not just a theoretical gap.
-- **`FoodEater` hunger-gating bug, found and fixed via a real playtest**:
-  a second player watching the bot reported it "spamming right-click"
-  instead of holding it down to eat, even after being given food while
-  critically low on health. Root cause, confirmed by decompiling
-  `Player.canEat`/`Consumable.startConsuming` (not guessed): vanilla
-  gates eating on *hunger*, not health -- `canEat(canAlwaysEat) ==
-  invulnerable || canAlwaysEat || foodData.needsFood()` where
-  `needsFood() == foodLevel < 20`. Health and hunger are separate bars,
-  so a bot at critical health from combat damage with a still-full
-  hunger bar had `canEat(false) == false` for every normal food item --
-  `useItem()` was a **silent no-op every single tick, forever**, which
-  is exactly what looked like spamming right-click with no progress
-  (the item's own `Item.use()`/`Consumable.startConsuming()` never even
-  reached `startUsingItem()`). The only food that bypasses this is one
-  with `FoodProperties.canAlwaysEat() == true` (golden apple, golden
-  carrot). Fixed in `FoodEater.isEatableNow()`, which mirrors the real
-  `Player.canEat()` gate before ever calling `useItem()`: prefers a
-  `canAlwaysEat` item first, skips calling `useItem()` entirely on food
-  that `canEat()` would currently reject (no more pointless per-tick
-  no-op attempts), and reports the real reason
-  (`food_eater.hunger_full`, a new message key in both `en.json`/
-  `es.json`) distinctly from "no food" when the bot has food but can't
-  currently eat any of it.
-  **Open question, not yet resolved**: the same live session, the user
-  separately observed that passive health regeneration (which vanilla
-  normally does automatically whenever hunger is at/near full,
-  regardless of eating) also didn't seem to be happening. That's
-  entirely server-side vanilla behavior (gated by the `naturalRegeneration`
-  game rule) -- neither this mod nor the Python backend touch it at all,
-  so if it's genuinely not happening this isn't a minebot bug, but it's
-  unconfirmed whether it's actually absent (vs. just slow enough,
-  roughly one half-heart per ~4s, to be easy to miss in a short
-  playtest) or whether hunger genuinely wasn't full at the time. Worth
-  confirming directly (check the gamerule, or just watch health over a
-  longer idle window with hunger visibly full) before assuming
-  anything's broken on the server side.
-- **Confirmed working live overall** (mod-side death detection,
-  auto-respawn, low-health chat announcements, and now real eating with
-  the hunger-gating fix above) -- both the "eating..." and correctly-now-
-  actually-succeeding eat, or the new "hunger full" message, are the
-  expected behaviors going forward; verify all of this again on the next
-  playtest since the hunger-gating fix itself hasn't been live-tested
-  yet (only compiled/deployed so far).
+  side.
+- **Unexplained: why does a direct `MultiPlayerGameMode.useItem()` call
+  never complete an eat, when `Minecraft.startUseItem()` (real input's
+  own entry point) calls the exact same method with no confirmed
+  difference in setup?** See the full investigation writeup under
+  `FoodEater.java` above -- six bytecode passes ruled out every vanilla
+  mechanism that could explain it, and the actual fix (hold the real
+  `keyUse` keybind instead of calling `useItem()`) works but doesn't
+  explain *why* the direct call doesn't. Worth a fresh look if this
+  version ever gets a Minecraft/mapping update, in case something
+  changes that makes the cause obvious in hindsight -- or if the same
+  "direct API call doesn't work, real input does" pattern shows up
+  again elsewhere (e.g. if block-breaking/placing hits the same issue).
+- Passive health regeneration (vanilla, gated by the
+  `naturalRegeneration` game rule, confirmed `true` on this server) was
+  separately reported as "not happening" during the same investigation
+  session -- still unconfirmed whether that's real or just an artifact
+  of a short observation window (the session/game-client ended shortly
+  after the observation). Neither this mod nor the Python backend touch
+  regen at all, so if real, it isn't a minebot bug -- worth a longer,
+  deliberate test (full hunger, low health, just wait and watch) next
+  time this comes up.
+- **Confirmed working live overall**, as of the `keyUse`-hold fix: death
+  detection, auto-respawn, low-health chat announcements, hunger-gating
+  detection, and now real eating that actually completes (a human
+  directly watched the bot hold right-click and consume food, health
+  recovering) -- all confirmed in the same investigation session.
 - `RespawnHandler` (death detection + auto-respawn + `death`/`respawn`
   events) has no test coverage on the mod side, but **is confirmed
   working live**: a real playtest showed the bot correctly detecting
