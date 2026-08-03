@@ -180,10 +180,20 @@ and an async `handler`) and registered into an `ActionRegistry`
 (`minebot/actions/registry.py`). The registry offers two dispatch paths
 into the same handler:
 
-- `dispatch_chat(message, sender)` -- the existing `!name(args)` chat
-  grammar (`minebot/actions/parser.py`, moved here unchanged from the old
-  `commands/` package), positional args parsed from chat text. Returns
-  `None` if the text wasn't a recognized command at all (vs. an
+- `dispatch_chat(message, sender)` -- the chat grammar
+  (`minebot/actions/parser.py`), positional args parsed from chat text.
+  Supports both `!name("arg", 2)` (parenthesized, mirrors mindcraft's
+  own grammar) and bare space-separated args, `!name arg1 arg2` -- the
+  latter added after a real live bug: `!follow yayaeue` used to parse as
+  zero-arg `!follow` (only the parenthesized form was recognized at
+  all), silently discarding the given name so `!follow yayaeue` followed
+  the chat *sender* instead of `yayaeue` with no error or indication
+  anything was wrong. The bare form consumes simple word/number/bool
+  tokens up to the next `!` or end of message (so trailing free-form
+  chat gets captured as extra args too, rather than silently dropped --
+  a fixed-arity handler will just error on the extra count, which is
+  more honest than silently ignoring part of what the player typed).
+  Returns `None` if the text wasn't a recognized command at all (vs. an
   `ActionResult` if a command ran), so callers can tell "not a command"
   apart from "a command ran and had nothing to say".
 - `dispatch_tool_call(name, sender, **kwargs)` -- structured keyword
@@ -209,6 +219,26 @@ since "give to whoever's talking" isn't as safe a default as "follow
 whoever's talking"). Items are named by bare id in chat (`"bread"`),
 normalized to `"minecraft:bread"` to match `InventoryTracker`/the mod's
 `inventory` events (already-namespaced ids pass through unchanged).
+All of follow/stop/equip/drop/give now reply with a chat confirmation
+("ok, following Alex", "ok, dropped 5x bread") on success too, not just
+on failure -- previously a successful command was silent, giving no
+feedback that it actually took effect.
+
+`MovementController` also fixes a real live bug: minebot-mod's `FOLLOW`
+goal is pinned to a fixed entity id (`ControlState.followEntityId`), but
+a player who disconnects and reconnects gets a brand-new entity id on
+the mod side -- `level.getEntity(oldId)` then never resolves again, so
+the bot silently stood idle forever after the target rejoined, with no
+error, until a human retyped `!follow`. `MovementController` now
+remembers the *name* it's following (`_following_name`), not just the id
+it last sent, and exposes `on_entity_added(name, entity_id)`; `run_loop.
+run` calls this for every mod `entity` "add" event, and if the
+reappearing name matches who's being followed, re-sends `follow` with
+the fresh id automatically. `stop()` clears the remembered name so a
+later reconnect of the same player doesn't unexpectedly resume
+following them. Entirely a Python-side fix -- the mod already sent a
+correct fresh `add` event with the right name on rejoin, Python just
+wasn't listening for it to resume the goal.
 
 ## LLM trigger + brain layer (structure built, no provider wired up yet)
 
