@@ -13,9 +13,11 @@ from minebot.bridge.entities import EntityTracker
 from minebot.bridge.inventory import InventoryTracker
 from minebot.config import BotConfig
 from minebot.llm.controller import LLMController
+from minebot.logging_setup import configure_logging
 
-logging.basicConfig(level=os.environ.get("MINEBOT_LOG_LEVEL", "INFO").upper())
+log_path = configure_logging(os.environ.get("MINEBOT_LOG_LEVEL", "INFO"))
 log = logging.getLogger("minebot")
+log.info("logging to %s", log_path)
 
 
 async def run_bot(config: BotConfig) -> None:

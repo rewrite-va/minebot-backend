@@ -43,6 +43,11 @@ the mod to connect in on `MINEBOT_MOD_HOST:MINEBOT_MOD_PORT` (default
 `0.0.0.0:47893`). Copy `.env.example` to `.env` first and fill in real
 values (`MINEBOT_BOT_NAME`, optionally `MINEBOT_TRIGGER_WORDS`).
 
+Every run also writes its own timestamped file under `logs/`
+(`logs/<datetime>.log`, gitignored) in addition to the usual console
+output -- no need to manually `tee` to a file to capture a session for
+debugging, it's captured by default (see `minebot/logging_setup.py`).
+
 ## Tests
 
 ```bash
