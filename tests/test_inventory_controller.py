@@ -68,7 +68,7 @@ async def test_equip_resolves_bare_item_name_to_slot():
     result = await controller.equip(None, "diamond_sword")
 
     assert bridge.sent == [("equip", {"slot": 10})]
-    assert result.message is None
+    assert result.message is not None
 
 
 @pytest.mark.asyncio
@@ -81,7 +81,7 @@ async def test_equip_accepts_already_namespaced_item_name():
     result = await controller.equip(None, "minecraft:diamond_sword")
 
     assert bridge.sent == [("equip", {"slot": 10})]
-    assert result.message is None
+    assert result.message is not None
 
 
 @pytest.mark.asyncio
@@ -105,7 +105,7 @@ async def test_drop_defaults_to_one():
     result = await controller.drop(None, "cobblestone")
 
     assert bridge.sent == [("drop", {"slot": 3, "count": 1})]
-    assert result.message is None
+    assert result.message is not None
 
 
 @pytest.mark.asyncio
@@ -118,7 +118,7 @@ async def test_drop_with_explicit_count():
     result = await controller.drop(None, "cobblestone", 32)
 
     assert bridge.sent == [("drop", {"slot": 3, "count": 32})]
-    assert result.message is None
+    assert result.message is not None
 
 
 @pytest.mark.asyncio
@@ -133,7 +133,7 @@ async def test_give_walks_to_recipient_and_drops():
     result = await controller.give(None, "Alex", "bread", 2)
 
     assert bridge.sent == [("give", {"entity_id": 7, "slot": 3, "count": 2, "stop_distance": GIVE_STOP_DISTANCE})]
-    assert result.message is None
+    assert result.message is not None
 
 
 @pytest.mark.asyncio

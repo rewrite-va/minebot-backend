@@ -46,7 +46,7 @@ class InventoryController:
             log.warning("equip: not carrying any %s", item)
             return ActionResult(message=f"I don't have any {item}")
         await self.bridge.send_equip(entry.slot)
-        return ActionResult()
+        return ActionResult(message=f"ok, equipped {item}")
 
     async def drop(self, sender: str | None, item: str, count: float = 1) -> ActionResult:
         entry = self.inventory.find_by_item(_normalize_item_id(item))
@@ -54,7 +54,7 @@ class InventoryController:
             log.warning("drop: not carrying any %s", item)
             return ActionResult(message=f"I don't have any {item}")
         await self.bridge.send_drop(entry.slot, int(count))
-        return ActionResult()
+        return ActionResult(message=f"ok, dropped {int(count)}x {item}")
 
     async def give(self, sender: str | None, player_name: str, item: str, count: float = 1) -> ActionResult:
         entity = self.tracker.find_by_name(player_name)
@@ -69,7 +69,7 @@ class InventoryController:
 
         log.info("giving %dx %s to %s (entity %d)", int(count), item, player_name, entity.id)
         await self.bridge.send_give(entity.id, entry.slot, int(count), stop_distance=GIVE_STOP_DISTANCE)
-        return ActionResult()
+        return ActionResult(message=f"ok, bringing {int(count)}x {item} to {player_name}")
 
 
 def register_inventory_actions(registry: ActionRegistry, inventory: InventoryController) -> None:

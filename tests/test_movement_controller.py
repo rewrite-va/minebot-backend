@@ -1,6 +1,5 @@
 import pytest
 
-from minebot.actions.types import ActionResult
 from minebot.bot.movement import FOLLOW_STOP_DISTANCE, MovementController
 from minebot.bridge.client import ModEvent
 from minebot.bridge.entities import EntityTracker
@@ -42,7 +41,7 @@ async def test_follow_with_explicit_name_sends_follow_for_that_entity():
     result = await movement.follow(None, "Alex")
 
     assert bridge.sent == [("follow", {"entity_id": 7, "stop_distance": FOLLOW_STOP_DISTANCE})]
-    assert result == ActionResult()
+    assert result.message is not None
 
 
 @pytest.mark.asyncio
@@ -55,7 +54,7 @@ async def test_follow_with_no_name_follows_the_chat_sender():
     result = await movement.follow("Alex")
 
     assert bridge.sent == [("follow", {"entity_id": 7, "stop_distance": FOLLOW_STOP_DISTANCE})]
-    assert result == ActionResult()
+    assert result.message is not None
 
 
 @pytest.mark.asyncio
@@ -88,4 +87,4 @@ async def test_stop_sends_stop_command():
     result = await movement.stop(None)
 
     assert bridge.sent == [("stop", {})]
-    assert result == ActionResult()
+    assert result.message is not None

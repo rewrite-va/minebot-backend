@@ -46,11 +46,11 @@ class MovementController:
 
         log.info("starting follow of %s (entity %d)", target_name, entity.id)
         await self.bridge.send_follow(entity.id, stop_distance=FOLLOW_STOP_DISTANCE)
-        return ActionResult()
+        return ActionResult(message=f"ok, following {target_name}")
 
     async def stop(self, sender: str | None) -> ActionResult:
         await self.bridge.send_stop()
-        return ActionResult()
+        return ActionResult(message="ok, stopped")
 
 
 def register_movement_actions(registry: ActionRegistry, movement: MovementController) -> None:
