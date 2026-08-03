@@ -158,31 +158,83 @@ Events, mod -> Python:
   a *full snapshot*, so `handle_event` just replaces state wholesale
   rather than reconciling diffs. `find_by_item`/`count_of` resolve a bare
   registry id (e.g. `"minecraft:bread"`) to a slot/total count.
-- `minebot/bot/movement.py` -- `MovementController`: `!follow`/`!stop`
-  chat-command handlers, translating to `ModBridge` goal calls. `!follow`
-  with no name follows the chat sender; an explicit name resolves through
-  `EntityTracker`.
-- `minebot/bot/inventory.py` -- `InventoryController`: `!inventory`/
-  `!equip`/`!drop`/`!give` chat-command handlers. Items are named by bare
-  id in chat (`"bread"`), normalized to `"minecraft:bread"` to match what
-  `InventoryTracker`/the mod's `inventory` events use (an already-
-  namespaced id passes through unchanged, so a future non-vanilla item id
-  like `"othermod:thing"` still works). `!give` requires both an explicit
-  player name and item (no sender-as-default-recipient magic like
-  `!follow` has, since "give to whoever's talking" isn't an obviously
-  safe default the way "follow whoever's talking" is).
-- `minebot/bot/run_loop.py` -- the main event loop: iterates
-  `bridge.events()`, feeds `entity` events to the `EntityTracker` and
-  `inventory` events to the `InventoryTracker`, dispatches `chat` text
-  through `CommandRegistry`, logs `position`/`health`.
-- `minebot/commands/parser.py`/`registry.py` -- unchanged from the old
-  architecture; both were already protocol-agnostic (`!name(args)` chat
-  grammar and name->handler dispatch), so they carried over as-is.
-- `minebot/config.py` -- now just `MINEBOT_MOD_HOST`/`MINEBOT_MOD_PORT`
-  (default `0.0.0.0:47893` -- Python binds as the server now; see the
-  WSL2-networking note above).
+## Action layer: one definition, usable as a chat command or an LLM tool
+
+Every capability (follow/stop/inventory/equip/drop/give, and whatever
+mining/placing/combat actions get added later) is declared *once* as an
+`Action` (`minebot/actions/types.py`: name, description, typed `params`,
+and an async `handler`) and registered into an `ActionRegistry`
+(`minebot/actions/registry.py`). The registry offers two dispatch paths
+into the same handler:
+
+- `dispatch_chat(message, sender)` -- the existing `!name(args)` chat
+  grammar (`minebot/actions/parser.py`, moved here unchanged from the old
+  `commands/` package), positional args parsed from chat text. Returns
+  `None` if the text wasn't a recognized command at all (vs. an
+  `ActionResult` if a command ran), so callers can tell "not a command"
+  apart from "a command ran and had nothing to say".
+- `dispatch_tool_call(name, sender, **kwargs)` -- structured keyword
+  args, for an LLM's tool-call arguments. Always returns an
+  `ActionResult`, never `None` (the caller already knows `name` is a real
+  tool it chose to call).
+
+Handlers no longer reach for `ModBridge.send_chat` themselves to report
+outcomes -- they return an `ActionResult(message=...)` instead (`message`
+`None` means nothing worth saying). This is the piece that makes the same
+handler usable from either caller: `run_loop.py` sends a chat-path
+result's message to chat itself; `LLMController` does the same after a
+tool call, so the model's tool-call loop sees a plain string result
+rather than a side-effect chat message it has no way to observe.
+
+`minebot/bot/movement.py` (`MovementController` -- `follow`/`stop`) and
+`minebot/bot/inventory.py` (`InventoryController` -- `inventory`/`equip`/
+`drop`/`give`) both register their actions this way now instead of
+calling `registry.register(name, handler)` directly.  `!follow` with no
+name follows the chat sender; `!give` requires an explicit player name
+and item (no sender-as-default-recipient magic the way `!follow` has,
+since "give to whoever's talking" isn't as safe a default as "follow
+whoever's talking"). Items are named by bare id in chat (`"bread"`),
+normalized to `"minecraft:bread"` to match `InventoryTracker`/the mod's
+`inventory` events (already-namespaced ids pass through unchanged).
+
+## LLM trigger + brain layer (structure built, no provider wired up yet)
+
+`minebot/llm/trigger.py` -- `should_trigger_llm(text, sender, bot_name)`:
+deliberately narrow, fires only when the bot's own name is mentioned
+(case-insensitive substring) in a message with a real sender (not a
+system/game message). Ordinary chat between other players is ignored, so
+the bot isn't calling out to a model on every unrelated line. A real
+whisper/DM signal would be a stronger trigger than a name mention, but
+the control channel doesn't carry that distinction yet -- see Known gaps.
+
+`minebot/llm/controller.py` -- `LLMController.handle_chat(sender, text)`:
+calls an `LLMProvider` (a `Protocol`, not a concrete class) with the
+conversation turn plus `registry.list_actions()`, gets back an
+`LLMResponse` (optional `reply` text, plus any `LLMToolCall`s the model
+made), executes each tool call through `ActionRegistry.dispatch_tool_call`
+and sends its result message to chat if it has one, then sends the
+model's own `reply` last. No real provider (Anthropic/OpenAI/etc.) is
+wired up yet -- `NullLLMProvider` is the default and always declines,
+so this plumbing is fully usable/testable today without an API key; a
+real integration is just implementing `LLMProvider.respond` and building
+that provider's own tool-schema format from the same `Action` list
+(deliberately provider-agnostic for exactly this reason).
+
+`minebot/bot/run_loop.py`'s chat handling order: try `dispatch_chat`
+first (an actual `!command` always wins), then fall back to
+`should_trigger_llm` for anything else. The mod side needed **no**
+changes for this -- `MinebotMod.broadcastChatEvent` already forwards
+every chat message unconditionally; the "does this deserve a response"
+decision entirely lives in the Python backend, matching the design intent
+(no brain logic on the mod side).
+
+- `minebot/config.py` -- `MINEBOT_MOD_HOST`/`MINEBOT_MOD_PORT` (default
+  `0.0.0.0:47893` -- Python binds as the server now; see the
+  WSL2-networking note above) plus `MINEBOT_BOT_NAME` (default
+  `"minebot"`), used by the LLM trigger check above.
 - `minebot/main.py` -- wires it all together: connect the bridge, build
-  the registry/trackers/movement+inventory controllers, run the loop.
+  the `ActionRegistry`/trackers/movement+inventory controllers, build an
+  `LLMController` (no provider configured), run the loop.
 
 Deleted from `master` (fully preserved on `pure-protocol-backend`):
 `minebot/protocol/` (packet parsing, chunk/block-registry, chat/NBT),
@@ -317,6 +369,25 @@ component -- this only makes sense running inside an actual client).
 
 ## Known gaps / next steps
 
+- No real `LLMProvider` is wired up yet (see the LLM trigger + brain
+  layer section above) -- `NullLLMProvider` always declines, so
+  addressing the bot by name in chat currently gets silence, not a
+  response. Next step: implement `LLMProvider.respond` for a real
+  provider (Anthropic/OpenAI/etc. -- deliberately not chosen yet) and
+  build that provider's tool-schema format from `Action.params`.
+- `should_trigger_llm` only checks for the bot's name being mentioned --
+  there's no way to trigger it via whisper/DM, since `MinebotMod`'s
+  `CHAT`/`GAME` chat forwarding collapses every message into the same
+  `{"type":"chat"}` shape with no message-type flag. Would need a
+  mod-side change (a `whisper: bool` field on the `chat` event, sourced
+  from Fabric API's chat-type info) if that turns out to matter in
+  practice -- worth revisiting once a real LLM provider is live and it's
+  clearer whether name-mention-only is too broad or too narrow.
+- No conversation history/context -- `LLMController.handle_chat` is
+  called fresh per message with no memory of prior turns from the same
+  (or any) sender. A real provider integration will likely need some
+  per-sender (or global) conversation state before responses feel
+  coherent across multiple messages.
 - The Java pathfinding port (`Move`/`AStar`/`BlockInfo`/`Movements`/
   `GoalNear`/`PathTracker`) has no unit tests yet, unlike its Python
   equivalent on `pure-protocol-backend` -- so far only validated by live
