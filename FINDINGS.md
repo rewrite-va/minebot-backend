@@ -113,6 +113,22 @@ Commands, Python -> mod:
 - `{"type":"follow","entity_id":..,"stop_distance":2.0}`
 - `{"type":"stop"}`
 - `{"type":"chat","text":".."}`
+- `{"type":"move_to_hotbar","slot":..,"hotbar_slot":..}` -- moves/swaps
+  `slot`'s contents into hotbar slot `hotbar_slot` (0-8), selecting it.
+- `{"type":"equip","slot":..}` -- shift-click-equivalent: routes `slot`'s
+  contents into its matching armor/offhand slot automatically.
+- `{"type":"drop","slot":..,"count":..}` -- drops up to `count` of
+  `slot`'s contents (capped at the actual stack size).
+- `{"type":"give","entity_id":..,"slot":..,"count":..,"stop_distance":2.0}`
+  -- walks toward `entity_id` (FOLLOW-style pathing) and, once within
+  `stop_distance`, drops `count` of `slot`'s contents and returns to IDLE.
+
+All four inventory commands address slots using `Inventory`'s own 0-42
+numbering (0-8 hotbar, 9-35 main storage, 36-42 armor/offhand/body/
+saddle) -- the same numbering the `inventory` event below reports, *not*
+`InventoryMenu`'s different internal numbering (see `InventoryActions`'s
+own docstring on the mod side for the exact translation between the two,
+confirmed by disassembling `AbstractContainerMenu`).
 
 Events, mod -> Python:
 - `{"type":"position","x":..,"y":..,"z":..,"yaw":..,"pitch":..,"on_ground":..}`
@@ -122,21 +138,43 @@ Events, mod -> Python:
   (name/position omitted on `remove`; name omitted on `move`, since it never
   changes)
 - `{"type":"health","health":..}`
+- `{"type":"inventory","selected_slot":..,"slots":[{"slot":..,"item":"minecraft:...","count":..,"damage":..,"max_damage":..}, ...]}`
+  -- a full snapshot (only non-empty slots listed), broadcast whenever it
+  differs from the last one sent (change-only, same shape as `health`).
+  `damage`/`max_damage` are only present for damaged (not full-durability)
+  items.
 
 ## Repo layout (Python side, `master`)
 
 - `minebot/bridge/client.py` -- `ModBridge`: the WebSocket connection to
   the mod, `events()` async-iterates parsed `ModEvent`s, `send_goto`/
-  `send_follow`/`send_stop`/`send_chat` for commands.
+  `send_follow`/`send_stop`/`send_chat`/`send_move_to_hotbar`/
+  `send_equip`/`send_drop`/`send_give` for commands.
 - `minebot/bridge/entities.py` -- `EntityTracker`: id/name -> position,
   fed purely from the mod's own `entity` events (no packet parsing).
+- `minebot/bridge/inventory.py` -- `InventoryTracker`: mirrors the bot's
+  own inventory, fed purely from the mod's `inventory` events. Unlike
+  `EntityTracker` (incremental add/move/remove), each `inventory` event is
+  a *full snapshot*, so `handle_event` just replaces state wholesale
+  rather than reconciling diffs. `find_by_item`/`count_of` resolve a bare
+  registry id (e.g. `"minecraft:bread"`) to a slot/total count.
 - `minebot/bot/movement.py` -- `MovementController`: `!follow`/`!stop`
   chat-command handlers, translating to `ModBridge` goal calls. `!follow`
   with no name follows the chat sender; an explicit name resolves through
   `EntityTracker`.
+- `minebot/bot/inventory.py` -- `InventoryController`: `!inventory`/
+  `!equip`/`!drop`/`!give` chat-command handlers. Items are named by bare
+  id in chat (`"bread"`), normalized to `"minecraft:bread"` to match what
+  `InventoryTracker`/the mod's `inventory` events use (an already-
+  namespaced id passes through unchanged, so a future non-vanilla item id
+  like `"othermod:thing"` still works). `!give` requires both an explicit
+  player name and item (no sender-as-default-recipient magic like
+  `!follow` has, since "give to whoever's talking" isn't an obviously
+  safe default the way "follow whoever's talking" is).
 - `minebot/bot/run_loop.py` -- the main event loop: iterates
-  `bridge.events()`, feeds `entity` events to the tracker, dispatches
-  `chat` text through `CommandRegistry`, logs `position`/`health`.
+  `bridge.events()`, feeds `entity` events to the `EntityTracker` and
+  `inventory` events to the `InventoryTracker`, dispatches `chat` text
+  through `CommandRegistry`, logs `position`/`health`.
 - `minebot/commands/parser.py`/`registry.py` -- unchanged from the old
   architecture; both were already protocol-agnostic (`!name(args)` chat
   grammar and name->handler dispatch), so they carried over as-is.
@@ -144,7 +182,7 @@ Events, mod -> Python:
   (default `0.0.0.0:47893` -- Python binds as the server now; see the
   WSL2-networking note above).
 - `minebot/main.py` -- wires it all together: connect the bridge, build
-  the registry/tracker/movement controller, run the loop.
+  the registry/trackers/movement+inventory controllers, run the loop.
 
 Deleted from `master` (fully preserved on `pure-protocol-backend`):
 `minebot/protocol/` (packet parsing, chunk/block-registry, chat/NBT),
@@ -235,12 +273,44 @@ see `pure-protocol-backend`'s FINDINGS.md if that's ever needed again).
   ModMenu-hosted settings screen (reached via ModMenu's mod list, if
   installed) with one button that cycles `Configs.botLanguage` between
   `en`/`es`.
+- `InventoryReporter.java` -- broadcasts a full inventory snapshot
+  whenever it changes (same change-only shape as health), by scanning
+  `Inventory.getItem(slot)` across the whole `0..getContainerSize()-1`
+  range -- confirmed in 26.1.2 this is a uniform accessor covering main
+  storage/hotbar (0-35) *and* armor/offhand/body/saddle (36-42) alike,
+  unlike some earlier MC versions where armor lived in a separately-
+  addressed array.
+- `InventoryActions.java` -- the command side: `moveToHotbar` (generalizes
+  `FoodEater`'s existing `setSelectedSlot`/`pickSlot` idiom to an explicit
+  target hotbar slot -- a local-state swap, not itself packet-synced,
+  same as `FoodEater`'s use of it), `equip` (a real container `QUICK_MOVE`
+  click via `MultiPlayerGameMode.handleContainerInput` -- the shift-
+  click-to-equip equivalent, routes the item to its matching armor/
+  offhand slot automatically), `drop` (real Q-drop via `LocalPlayer.drop`
+  for the selected hotbar slot, or a container `THROW` click for any
+  other slot -- loops one-at-a-time for counts under the full stack size,
+  since real drop actions only support "drop one" or "drop the whole
+  stack" per action, never an arbitrary count). Slot-index translation
+  between `Inventory`'s numbering (0-8 hotbar, 9-35 main storage) and
+  `InventoryMenu`'s different internal numbering (5-8 armor, 9-35 main
+  storage, 36-44 hotbar) was confirmed by disassembling
+  `AbstractContainerMenu.addStandardInventorySlots` directly (main
+  storage needs +0, hotbar needs +36 -- NOT a uniform +9 some other MC
+  versions' layout might suggest; verify against the real bytecode again
+  if this ever needs revisiting on a version bump, don't assume the
+  layout carries over).
 - `StatusHud.java` -- a HUD text overlay showing whether the control
   channel is currently connected.
 - `MinebotMod.java` -- entry point: starts the control client, registers
   the client-tick hook (resolves the goal via `PathTracker`, updates
-  `MinebotInput`, sets yaw, calls `FoodEater`, broadcasts position/entity/
-  health events), registers chat-event forwarding, registers the HUD.
+  `MinebotInput`, sets yaw, checks GIVE-goal completion, calls
+  `FoodEater`, broadcasts position/entity/inventory/health events),
+  registers chat-event forwarding, registers the HUD. `ControlState`
+  gained a `GIVE` mode (walks toward a target entity like `FOLLOW`,
+  reusing `followEntityId`; once within `stopDistance`,
+  `maybeCompleteGive` drops the requested slot/count and clears back to
+  `IDLE` -- "give to a player" has no direct Minecraft mechanic, so this
+  is the closest real analog: walk over, then drop it at their feet).
 
 `fabric.mod.json` declares `"environment": "client"` (no server-side
 component -- this only makes sense running inside an actual client).
@@ -251,8 +321,11 @@ component -- this only makes sense running inside an actual client).
   `GoalNear`/`PathTracker`) has no unit tests yet, unlike its Python
   equivalent on `pure-protocol-backend` -- so far only validated by live
   testing `!follow` across a floor transition, not by an automated suite.
-- Mining/placing/combat/inventory are not implemented on either side yet,
-  so pathfinding is walk/climb/parkour only (no dig/place moves).
+- Mining/placing/combat are not implemented on either side yet, so
+  pathfinding is walk/climb/parkour only (no dig/place moves). Inventory
+  (visibility + move-to-hotbar/equip/drop/give) now is -- see
+  `InventoryReporter`/`InventoryActions`/`InventoryTracker`/
+  `InventoryController` above.
 - `ModBridge` (Python, the WebSocket server side) does handle reconnects
   now -- confirmed live across multiple mod/game-client restarts -- but
   there's no test coverage yet for what happens if the *Python* process
@@ -272,6 +345,40 @@ component -- this only makes sense running inside an actual client).
   prefer higher-nutrition food when multiple edible types are held, and
   has no test coverage. Not yet confirmed by live testing (only compiled
   successfully so far).
+- `MinebotMod.handleMessage` (including the new `move_to_hotbar`/`equip`/
+  `drop`/`give` cases) runs on the WebSocket's own network thread, not
+  the client render/tick thread, and calls real client-internal APIs
+  (`Inventory`, `containerMenu`, `MultiPlayerGameMode.handleContainerInput`)
+  directly from there with no thread-hop -- most of Minecraft's client-
+  side game logic isn't designed to be thread-safe. This isn't a new risk
+  introduced by the inventory work specifically: the pre-existing `chat`
+  case already calls `client.player.connection.sendChat(...)` the same
+  way, so this matches established (if fragile) precedent rather than
+  being a regression -- but it's still an outstanding gap worth fixing
+  properly (e.g. hopping onto the client thread via
+  `Minecraft.getInstance().execute(...)`) before it causes a live issue.
+- None of the inventory work (`InventoryReporter`/`InventoryActions` on
+  the mod side, `InventoryTracker`/`InventoryController`/the four new
+  `!inventory`/`!equip`/`!drop`/`!give` commands on the Python side) has
+  been live-tested against a real server yet -- both sides only compile/
+  pass their existing test suites so far. In particular the
+  `InventoryMenu` slot-index math (+0 for main storage, +36 for hotbar)
+  was verified by disassembling `AbstractContainerMenu` bytecode, not by
+  actually clicking a slot and watching it happen in-game -- worth
+  confirming live before trusting `equip`/`drop`/`give` in front of other
+  players.
+- `equip` doesn't let the caller target a *specific* equipment slot --
+  it relies on `InventoryMenu.quickMoveStack`'s automatic routing (same
+  as vanilla shift-click), so it only works for items that clearly belong
+  in exactly one slot (a chestplate, an elytra, a shield in the offhand).
+  There's no way to e.g. force a non-armor item into the offhand.
+- `give` has no handling for the recipient's inventory being full (the
+  dropped item just lands on the ground near them, same as vanilla --
+  not a bug, just not "guaranteed delivered"), and no timeout: if the
+  recipient is (briefly) visible when `give` starts but then genuinely
+  never comes within `stop_distance` (e.g. path is blocked, they keep
+  moving away), the bot just keeps walking toward them indefinitely,
+  same open-ended behavior `follow` already has.
 - `Configs.botLanguage` (bot chat language, en/es) is only changeable via
   the ModMenu config screen, in-game -- there's no way to set it from
   Python/the control channel or from a config file, and it resets to
