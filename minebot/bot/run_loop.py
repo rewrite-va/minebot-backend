@@ -22,6 +22,7 @@ from minebot.bridge.inventory import InventoryTracker
 from minebot.config import BotConfig
 from minebot.llm.controller import LLMController
 from minebot.llm.trigger import should_trigger_llm
+from minebot.mod_version import check_hello
 
 log = logging.getLogger("minebot.run_loop")
 
@@ -35,6 +36,10 @@ async def run(
     config: BotConfig,
 ) -> None:
     async for event in bridge.events():
+        if event.type == "hello":
+            check_hello(event.data.get("commit", "unknown"), event.data.get("built_at", "unknown"), config.mod_repo_path)
+            continue
+
         if event.type == "entity":
             log.debug("entity event: %s", event.data)
             tracker.handle_event(event)

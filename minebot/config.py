@@ -31,6 +31,16 @@ class BotConfig:
     # substring), same as bot_name.
     trigger_words: tuple[str, ...]
 
+    # Local path to the minebot-mod repo checkout, used only to compare
+    # its current `git rev-parse HEAD` against the commit the connected
+    # mod reports in its `hello` event (see run_loop.py) -- catches a
+    # stale-deployed-jar-that-was-never-restarted, which otherwise looks
+    # identical to "the fix doesn't work" from the backend's logs alone
+    # (this bit a real debugging session more than once). None disables
+    # the check entirely (e.g. running somewhere this sibling checkout
+    # doesn't exist).
+    mod_repo_path: str | None
+
     @classmethod
     def from_env(cls) -> "BotConfig":
         load_dotenv()  # loads .env into os.environ if present; no-op otherwise
@@ -39,6 +49,7 @@ class BotConfig:
             mod_port=int(os.environ.get("MINEBOT_MOD_PORT", "47893")),
             bot_name=os.environ.get("MINEBOT_BOT_NAME", "minebot"),
             trigger_words=_parse_trigger_words(os.environ.get("MINEBOT_TRIGGER_WORDS", "")),
+            mod_repo_path=os.environ.get("MINEBOT_MOD_REPO_PATH", "/home/colaila/git/mods/minebot-mod"),
         )
 
 
