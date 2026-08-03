@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 
 from minebot.actions.registry import ActionRegistry
+from minebot.bot.movement import MovementController
 from minebot.bridge.client import ModBridge
 from minebot.bridge.entities import EntityTracker
 from minebot.bridge.inventory import InventoryTracker
@@ -34,6 +35,7 @@ async def run(
     inventory: InventoryTracker,
     llm: LLMController,
     config: BotConfig,
+    movement: MovementController,
 ) -> None:
     async for event in bridge.events():
         if event.type == "hello":
@@ -43,6 +45,8 @@ async def run(
         if event.type == "entity":
             log.debug("entity event: %s", event.data)
             tracker.handle_event(event)
+            if event.data.get("action") == "add":
+                await movement.on_entity_added(event.data.get("name"), event.data.get("id"))
             continue
 
         if event.type == "inventory":

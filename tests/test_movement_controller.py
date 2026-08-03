@@ -88,3 +88,56 @@ async def test_stop_sends_stop_command():
 
     assert bridge.sent == [("stop", {})]
     assert result.message is not None
+
+
+@pytest.mark.asyncio
+async def test_on_entity_added_resumes_follow_for_the_currently_followed_name():
+    tracker = EntityTracker()
+    _add_player(tracker, 7, "Alex")
+    bridge = RecordingBridge()
+    movement = MovementController(bridge, tracker)
+    await movement.follow(None, "Alex")
+    bridge.sent.clear()
+
+    await movement.on_entity_added("Alex", 42)  # Alex reconnected with a new entity id
+
+    assert bridge.sent == [("follow", {"entity_id": 42, "stop_distance": FOLLOW_STOP_DISTANCE})]
+
+
+@pytest.mark.asyncio
+async def test_on_entity_added_ignores_unrelated_players():
+    tracker = EntityTracker()
+    _add_player(tracker, 7, "Alex")
+    bridge = RecordingBridge()
+    movement = MovementController(bridge, tracker)
+    await movement.follow(None, "Alex")
+    bridge.sent.clear()
+
+    await movement.on_entity_added("SomeoneElse", 99)
+
+    assert bridge.sent == []
+
+
+@pytest.mark.asyncio
+async def test_on_entity_added_does_nothing_when_not_following_anyone():
+    bridge = RecordingBridge()
+    movement = MovementController(bridge, EntityTracker())
+
+    await movement.on_entity_added("Alex", 7)
+
+    assert bridge.sent == []
+
+
+@pytest.mark.asyncio
+async def test_stop_clears_the_followed_name_so_a_later_reconnect_does_not_resume_it():
+    tracker = EntityTracker()
+    _add_player(tracker, 7, "Alex")
+    bridge = RecordingBridge()
+    movement = MovementController(bridge, tracker)
+    await movement.follow(None, "Alex")
+    await movement.stop(None)
+    bridge.sent.clear()
+
+    await movement.on_entity_added("Alex", 42)
+
+    assert bridge.sent == []
