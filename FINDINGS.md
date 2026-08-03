@@ -176,18 +176,32 @@ see `pure-protocol-backend`'s FINDINGS.md if that's ever needed again).
   (reset whenever the goal changes) holding the currently-planned A*
   route toward that goal.
 - `pathfinding/` -- `Move`/`AStar`/`BlockInfo`/`Movements`/`GoalNear`/
-  `PathTracker`: the Java A* port described above.
+  `PathTracker`: the Java A* port described above. Also
+  `DoorOpener` -- treats closed doors as passable in the path cost model
+  and right-clicks them open via the real `useItemOn` interaction as the
+  bot approaches, called each tick from `resolveMovementIntent` against
+  the current waypoint.
 - `MovementIntent.java` -- the concrete per-tick forward/jump/yaw resolved
   from the current goal against live game state; separates goal
   resolution (needs live entity/player state) from input plumbing (doesn't).
 - `MinebotInput.java` -- the `ClientInput` replacement described above
   (keyboard-override + `MovementIntent`-driven fallback).
+- `FoodEater.java` -- autonomous eating: every client tick, if health is
+  at or below 20% of max and the player isn't already mid-eating-animation
+  (`isUsingItem()`, which also acts as the natural throttle -- no separate
+  cooldown needed), eats via the real `MultiPlayerGameMode.useItem`
+  interaction (offhand food first, else the first edible item found in the
+  main inventory, selected into the hotbar first if necessary). "Edible"
+  is a `DataComponents.FOOD` presence check -- the older
+  `Item.getFoodProperties()` API is gone in 26.1.2. Entirely autonomous on
+  the mod side; no control-channel wire format changes, so Python has no
+  visibility into it beyond the `health` events it already gets.
 - `StatusHud.java` -- a HUD text overlay showing whether the control
   channel is currently connected.
 - `MinebotMod.java` -- entry point: starts the control client, registers
   the client-tick hook (resolves the goal via `PathTracker`, updates
-  `MinebotInput`, sets yaw, broadcasts position/entity/health events),
-  registers chat-event forwarding, registers the HUD.
+  `MinebotInput`, sets yaw, calls `FoodEater`, broadcasts position/entity/
+  health events), registers chat-event forwarding, registers the HUD.
 
 `fabric.mod.json` declares `"environment": "client"` (no server-side
 component -- this only makes sense running inside an actual client).
@@ -210,6 +224,15 @@ component -- this only makes sense running inside an actual client).
   TCP connection to `127.0.0.1:47893` can drive the bot. Fine on a
   single-user machine; would need hardening before ever exposing this
   differently.
+- `FoodEater` triggers on health, not hunger (`FoodData`/the hunger bar
+  isn't polled at all yet) -- it eats reactively once already low on
+  health rather than proactively maintaining hunger before that happens.
+  It also doesn't check saturation/hunger before eating (a real player
+  eating at full hunger just wastes the item -- vanilla blocks this via
+  `Player.canEat`, worth checking if this bites in practice), doesn't
+  prefer higher-nutrition food when multiple edible types are held, and
+  has no test coverage. Not yet confirmed by live testing (only compiled
+  successfully so far).
 
 ## Key external paths referenced (outside these two repos)
 
