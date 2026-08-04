@@ -16,8 +16,9 @@ their real logic to `src/agent/library/skills.js`; the command definition
 itself is usually just param parsing + a `skills.xxx(...)` call.
 
 Source of truth on this project's side for "already done": `minebot/bot/
-movement.py`, `minebot/bot/inventory.py`, `minebot/bot/mining.py`, and
-`minebot/bot/help.py` are the files registering `Action`s right now
+movement.py`, `minebot/bot/inventory.py`, `minebot/bot/mining.py`,
+`minebot/bot/combat.py`, and `minebot/bot/help.py` are the files
+registering `Action`s right now
 (`grep -n 'name="' minebot/bot/*.py` to recheck). Everything not in that
 list is pending.
 
@@ -208,21 +209,47 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
 
 ## Combat
 
-- ⬜ **`!attack`** -- attack and kill the nearest entity of a given type
+- ✅ **`!attack`** -- attack and kill the nearest entity of a given type
   (e.g. nearest zombie, nearest cow). mindcraft ref: `actions.js:311`, →
-  `skills.attackNearest`, `skills.js:313`. **No combat exists at all
-  yet** -- per the original project brief (`prompt.txt`), "basic combat"
-  was one of the three MVP asks (navigate, inventory management, basic
-  combat) alongside inventory (done) and navigate (done for
-  follow/goto). Would need: a real attack interaction
-  (`MultiPlayerGameMode.attack(Entity)`, distinct from the
-  `useItem`/`useItemOn` interactions already used elsewhere), a "move
-  toward + attack when in range" loop (reusable pathfinding via
-  `PathTracker`), and a target-selection query (nearest hostile of a
-  type -- needs the same entity-type-widening `!searchForEntity` needs,
-  since `broadcastEntityEvents` only tracks players today).
+  `skills.attackNearest`, `skills.js:313`. Per the original project brief
+  (`prompt.txt`), "basic combat" was one of the three MVP asks (navigate,
+  inventory management, basic combat) alongside inventory (done) and
+  navigate (done). Built on the same real attack interaction
+  `!collect <entity>`'s minimal kill loop already proved out
+  (`MultiPlayerGameMode.attack(Entity)` + `player.swing`, distinct from
+  the `useItem`/`useItemOn` interactions used elsewhere) -- generalized
+  into its own standalone `ControlState.Mode.ATTACK` (`MinebotMod.
+  tickAttack`) rather than reusing COLLECT's mode, since attack has no
+  drop-confirmation/counted-loop concept at all, just "fight until dead
+  or abandoned".
   **Want it?**
   > yes, but only hostiles by default if no argument passed, so `!attack` will attack the nearest hostile mob, and `!attack cow` will attack the nearest cow. Also, I want an alias `!kill` for it, since it's shorter and more intuitive
+  >
+  > **Done**: `!attack [query]` / `!kill [query]`
+  > (`minebot/bot/combat.py`'s `CombatController.attack`) -- `query`
+  > omitted resolves to the nearest real hostile (any entity implementing
+  > vanilla's `Enemy` marker interface, confirmed via decompiled source
+  > to be the correct general check rather than `instanceof Monster`:
+  > every `Monster` implements `Enemy`, but at least one real hostile
+  > (`EnderDragon`) implements `Enemy` without extending `Monster` at
+  > all -- see `EntityFinder.findNearestHostile`). A given `query` skips
+  > the hostility check entirely and fights that entity type regardless
+  > (`!attack cow` works, matching mindcraft's own `attackNearest` having
+  > no such restriction). No counted loop the way `!collect` has --
+  > `!attack`/`!kill` is single-target, "fight until it dies or the
+  > attempt is abandoned", per PENDING's own phrasing (counted
+  > kills-for-drops is already `!collect <entity> <count>`'s job).
+  > Two abandonment paths beyond "target died": a give-up-on-unreachable
+  > timeout (same 200-tick shape `!collect` already established) and a
+  > self-preservation health check (aborts and reports "had to retreat"
+  > if the bot's own health drops to 25% of max mid-fight, checked every
+  > tick, not just once) -- the latter added on top of mindcraft's own
+  > `attackNearest` shape since a real fight can go badly in ways mining
+  > never does. Wire protocol: Python sends
+  > `{"type":"attack","query":null|"zombie","radius":64}`, mod replies
+  > with a single fire-and-forget `attack_result` event (`success`,
+  > `query`, `reason` on failure) -- same one-attempt-in-flight-at-a-time
+  > shape as `find_result`/`collect_result`.
 
 - ⬜ **`!attackPlayer`** -- attack a specific player by name until they
   die or run away. mindcraft ref: `actions.js:319`, →

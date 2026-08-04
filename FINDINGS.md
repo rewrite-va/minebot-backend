@@ -3576,6 +3576,92 @@ unconditionally rather than left to the normal cost-based obstacle
 logic -- forces the pathfinder to route around instead. Not yet
 re-tested live.
 
+## !attack/!kill: combat as its own ControlState mode, not a reuse of COLLECT
+
+PENDING.md's "Combat" section had been sitting at all-⬜ since the
+architecture pivot -- `!collect <entity> <count>`'s minimal kill loop
+(`tickCollectEntity`, walk into `COLLECT_MELEE_RANGE`, repeated
+`MultiPlayerGameMode.attack(player, target)` + `player.swing` until the
+target is removed) was explicitly scoped as "not the full !attack/!kill
+feature" when it landed (see the `!collect` write-up above) -- this adds
+that standalone feature.
+
+**Reused the attack interaction itself, not the mode.** `tickCollectEntity`
+already proved the real interaction works with zero keybind-hold tricks
+(unlike `BlockBreaker`'s `keyAttack`-hold discovery, or `FoodEater`'s
+`keyUse`-hold discovery) -- `MultiPlayerGameMode.attack(Entity)` is a
+direct, complete, single-tick API call, since a melee hit (unlike a
+multi-tick block break) has no client-side progress to accumulate across
+ticks the way `startDestroyBlock`/`continueDestroyBlock` does. `tickAttack`
+(new, `MinebotMod.java`) calls the exact same two lines COLLECT's entity
+branch does.
+
+The *mode* itself is new (`ControlState.Mode.ATTACK`, its own
+`attackQuery`/`attackRadius`/`attackHasTarget`/`attackTargetStuckTicks`
+fields), not a repurposing of `Mode.COLLECT` -- COLLECT's shape (single
+atomic attempt, no count, Python's own drop-confirmation loop deciding
+when to ask for another) is entirely about "did an item land in
+inventory", a question `!attack` has no equivalent of. `!attack`/`!kill`
+is single-target end-to-end, matching PENDING's own phrasing ("attack
+and kill the nearest entity of a given type", not "kill N of them" --
+that's already `!collect <entity> <count>`'s job for whoever wants
+counted kills-for-drops instead of a fight).
+
+**"Nearest hostile" resolution (`!attack` with no argument) needed a
+real hostility check that didn't already exist anywhere in this
+codebase.** Considered `instanceof Monster` first (the more obvious-
+looking check) but confirmed via the real mapped 26.1.2 jar
+(`javap` against `minecraft-merged-deobf-26.1.2.jar`) that `Monster` is
+an abstract class implementing a separate `net.minecraft.world.entity.
+monster.Enemy` marker interface -- and that at least one real vanilla
+hostile, `EnderDragon`, implements `Enemy` directly without extending
+`Monster` at all (`WitherBoss` and ordinary mobs like `Creaking` do
+extend `Monster`, and so are covered either way). `instanceof Enemy` is
+therefore the strictly more general, correct check -- everything
+`instanceof Monster` would catch is also caught by it, plus the
+`Monster`-less exceptions. `EntityFinder.findNearestHostile` (new) is
+the same real-sphere-filtered-AABB-scan shape `findNearestEntity`
+already used for `!find`/`!collect`'s type-based lookup, just with an
+`Enemy`-membership predicate instead of a registry-id match. A `query`
+given to `!attack` (`!attack cow`) skips this hostility check entirely
+and resolves via the existing entity-only lookup instead (no block
+fallback the way `!find`/`!collect` have -- `!attack <type>` only ever
+means "fight that entity", never "mine that block") -- matching
+mindcraft's own `attackNearest`, which has no such hostility restriction
+either.
+
+**Two ways to abandon an in-progress attack, one directly requested
+beyond mindcraft's own shape.** A give-up-on-unreachable timeout
+(`ATTACK_TARGET_TIMEOUT_TICKS`, 200 ticks/10s) mirrors
+`COLLECT_TARGET_TIMEOUT_TICKS` exactly -- same reasoning: a target that's
+fled out of pathfinding's reach, or stuck behind geometry the bot can't
+route around, shouldn't strand the command forever. The second,
+explicitly asked for beyond "just chase and melee until dead": a
+self-preservation health check (`ATTACK_LOW_HEALTH_FRACTION`, 25% of max
+health) that aborts and reports "had to retreat, health too low" the
+moment the bot's own health drops that low, checked every tick `tickAttack`
+runs (not just once at the start) so a fight that starts safe but turns
+bad partway through still aborts promptly rather than only checking
+health before engaging. This runs independently of (and doesn't replace)
+`FoodEater`'s own auto-eat -- eating may not win the race at all (no food
+carried, or hunger already full so eating is gated off entirely, see
+`FoodEater`'s own docstring), so combat needing its own last-resort
+abandon condition is a real, separate safety net rather than redundant
+with auto-eat.
+
+**Wire protocol**: `{"type":"attack","query":null|"zombie","radius":64}`
+-- `query` omitted/`null` means "nearest hostile". Answered by a single
+fire-and-forget `attack_result` event (`success`, `query` echoed back,
+`reason` present on failure) -- same one-attempt-in-flight-at-a-time
+shape `find_result`/`collect_result`/`dig_down_result` already
+established, since chat commands are dispatched one at a time and
+`CombatController.attack` (new, `minebot/bot/combat.py`) only ever has
+one `_pending_attack_result` future outstanding. `!kill` is registered
+as a second `Action` pointing at the exact same `CombatController.attack`
+handler/params as `!attack` -- `ActionRegistry`'s plain name-keyed dict
+has no dedicated alias concept, so two full `Action` entries sharing one
+handler is the simplest way to get a second name without inventing one.
+
 ## Known gaps / next steps
 
 - **Deploying a mod change requires a rebuild, a jar copy, AND a full

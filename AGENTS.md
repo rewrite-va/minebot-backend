@@ -18,7 +18,7 @@ a local WebSocket instead of speaking the Minecraft protocol directly).
 
 - **`/home/colaila/git/minebot`** -- this repo, the Python backend.
   `minebot/bot/` is where chat-command controllers live
-  (`movement.py`/`inventory.py`/`mining.py`), `minebot/bridge/` is the
+  (`movement.py`/`inventory.py`/`mining.py`/`combat.py`), `minebot/bridge/` is the
   WebSocket client + state trackers, `logs/` is this process's own
   timestamped run logs (gitignored).
 - **`/home/colaila/git/mods/minebot-mod`** -- the Fabric mod repo.
