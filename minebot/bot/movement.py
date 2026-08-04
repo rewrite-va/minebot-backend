@@ -28,7 +28,14 @@ from minebot.timing import log_timing, now
 log = logging.getLogger("minebot.movement")
 
 FOLLOW_STOP_DISTANCE = 2.0
-GOTO_STOP_DISTANCE = 2.0
+# !goto is expected to land at the exact requested coordinates, not just
+# "somewhere nearby" -- 0.2 is the practical floor (tight enough to look
+# and feel exact, loose enough that collision/floating-point noise near
+# the target doesn't leave the bot jittering forever trying to close the
+# last few hundredths of a block). Also used as GoalNear's own range on
+# the mod side (see PathTracker.maybeReplan), so the planned path itself
+# targets the exact block, not just its neighborhood.
+GOTO_STOP_DISTANCE = 0.2
 FIND_RESULT_TIMEOUT = 10.0
 FIND_ARRIVAL_TIMEOUT = 60.0
 
@@ -88,15 +95,28 @@ class MovementController:
         await self.bridge.send_stop()
         return ActionResult(message="ok, stopped")
 
-    async def remember(self, sender: str | None, name: str) -> ActionResult:
-        position = self.self_position.current
-        if position is None:
-            log.warning("remember: no known self position yet")
-            return ActionResult(message="I don't know where I am yet, try again in a moment")
+    async def save(self, sender: str | None, name: str) -> ActionResult:
+        """Saves the *caller's* current position under `name`, not the
+        bot's own -- a player standing somewhere and typing "!save home"
+        means "remember where I'm standing", not "remember where the bot
+        happens to be" (found live: those two positions are rarely the
+        same -- the bot could be off following someone else, mid-!collect,
+        or just not have walked over yet). Resolved the same way !goto
+        resolves a player-name target, via EntityTracker's live position
+        mirror of the mod's own entity events.
+        """
+        if sender is None:
+            log.warning("save: no sender to resolve a position for")
+            return ActionResult(message="I don't know who's asking, so I don't know whose position to save")
 
-        self.places.remember(name, position.x, position.y, position.z)
-        log.info("remembered %r at (%.1f, %.1f, %.1f)", name, position.x, position.y, position.z)
-        return ActionResult(message=f"ok, remembered this place as {name}")
+        caller = self.tracker.find_by_name(sender)
+        if caller is None:
+            log.warning("save: sender %r isn't a currently tracked player", sender)
+            return ActionResult(message="I can't see you right now, try again once I can")
+
+        self.places.remember(name, caller.x, caller.y, caller.z)
+        log.info("saved %r at (%.1f, %.1f, %.1f) (caller=%s)", name, caller.x, caller.y, caller.z, sender)
+        return ActionResult(message=f"ok, saved this place as {name}")
 
     async def goto(self, sender: str | None, target: str | float, y: float | None = None, z: float | None = None) -> ActionResult:
         """Resolves `target` in order: explicit coordinates (all three
@@ -235,11 +255,11 @@ def register_movement_actions(registry: ActionRegistry, movement: MovementContro
         handler=movement.stop,
     ))
     registry.register(Action(
-        name="remember",
-        description="Save the bot's current position under a name, for later !goto.",
-        handler=movement.remember,
+        name="save",
+        description="Save the caller's current position under a name, for later !goto.",
+        handler=movement.save,
         params=[
-            ActionParam("name", "string", "Name to remember this place as."),
+            ActionParam("name", "string", "Name to save this place as."),
         ],
     ))
     registry.register(Action(

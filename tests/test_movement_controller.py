@@ -159,14 +159,16 @@ async def test_stop_clears_the_followed_name_so_a_later_reconnect_does_not_resum
 
 
 @pytest.mark.asyncio
-async def test_remember_saves_the_current_position(tmp_path):
+async def test_save_saves_the_callers_position_not_the_bots(tmp_path):
     places = PlaceMemory(tmp_path / "places.json")
+    tracker = EntityTracker()
+    _add_player(tracker, 7, "riterite", x=10.0, y=64.0, z=-5.0)
     self_position = SelfPositionTracker()
-    self_position.handle_event(ModEvent(type="position", data={"x": 10.0, "y": 64.0, "z": -5.0, "yaw": 0.0, "pitch": 0.0}))
+    self_position.handle_event(ModEvent(type="position", data={"x": 999.0, "y": 999.0, "z": 999.0, "yaw": 0.0, "pitch": 0.0}))
     bridge = RecordingBridge()
-    movement = _movement(bridge, places=places, self_position=self_position)
+    movement = _movement(bridge, tracker=tracker, places=places, self_position=self_position)
 
-    result = await movement.remember(None, "home")
+    result = await movement.save("riterite", "home")
 
     place = places.get("home")
     assert place is not None
@@ -175,14 +177,25 @@ async def test_remember_saves_the_current_position(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_remember_without_a_known_position_reports_it_cannot(tmp_path):
+async def test_save_without_a_known_sender_reports_it_cannot(tmp_path):
     bridge = RecordingBridge()
     movement = _movement(bridge, tmp_path=tmp_path)
 
-    result = await movement.remember(None, "home")
+    result = await movement.save(None, "home")
 
     assert result.message is not None
-    assert "don't know where I am" in result.message
+    assert "don't know who" in result.message
+
+
+@pytest.mark.asyncio
+async def test_save_for_an_untracked_sender_reports_it_cannot(tmp_path):
+    bridge = RecordingBridge()
+    movement = _movement(bridge, tmp_path=tmp_path)
+
+    result = await movement.save("someoneNotVisible", "home")
+
+    assert result.message is not None
+    assert "can't see you" in result.message
 
 
 @pytest.mark.asyncio

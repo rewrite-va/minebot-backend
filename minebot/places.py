@@ -1,8 +1,8 @@
-"""Named location memory -- !remember <name> saves the bot's current
+"""Named location memory -- !save <name> saves the *caller's* current
 position under a name, later commands (!goto <name>, and eventually
 !look/!info per PENDING.md) resolve that name back to coordinates.
-Persisted to a JSON file so remembered places survive a backend
-restart -- there's no other persistence layer in this project yet.
+Persisted to a JSON file so saved places survive a backend restart --
+there's no other persistence layer in this project yet.
 """
 
 from __future__ import annotations

@@ -3,7 +3,8 @@ events (broadcast every client tick -- see minebot-mod's
 broadcastPositionEvent). Nothing tracked this before now; run_loop.py
 only ever logged position events at debug level and threw them away --
 needed as soon as any action wants to know "where am I right now"
-(e.g. !remember saving the current spot).
+(e.g. InventoryController._closest_player, resolving !give's default
+recipient).
 """
 
 from __future__ import annotations
