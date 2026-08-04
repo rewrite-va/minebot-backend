@@ -16,9 +16,10 @@ their real logic to `src/agent/library/skills.js`; the command definition
 itself is usually just param parsing + a `skills.xxx(...)` call.
 
 Source of truth on this project's side for "already done": `minebot/bot/
-movement.py` and `minebot/bot/inventory.py` are the only two files
-registering `Action`s right now (`grep -n 'name="' minebot/bot/*.py` to
-recheck). Everything not in that list is pending.
+movement.py`, `minebot/bot/inventory.py`, `minebot/bot/mining.py`, and
+`minebot/bot/help.py` are the files registering `Action`s right now
+(`grep -n 'name="' minebot/bot/*.py` to recheck). Everything not in that
+list is pending.
 
 Legend: ✅ done · ⬜ not started · 🟡 partial (see note)
 
@@ -135,30 +136,61 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
 
 ## Mining / digging
 
-- ⬜ **`!collectBlocks`** -- collect the nearest N blocks of a given type
-  (mindcraft gives this a 10-minute timeout, `actions.js:264`). mindcraft
-  ref: `actions.js:256`, → `skills.collectBlock`, `skills.js:417`. **No
-  mining/digging exists on the mod side at all** -- this is the biggest
-  single gap. Per `FINDINGS.md`'s known gaps: "pathfinding is walk/
-  climb/parkour only (no dig/place moves)" -- the Java A* port
-  (`minebot-mod/src/main/java/minebot/mod/pathfinding/Movements.java`)
-  would need a real dig-cost branch (mirroring mineflayer-pathfinder's
-  own dig-enabled movement, already ported once for the abandoned
-  pure-protocol approach -- see the `pure-protocol-backend` branch in
-  this repo for a reference Python A* implementation that *did* include
-  dig moves, if useful for a port), plus a real block-breaking
-  interaction (`MultiPlayerGameMode`-based, likely a new
-  `BlockBreaker.java` alongside `DoorOpener.java`).
+- ✅ **`!collectBlocks`** -- collect the nearest N blocks of a given type.
+  mindcraft ref: `actions.js:256`, → `skills.collectBlock`,
+  `skills.js:417`. Implemented as the universal `!collect <query> <count>`
+  requested below -- entity-then-block resolution (same order `!find`
+  uses), real block-breaking (`BlockBreaker.java`, the multi-tick
+  `startDestroyBlock`/`continueDestroyBlock` sequence, not a single API
+  call -- see `FINDINGS.md`'s "Mining / digging: real dig-through-
+  obstacles pathfinding" section), a minimal kill loop for entities, and
+  a real dig-cost A* branch (`Movements.java`) so the bot can tunnel
+  through a wall to reach a target with no walkable route. See
+  `FINDINGS.md` for the full writeup.
   **Want it?**
-  yes, but I want it to be a universal `!collect` command that can take either a block type or an entity type, and collect the nearest N of that type. For example, `!collect stone 10` will collect 10 stone blocks, and `!collect cow 5` will collect 5 cows (by killing them and collecting their drops).
+  > yes, but I want it to be a universal `!collect` command that can take either a block type or an entity type, and collect the nearest N of that type. For example, `!collect stone 10` will collect 10 stone blocks, and `!collect cow 5` will collect 5 cows (by killing them and collecting their drops).
+  >
+  > **Done**: `!collect <query> <count>` (`minebot/bot/mining.py`'s
+  > `MiningController.collect`) tries `query` as an entity type first,
+  > block type as fallback. The counted loop lives entirely in Python
+  > now, not mod-side -- the mod's own `collect` command (`MinebotMod.
+  > tickCollect`) is a single atomic attempt (find nearest match, walk to
+  > it, break/kill it once, no count at all), redesigned from an earlier
+  > version where the mod itself looped against a requested count and
+  > reported per-item `collect_progress` (see `FINDINGS.md`'s "!collect
+  > redesigned" section for the full why -- short version: the mod's old
+  > "destroyed/killed" signal fired before any drop was actually in
+  > inventory, so per-item progress could claim success on something not
+  > yet possessed; moving the loop to Python is also what let each
+  > individual attempt become small/atomic enough to interrupt cleanly).
+  > `query` also now resolves through a `source_for`/`drops_from` lookup
+  > (`DropTable.java`, hardcoded stopgap -- real loot-table data is
+  > architecturally unavailable client-side, see `FINDINGS.md`) so asking
+  > for a raw item that isn't itself minable/huntable (e.g. "cobblestone")
+  > still works -- resolves to "stone" and collects that. Chat
+  > announcements of real inventory gains ("I got a stone (12 total)")
+  > are now independent of `!collect` entirely -- see `InventoryAnnouncer`
+  > below and in `FINDINGS.md`. Auto-selects the fastest available tool
+  > from inventory before each new block (real `ItemStack.getDestroySpeed`,
+  > not a category guess). Combat for the entity case is intentionally
+  > minimal (walk in, repeated `MultiPlayerGameMode.attack` until dead) --
+  > not the full `!attack`/`!kill` feature, which is still pending below.
 
-- ⬜ **`!digDown`** -- dig straight down N blocks, stopping at
+- ✅ **`!digDown`** -- dig straight down N blocks, stopping at
   lava/water/a big drop. mindcraft ref: `actions.js:476`, →
-  `skills.digDown`, `skills.js:1906`. Same block-breaking prerequisite as
-  `!collectBlocks` above, but simpler (no pathfinding needed, just
-  straight down).
+  `skills.digDown`, `skills.js:1906`.
   **Want it?**
   > yes
+  >
+  > **Done**: `!dig [count]` (default 10, shorter alias than
+  > `!digDown` -- yes, I want it to just be named `!dig`) --
+  > `minebot/bot/mining.py`'s
+  > `MiningController.dig_down`, mod-side `MinebotMod.tickDigDown`. No
+  > pathfinding involved (stationary loop, breaks the block directly
+  > below the player each tick); stops early and reports why if the next
+  > block down is lava/water, or if there's no floor within a safety
+  > margin below the block just broken (a "big drop"). Reports how many
+  > were actually broken either way.
 
 ## Building / placing
 
