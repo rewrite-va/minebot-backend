@@ -7,6 +7,7 @@ import os
 from minebot.actions.registry import ActionRegistry
 from minebot.bot.help import register_help_action
 from minebot.bot.inventory import InventoryController, register_inventory_actions
+from minebot.bot.inventory_announcer import InventoryAnnouncer
 from minebot.bot.mining import MiningController, register_mining_actions
 from minebot.bot.movement import MovementController, register_movement_actions
 from minebot.bot.run_loop import run
@@ -41,6 +42,7 @@ async def run_bot(config: BotConfig) -> None:
     register_inventory_actions(actions, inventory_controller)
     mining = MiningController(bridge, inventory)
     register_mining_actions(actions, mining)
+    InventoryAnnouncer(bridge, inventory)  # registers itself as an inventory-change listener; not otherwise referenced
     register_help_action(actions)
 
     llm = LLMController(bridge, actions)  # no provider configured yet -- see llm/controller.py
