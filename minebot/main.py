@@ -7,6 +7,7 @@ import os
 from minebot.actions.registry import ActionRegistry
 from minebot.bot.help import register_help_action
 from minebot.bot.inventory import InventoryController, register_inventory_actions
+from minebot.bot.mining import MiningController, register_mining_actions
 from minebot.bot.movement import MovementController, register_movement_actions
 from minebot.bot.run_loop import run
 from minebot.bridge.client import ModBridge
@@ -38,12 +39,14 @@ async def run_bot(config: BotConfig) -> None:
     register_movement_actions(actions, movement)
     inventory_controller = InventoryController(bridge, inventory, tracker, self_position)
     register_inventory_actions(actions, inventory_controller)
+    mining = MiningController(bridge, inventory)
+    register_mining_actions(actions, mining)
     register_help_action(actions)
 
     llm = LLMController(bridge, actions)  # no provider configured yet -- see llm/controller.py
 
     try:
-        await run(bridge, actions, tracker, inventory, llm, config, movement, self_position)
+        await run(bridge, actions, tracker, inventory, llm, config, movement, self_position, mining)
     finally:
         await bridge.close()
 

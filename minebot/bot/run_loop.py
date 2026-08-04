@@ -17,6 +17,7 @@ import asyncio
 import logging
 
 from minebot.actions.registry import ActionRegistry
+from minebot.bot.mining import MiningController
 from minebot.bot.movement import MovementController
 from minebot.bridge.client import ModBridge, ModEvent
 from minebot.bridge.entities import EntityTracker
@@ -40,6 +41,7 @@ async def run(
     config: BotConfig,
     movement: MovementController,
     self_position: SelfPositionTracker,
+    mining: MiningController,
 ) -> None:
     """Splits reading the mod's events from processing them into two
     concurrent tasks joined by a queue -- found live that a single
@@ -52,16 +54,46 @@ async def run(
     timeout gave up and the loop finally got back around to it).
 
     _read_events (below) never blocks on processing -- it only ever
-    awaits the next raw event and immediately either fast-paths it
-    (find_result, resolved into movement's pending future the instant
-    it's read) or queues it. The sequential processing loop below
-    consumes that queue exactly as a single combined loop did before,
-    preserving today's in-order guarantees for everything else (e.g.
-    !follow's send_follow always happens-before a later entity-reconnect
-    event is processed).
+    awaits the next raw event and immediately either fast-paths it or
+    queues it. State-tracking events (entity/inventory/position) and the
+    various pending-future resolvers (find_result/arrived/
+    dig_down_result/collect_progress/collect_result) are all fast-pathed
+    synchronously in _read_events itself, so every command handler always
+    sees fully up-to-date tracker state regardless of how concurrently
+    chat commands end up scheduled (see the chat-command-cancellation
+    note below for why that matters).
+
+    Chat commands are dispatched as their own cancellable task, not
+    awaited inline -- reported live: a long-running !collect left the
+    bot unresponsive to !follow/!stop typed while it was still running,
+    since a single earlier version of this loop only ever processed one
+    chat command fully before looking at the next. A newly-arrived chat
+    command now cancels whatever chat-command task is still in flight
+    before starting its own (see _dispatch_chat_command/
+    current_command_task below) -- "stop collecting, follow me instead"
+    now actually interrupts the collect() call, and the *mod*-side goal
+    it was driving gets naturally superseded too, since ControlState's
+    setGoto/setFollow/setCollect/etc. all unconditionally overwrite
+    whatever mode was previously active (confirmed in minebot-mod's
+    ControlState.java -- there is no separate "cancel current goal first"
+    step needed mod-side, a fresh command already wins outright).
+
+    This used to be unsafe for a different reason (see FINDINGS.md's
+    "background-task approach... rejected" note): backgrounding a chat
+    command's *entire* dispatch, including the tracker updates it used to
+    read/write inline via _process_event, could let a later entity event
+    race ahead of an earlier chat command's own state mutations (e.g.
+    !follow's _following_name assignment). That hazard is gone now that
+    entity/inventory/position events are fast-pathed synchronously in
+    _read_events instead of flowing through chat-command-adjacent
+    concurrency at all -- a command handler that runs later always sees
+    a tracker state that's already fully caught up to every event
+    received so far, independent of whichever order commands themselves
+    finish executing in.
     """
     queue: asyncio.Queue[ModEvent] = asyncio.Queue()
-    reader = asyncio.ensure_future(_read_events(bridge, movement, queue))
+    reader = asyncio.ensure_future(_read_events(bridge, movement, mining, tracker, inventory, self_position, queue))
+    current_command_task: asyncio.Task | None = None
 
     try:
         while True:
@@ -71,7 +103,15 @@ async def run(
                 # Checking queue.empty() first (not just reader.done())
                 # matters: the reader can finish while events it already
                 # queued are still waiting to be processed, and those must
-                # not be dropped.
+                # not be dropped. Also wait out (not cancel) whatever chat
+                # command is still running -- a graceful stream end should
+                # let the last dispatched command actually finish, same as
+                # every earlier event already got processed to completion
+                # before this point; only run()'s own `finally` cancels an
+                # in-flight command, and only for a genuinely abnormal exit
+                # (an exception, or the reader itself crashing).
+                if current_command_task is not None:
+                    await current_command_task
                 reader.result()  # re-raise if the reader crashed rather than ended cleanly
                 break
 
@@ -82,21 +122,58 @@ async def run(
                 continue  # reader finished/crashed -- loop back to the queue.empty()/reader.done() check above
 
             event = get_event.result()
-            await _process_event(event, bridge, actions, tracker, inventory, llm, config, movement, self_position)
+
+            if event.type == "chat":
+                current_command_task = await _dispatch_chat_command(
+                    event, bridge, actions, llm, config, self_position, current_command_task,
+                )
+                continue
+
+            await _process_event(event, config)
     finally:
         if not reader.done():
             reader.cancel()
+        if current_command_task is not None and not current_command_task.done():
+            current_command_task.cancel()
 
 
-async def _read_events(bridge: ModBridge, movement: MovementController, queue: asyncio.Queue[ModEvent]) -> None:
+async def _read_events(
+    bridge: ModBridge,
+    movement: MovementController,
+    mining: MiningController,
+    tracker: EntityTracker,
+    inventory: InventoryTracker,
+    self_position: SelfPositionTracker,
+    queue: asyncio.Queue[ModEvent],
+) -> None:
     """Continuously drains bridge.events() -- this is the only coroutine
     that ever awaits the next raw WebSocket message, so it must never
     block on anything that itself waits for a *later* event (that's
-    exactly the deadlock run()'s docstring describes). find_result and
-    arrived both get a fast-path straight to movement.on_find_result/
-    on_arrived here, before the event even reaches the queue, since a
-    command handler (find()) may be suspended waiting specifically for
-    one of those calls.
+    exactly the deadlock run()'s docstring describes).
+
+    Fast-paths two kinds of event, both synchronously (no suspension
+    point beyond the occasional `await` that only ever *sends*, never
+    waits for a reply):
+    - find_result/arrived/dig_down_result/collect_result/query_result
+      resolve a command handler's pending future the instant they're
+      read, since that handler may be suspended waiting specifically for
+      one of these (the original find_result deadlock this pattern
+      prevents -- see run()'s docstring).
+    - entity/inventory/position update their trackers immediately, and
+      entity "add" additionally checks movement.on_entity_added (the
+      !follow-resumes-after-reconnect logic) -- fast-pathing these here,
+      not through the queue, is what makes chat-command dispatch safe to
+      run as independent concurrent tasks (see run()'s own docstring):
+      every tracker read a command handler ever does is guaranteed
+      current as of every event received so far, regardless of which
+      order concurrently-running command tasks happen to finish in.
+
+    item_drop (ground-truth "a real item appeared/disappeared nearby",
+    independent of inventory) is intentionally *not* handled here at
+    all yet -- nothing currently consumes it; !collect's own drop
+    confirmation reads InventoryTracker directly instead (see
+    MiningController.collect's docstring). Left as a known gap/future
+    hook rather than silently dropped -- see _process_event.
     """
     async for event in bridge.events():
         log_timing(log, "read @ %.3f: type=%s", now(), event.type)
@@ -104,62 +181,42 @@ async def _read_events(bridge: ModBridge, movement: MovementController, queue: a
             movement.on_find_result(event.data)
         elif event.type == "arrived":
             movement.on_arrived()
-        await queue.put(event)
+        elif event.type == "dig_down_result":
+            mining.on_dig_down_result(event.data)
+        elif event.type == "collect_result":
+            mining.on_collect_result(event.data)
+        elif event.type == "query_result":
+            mining.on_query_result(event.data)
+        elif event.type == "entity":
+            log.debug("entity event: %s", event.data)
+            tracker.handle_event(event)
+            if event.data.get("action") == "add":
+                await movement.on_entity_added(event.data.get("name"), event.data.get("id"))
+        elif event.type == "inventory":
+            log.debug("inventory event: %s", event.data)
+            inventory.handle_event(event)
+        elif event.type == "position":
+            log.debug(
+                "position: (%.2f, %.2f, %.2f) yaw=%.1f on_ground=%s",
+                event.data.get("x", 0.0), event.data.get("y", 0.0), event.data.get("z", 0.0),
+                event.data.get("yaw", 0.0), event.data.get("on_ground"),
+            )
+            self_position.handle_event(event)
+        else:
+            await queue.put(event)
 
 
-async def _process_event(
-    event: ModEvent,
-    bridge: ModBridge,
-    actions: ActionRegistry,
-    tracker: EntityTracker,
-    inventory: InventoryTracker,
-    llm: LLMController,
-    config: BotConfig,
-    movement: MovementController,
-    self_position: SelfPositionTracker,
-) -> None:
-    """Handles every event type except find_result/arrived, which
-    _read_events already resolves (movement.on_find_result/on_arrived)
-    before queuing (see run()'s docstring) -- they still flow through this
-    queue like any other event, but nothing here needs to react to them a
-    second time.
+async def _process_event(event: ModEvent, config: BotConfig) -> None:
+    """Handles whatever's left after _read_events' fast-path -- hello/
+    health/death/respawn. Everything state-tracking (entity/inventory/
+    position) and every pending-future resolver is already handled
+    synchronously in _read_events; chat is dispatched separately by
+    run()'s own _dispatch_chat_command, not routed through here at all.
     """
     log_timing(log, "processing @ %.3f: type=%s", now(), event.type)
-    if event.type in ("find_result", "arrived"):
-        return
 
     if event.type == "hello":
         check_hello(event.data.get("commit", "unknown"), event.data.get("built_at", "unknown"), config.mod_repo_path)
-        return
-
-    if event.type == "entity":
-        log.debug("entity event: %s", event.data)
-        tracker.handle_event(event)
-        if event.data.get("action") == "add":
-            await movement.on_entity_added(event.data.get("name"), event.data.get("id"))
-        return
-
-    if event.type == "inventory":
-        log.debug("inventory event: %s", event.data)
-        inventory.handle_event(event)
-        return
-
-    if event.type == "chat":
-        sender = event.data.get("sender")
-        text = event.data.get("text", "")
-        log.info("<%s> %s", sender or "system", text)
-
-        if sender is not None and sender == self_position.own_name:
-            # The mod hears its own chat messages the same as anyone
-            # else's (they go through the normal server chat
-            # broadcast) -- without this guard, a command's own error
-            # reply ("something went wrong running !find") got
-            # re-parsed as a fresh !find with no args, which itself
-            # errored and replied again, forever (found live: an
-            # infinite crash loop from a single mistyped command).
-            return
-
-        await _handle_chat(bridge, actions, llm, config, text, sender)
         return
 
     if event.type == "health":
@@ -174,24 +231,71 @@ async def _process_event(
         log.info("respawned")
         return
 
-    if event.type == "position":
-        log.debug(
-            "position: (%.2f, %.2f, %.2f) yaw=%.1f on_ground=%s",
-            event.data.get("x", 0.0), event.data.get("y", 0.0), event.data.get("z", 0.0),
-            event.data.get("yaw", 0.0), event.data.get("on_ground"),
-        )
-        self_position.handle_event(event)
-        return
+
+async def _dispatch_chat_command(
+    event: ModEvent,
+    bridge: ModBridge,
+    actions: ActionRegistry,
+    llm: LLMController,
+    config: BotConfig,
+    self_position: SelfPositionTracker,
+    current_command_task: asyncio.Task | None,
+) -> asyncio.Task | None:
+    """Cancels whatever chat-command task is still running, then starts
+    this one as a fresh task and returns it (the new current_command_task
+    for run()'s next iteration to track). A cancelled command's own
+    cleanup still runs (see MiningController.collect's `finally` block,
+    for instance) -- asyncio.CancelledError propagates through
+    ActionRegistry.dispatch_chat's `except Exception` untouched (it's a
+    BaseException, not caught there), so a superseded !collect/!digDown/
+    !find unwinds cleanly rather than leaking its pending-future state.
+
+    Only one command task is ever tracked at a time -- chat commands are
+    typed by a human one at a time in practice, so "the newest command
+    wins, cancelling whatever was running" is the intended behavior (per
+    the live report this exists to fix: "!collect 10, in the middle I
+    say follow, do that, and stop collecting"), not a queue of commands
+    to run one after another.
+    """
+    sender = event.data.get("sender")
+    text = event.data.get("text", "")
+    log.info("<%s> %s", sender or "system", text)
+
+    if sender is not None and sender == self_position.own_name:
+        # The mod hears its own chat messages the same as anyone else's
+        # (they go through the normal server chat broadcast) -- without
+        # this guard, a command's own error reply ("something went wrong
+        # running !find") got re-parsed as a fresh !find with no args,
+        # which itself errored and replied again, forever (found live: an
+        # infinite crash loop from a single mistyped command). Checked
+        # *before* cancelling current_command_task, not just before
+        # dispatch -- reported live: !collect's own progress replies
+        # ("I got a cobblestone (3 total)") each cancelled the very
+        # !collect task that sent them, since the old code cancelled
+        # unconditionally for every chat event and only skipped
+        # re-dispatching afterward. collect() kept counting only 1/4
+        # confirmed gains while the mod-side ControlState.COLLECT goal
+        # (never told to stop -- nothing cancels *that*, see this
+        # function's own docstring) kept mining for real, producing
+        # further genuine drops that inventory_announcer reported
+        # independently -- looking like a completed !collect 4 in chat
+        # while the actual counted total was wrong and no further
+        # collect_result confirmation was ever awaited.
+        return current_command_task
+
+    if current_command_task is not None and not current_command_task.done():
+        current_command_task.cancel()
+
+    return asyncio.ensure_future(_handle_chat(bridge, actions, llm, config, text, sender))
 
 
 async def _handle_chat(
     bridge: ModBridge, actions: ActionRegistry, llm: LLMController, config: BotConfig, text: str, sender: str | None,
 ) -> None:
-    """The actual chat-dispatch logic, split out of _process_event for
-    readability. Runs sequentially with everything else (see run()'s
-    docstring) -- a slow command here does delay later events from being
-    processed, same as before this file's reader/processor split, just no
-    longer able to deadlock itself on a reply only the reader can deliver.
+    """The actual chat-dispatch logic -- runs as its own cancellable task
+    (see _dispatch_chat_command), so a long-running command here no
+    longer delays any other event from being read/processed, and can
+    itself be interrupted by whatever chat command comes next.
     """
     try:
         result = await actions.dispatch_chat(text, sender)
@@ -208,6 +312,9 @@ async def _handle_chat(
 
         if should_trigger_llm(text, sender, config.bot_name, config.trigger_words):
             await llm.handle_chat(sender, text)
+    except asyncio.CancelledError:
+        log.info("command !%s superseded by a newer command, cancelled", text.strip().lstrip("!"))
+        raise
     except Exception:
         log.exception("unhandled error handling chat %r from %r", text, sender)
 

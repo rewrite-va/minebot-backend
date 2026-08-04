@@ -178,3 +178,25 @@ class ModBridge:
 
     async def send_find(self, query: str, radius: int = 64) -> None:
         await self._send({"type": "find", "query": query, "radius": radius})
+
+    async def send_dig_down(self, count: int) -> None:
+        await self._send({"type": "dig_down", "count": count})
+
+    async def send_collect(self, query: str, radius: int = 64) -> None:
+        await self._send({"type": "collect", "query": query, "radius": radius})
+
+    async def send_query(self, sub_type: str, arguments: list[str], key: str) -> None:
+        await self._send({"type": "query", "sub_type": sub_type, "arguments": arguments, "key": key})
+
+    async def send_debug_swap_test(self) -> None:
+        """Temporary !debug command -- see minebot-mod's runDebugSwapTest
+        and FINDINGS.md's "InventoryActions.moveToHotbar's local-only
+        swap genuinely desyncing the server's view of the held item"
+        section. Tests InventoryActions.moveToHotbar in isolation (no
+        mining involved at all): shift-clicks the diamond pickaxe out of
+        the hotbar into main storage first (a real, server-synced
+        container click), then calls moveToHotbar to bring it back into
+        hotbar slot 0 -- the exact mechanism suspected of desyncing the
+        server's view of the bot's held item from what other clients
+        actually see it holding."""
+        await self._send({"type": "debug_swap_test"})
