@@ -4,6 +4,7 @@ import pytest
 
 from minebot.actions.registry import ActionRegistry
 from minebot.actions.types import Action, ActionParam, ActionResult
+from minebot.bot.combat import CombatController, register_combat_actions
 from minebot.bot.mining import MiningController, register_mining_actions
 from minebot.bot.movement import FOLLOW_STOP_DISTANCE, MovementController, register_movement_actions
 from minebot.bot.run_loop import run
@@ -57,6 +58,9 @@ class FakeBridge:
     async def send_query(self, sub_type, arguments, key):
         self.sent.append(("query", {"sub_type": sub_type, "arguments": arguments, "key": key}))
 
+    async def send_attack(self, query, radius=64):
+        self.sent.append(("attack", {"query": query, "radius": radius}))
+
 
 def _llm(bridge: FakeBridge, actions: ActionRegistry) -> LLMController:
     return LLMController(bridge, actions)  # default NullLLMProvider -- never replies
@@ -70,6 +74,10 @@ def _mining(bridge: FakeBridge, inventory: InventoryTracker | None = None) -> Mi
     return MiningController(bridge, inventory if inventory is not None else InventoryTracker())
 
 
+def _combat(bridge: FakeBridge) -> CombatController:
+    return CombatController(bridge)
+
+
 @pytest.mark.asyncio
 async def test_run_loop_feeds_entity_events_into_tracker(tmp_path):
     bridge = FakeBridge([
@@ -78,7 +86,7 @@ async def test_run_loop_feeds_entity_events_into_tracker(tmp_path):
     tracker = EntityTracker()
     actions = ActionRegistry()
 
-    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, _movement(bridge, tracker, tmp_path), SelfPositionTracker(), _mining(bridge))
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, _movement(bridge, tracker, tmp_path), SelfPositionTracker(), _mining(bridge), _combat(bridge))
 
     assert tracker.find_by_name("Alex") is not None
 
@@ -92,7 +100,7 @@ async def test_run_loop_feeds_inventory_events_into_tracker(tmp_path):
     tracker = EntityTracker()
     actions = ActionRegistry()
 
-    await run(bridge, actions, tracker, inventory, _llm(bridge, actions), CONFIG, _movement(bridge, tracker, tmp_path), SelfPositionTracker(), _mining(bridge))
+    await run(bridge, actions, tracker, inventory, _llm(bridge, actions), CONFIG, _movement(bridge, tracker, tmp_path), SelfPositionTracker(), _mining(bridge), _combat(bridge))
 
     assert inventory.count_of("minecraft:bread") == 5
 
@@ -106,7 +114,7 @@ async def test_run_loop_feeds_position_events_into_self_position_tracker(tmp_pat
     actions = ActionRegistry()
     self_position = SelfPositionTracker()
 
-    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, _movement(bridge, tracker, tmp_path), self_position, _mining(bridge))
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, _movement(bridge, tracker, tmp_path), self_position, _mining(bridge), _combat(bridge))
 
     assert self_position.current is not None
     assert (self_position.current.x, self_position.current.y, self_position.current.z) == (10.0, 64.0, -5.0)
@@ -127,7 +135,7 @@ async def test_run_loop_dispatches_chat_commands(tmp_path):
     actions.register(Action(name="ping", description="", handler=ping_handler))
     tracker = EntityTracker()
 
-    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, _movement(bridge, tracker, tmp_path), SelfPositionTracker(), _mining(bridge))
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, _movement(bridge, tracker, tmp_path), SelfPositionTracker(), _mining(bridge), _combat(bridge))
 
     assert calls == ["Alex"]
 
@@ -147,7 +155,7 @@ async def test_run_loop_sends_action_result_message_to_chat(tmp_path):
     ))
     tracker = EntityTracker()
 
-    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, _movement(bridge, tracker, tmp_path), SelfPositionTracker(), _mining(bridge))
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, _movement(bridge, tracker, tmp_path), SelfPositionTracker(), _mining(bridge), _combat(bridge))
 
     assert bridge.sent_chat == ["here's your bread"]
 
@@ -160,7 +168,7 @@ async def test_run_loop_replies_to_unknown_commands(tmp_path):
     actions = ActionRegistry()
     tracker = EntityTracker()
 
-    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, _movement(bridge, tracker, tmp_path), SelfPositionTracker(), _mining(bridge))
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, _movement(bridge, tracker, tmp_path), SelfPositionTracker(), _mining(bridge), _combat(bridge))
 
     assert bridge.sent_chat == ["unknown command: !doesnotexist"]
 
@@ -173,7 +181,7 @@ async def test_run_loop_does_not_reply_to_unaddressed_non_command_chat(tmp_path)
     actions = ActionRegistry()
     tracker = EntityTracker()
 
-    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, _movement(bridge, tracker, tmp_path), SelfPositionTracker(), _mining(bridge))
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, _movement(bridge, tracker, tmp_path), SelfPositionTracker(), _mining(bridge), _combat(bridge))
 
     assert bridge.sent_chat == []
 
@@ -192,7 +200,7 @@ async def test_run_loop_routes_bot_addressed_chat_to_the_llm_controller(tmp_path
     actions = ActionRegistry()
     tracker = EntityTracker()
 
-    await run(bridge, actions, tracker, InventoryTracker(), RecordingLLM(), CONFIG, _movement(bridge, tracker, tmp_path), SelfPositionTracker(), _mining(bridge))
+    await run(bridge, actions, tracker, InventoryTracker(), RecordingLLM(), CONFIG, _movement(bridge, tracker, tmp_path), SelfPositionTracker(), _mining(bridge), _combat(bridge))
 
     assert handled == [("Alex", f"hey {BOT_NAME}, got food?")]
 
@@ -212,7 +220,7 @@ async def test_run_loop_routes_trigger_word_chat_to_the_llm_controller(tmp_path)
     config = BotConfig(mod_host="0.0.0.0", mod_port=0, bot_name=BOT_NAME, trigger_words=("buddy",), mod_repo_path=None)
     tracker = EntityTracker()
 
-    await run(bridge, actions, tracker, InventoryTracker(), RecordingLLM(), config, _movement(bridge, tracker, tmp_path), SelfPositionTracker(), _mining(bridge))
+    await run(bridge, actions, tracker, InventoryTracker(), RecordingLLM(), config, _movement(bridge, tracker, tmp_path), SelfPositionTracker(), _mining(bridge), _combat(bridge))
 
     assert handled == [("Alex", "hey buddy, got food?")]
 
@@ -230,7 +238,7 @@ async def test_run_loop_ignores_position_health_death_and_respawn_events_without
     actions = ActionRegistry()
     tracker = EntityTracker()
 
-    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, _movement(bridge, tracker, tmp_path), SelfPositionTracker(), _mining(bridge))  # should not raise
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, _movement(bridge, tracker, tmp_path), SelfPositionTracker(), _mining(bridge), _combat(bridge))  # should not raise
     assert bridge.sent_chat == []
 
 
@@ -268,7 +276,7 @@ async def test_run_loop_resumes_follow_after_target_reconnects_with_a_new_entity
     movement = _movement(bridge, tracker, tmp_path)
     register_movement_actions(actions, movement)
 
-    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, movement, SelfPositionTracker(), _mining(bridge))
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, movement, SelfPositionTracker(), _mining(bridge), _combat(bridge))
 
     assert bridge.sent
     assert bridge.sent[-1] == ("follow", {"entity_id": 42, "stop_distance": FOLLOW_STOP_DISTANCE})
@@ -286,7 +294,7 @@ async def test_run_loop_does_not_resume_follow_for_an_unrelated_reconnecting_pla
     movement = _movement(bridge, tracker, tmp_path)
     register_movement_actions(actions, movement)
 
-    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, movement, SelfPositionTracker(), _mining(bridge))
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, movement, SelfPositionTracker(), _mining(bridge), _combat(bridge))
 
     assert bridge.sent == [("follow", {"entity_id": 7, "stop_distance": FOLLOW_STOP_DISTANCE})]
 
@@ -300,7 +308,7 @@ async def test_run_loop_routes_find_result_events_to_movement(tmp_path):
     tracker = EntityTracker()
     movement = _movement(bridge, tracker, tmp_path)
 
-    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, movement, SelfPositionTracker(), _mining(bridge))  # should not raise
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, movement, SelfPositionTracker(), _mining(bridge), _combat(bridge))  # should not raise
 
     assert movement._pending_find is None
 
@@ -358,7 +366,7 @@ async def test_run_loop_delivers_find_result_without_deadlocking(tmp_path):
     register_movement_actions(actions, movement)
 
     await asyncio.wait_for(
-        run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, movement, SelfPositionTracker(), _mining(bridge)),
+        run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, movement, SelfPositionTracker(), _mining(bridge), _combat(bridge)),
         timeout=2.0,
     )
 
@@ -401,7 +409,7 @@ async def test_run_loop_delivers_dig_down_result_without_deadlocking(tmp_path):
     register_mining_actions(actions, mining)
 
     await asyncio.wait_for(
-        run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, _movement(bridge, tracker, tmp_path), SelfPositionTracker(), mining),
+        run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, _movement(bridge, tracker, tmp_path), SelfPositionTracker(), mining, _combat(bridge)),
         timeout=2.0,
     )
 
@@ -471,7 +479,7 @@ async def test_run_loop_delivers_collect_result_without_deadlocking(tmp_path):
     register_mining_actions(actions, mining)
 
     await asyncio.wait_for(
-        run(bridge, actions, tracker, inventory, _llm(bridge, actions), CONFIG, _movement(bridge, tracker, tmp_path), SelfPositionTracker(), mining),
+        run(bridge, actions, tracker, inventory, _llm(bridge, actions), CONFIG, _movement(bridge, tracker, tmp_path), SelfPositionTracker(), mining, _combat(bridge)),
         timeout=2.0,
     )
 
@@ -549,7 +557,7 @@ async def test_run_loop_lets_a_new_chat_command_interrupt_a_stuck_one(tmp_path):
     register_movement_actions(actions, movement)
 
     await asyncio.wait_for(
-        run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, movement, SelfPositionTracker(), mining),
+        run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, movement, SelfPositionTracker(), mining, _combat(bridge)),
         timeout=2.0,
     )
 
@@ -583,6 +591,6 @@ async def test_run_loop_survives_a_chat_reply_that_fails_to_send(tmp_path, caplo
     tracker = EntityTracker()
 
     with caplog.at_level("ERROR"):
-        await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, _movement(bridge, tracker, tmp_path), SelfPositionTracker(), _mining(bridge))
+        await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, _movement(bridge, tracker, tmp_path), SelfPositionTracker(), _mining(bridge), _combat(bridge))
 
     assert any("failed to send chat reply" in record.message for record in caplog.records)

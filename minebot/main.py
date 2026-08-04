@@ -5,6 +5,7 @@ import logging
 import os
 
 from minebot.actions.registry import ActionRegistry
+from minebot.bot.combat import CombatController, register_combat_actions
 from minebot.bot.help import register_help_action
 from minebot.bot.inventory import InventoryController, register_inventory_actions
 from minebot.bot.inventory_announcer import InventoryAnnouncer
@@ -42,13 +43,15 @@ async def run_bot(config: BotConfig) -> None:
     register_inventory_actions(actions, inventory_controller)
     mining = MiningController(bridge, inventory)
     register_mining_actions(actions, mining)
+    combat = CombatController(bridge)
+    register_combat_actions(actions, combat)
     InventoryAnnouncer(bridge, inventory)  # registers itself as an inventory-change listener; not otherwise referenced
     register_help_action(actions)
 
     llm = LLMController(bridge, actions)  # no provider configured yet -- see llm/controller.py
 
     try:
-        await run(bridge, actions, tracker, inventory, llm, config, movement, self_position, mining)
+        await run(bridge, actions, tracker, inventory, llm, config, movement, self_position, mining, combat)
     finally:
         await bridge.close()
 

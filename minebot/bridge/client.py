@@ -185,6 +185,9 @@ class ModBridge:
     async def send_collect(self, query: str, radius: int = 64) -> None:
         await self._send({"type": "collect", "query": query, "radius": radius})
 
+    async def send_attack(self, query: str | None, radius: int = 64) -> None:
+        await self._send({"type": "attack", "query": query, "radius": radius})
+
     async def send_query(self, sub_type: str, arguments: list[str], key: str) -> None:
         await self._send({"type": "query", "sub_type": sub_type, "arguments": arguments, "key": key})
 

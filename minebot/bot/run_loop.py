@@ -17,6 +17,7 @@ import asyncio
 import logging
 
 from minebot.actions.registry import ActionRegistry
+from minebot.bot.combat import CombatController
 from minebot.bot.mining import MiningController
 from minebot.bot.movement import MovementController
 from minebot.bridge.client import ModBridge, ModEvent
@@ -42,6 +43,7 @@ async def run(
     movement: MovementController,
     self_position: SelfPositionTracker,
     mining: MiningController,
+    combat: CombatController,
 ) -> None:
     """Splits reading the mod's events from processing them into two
     concurrent tasks joined by a queue -- found live that a single
@@ -92,7 +94,7 @@ async def run(
     finish executing in.
     """
     queue: asyncio.Queue[ModEvent] = asyncio.Queue()
-    reader = asyncio.ensure_future(_read_events(bridge, movement, mining, tracker, inventory, self_position, queue))
+    reader = asyncio.ensure_future(_read_events(bridge, movement, mining, combat, tracker, inventory, self_position, queue))
     current_command_task: asyncio.Task | None = None
 
     try:
@@ -141,6 +143,7 @@ async def _read_events(
     bridge: ModBridge,
     movement: MovementController,
     mining: MiningController,
+    combat: CombatController,
     tracker: EntityTracker,
     inventory: InventoryTracker,
     self_position: SelfPositionTracker,
@@ -154,11 +157,11 @@ async def _read_events(
     Fast-paths two kinds of event, both synchronously (no suspension
     point beyond the occasional `await` that only ever *sends*, never
     waits for a reply):
-    - find_result/arrived/dig_down_result/collect_result/query_result
-      resolve a command handler's pending future the instant they're
-      read, since that handler may be suspended waiting specifically for
-      one of these (the original find_result deadlock this pattern
-      prevents -- see run()'s docstring).
+    - find_result/arrived/dig_down_result/collect_result/query_result/
+      attack_result resolve a command handler's pending future the
+      instant they're read, since that handler may be suspended waiting
+      specifically for one of these (the original find_result deadlock
+      this pattern prevents -- see run()'s docstring).
     - entity/inventory/position update their trackers immediately, and
       entity "add" additionally checks movement.on_entity_added (the
       !follow-resumes-after-reconnect logic) -- fast-pathing these here,
@@ -187,6 +190,8 @@ async def _read_events(
             mining.on_collect_result(event.data)
         elif event.type == "query_result":
             mining.on_query_result(event.data)
+        elif event.type == "attack_result":
+            combat.on_attack_result(event.data)
         elif event.type == "entity":
             log.debug("entity event: %s", event.data)
             tracker.handle_event(event)
