@@ -66,12 +66,18 @@ cp build/libs/minebot-mod-0.1.0+26.1.2.jar \
    "/mnt/c/Users/colaila/AppData/Roaming/PrismLauncher/instances/26.1.2 - v1 ritebot/minecraft/mods/minebot-mod-0.1.0+26.1.2.jar"
 ```
 
-Then **fully quit and relaunch** the Minecraft client (PrismLauncher
-instance "26.1.2 - v1 ritebot") -- Fabric loads mod jars once at
-startup, so a running client keeps running the old code even after the
-jar on disk changes. A stale-jar deploy is a common silent-failure mode:
-symptoms look like "the bot isn't doing anything I just added" even
-though the source change and backend are both correct.
+**Standing instruction: always run both of these commands yourself,
+every time a mod-side change is made** -- don't leave the jar built but
+undeployed for the user to copy over manually. Then **ask the user to
+fully quit and relaunch the Minecraft client** (PrismLauncher instance
+"26.1.2 - v1 ritebot") -- this part can't be automated (it's a real
+desktop app on the Windows side of WSL2, not something reachable from
+here), so request it explicitly rather than silently assuming it
+happened. Fabric loads mod jars once at startup, so a running client
+keeps running the old code even after the jar on disk changes -- a
+stale-jar deploy is a common silent-failure mode: symptoms look like
+"the bot isn't doing anything I just added" even though the source
+change, build, and redeploy are all correct, just not yet loaded.
 
 The backend now catches this automatically: the mod broadcasts its own
 git commit (baked into the jar at build time) the moment it connects,
