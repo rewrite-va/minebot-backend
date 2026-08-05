@@ -282,7 +282,12 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
   > handleKeybinds()` force-releases `isUsingItem()` every tick
   > `keyUse.isDown()` is false -- see `FINDINGS.md`'s "Bow-drawing never
   > actually fired an arrow" section for the full, long investigation
-  > this took to actually confirm. Always holding a full draw
+  > this took to actually confirm. A second, independent contributor to
+  > the same symptom: `FoodEater` used to release `keyUse`
+  > unconditionally every tick it wasn't actively eating, clobbering
+  > `BowShooter`'s own hold -- `FoodEater` now tracks whether it's the
+  > one actually holding the key and only releases what it itself set
+  > (see `FINDINGS.md`, same section). Always holding a full draw
   > (`BowItem.MAX_DRAW_DURATION`, 20 ticks) for
   > maximum damage/accuracy rather than firing faster/weaker partial-
   > draw shots. A bow user keeps distance (`stopDistance` tracks

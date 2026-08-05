@@ -3908,11 +3908,41 @@ setDown(true)` for the draw's duration (cleared in `release()`), the
 same pattern `FoodEater`/`BlockBreaker` already use for their own real
 interactions. This doesn't trigger anything by itself -- the direct
 `useItem()`/`releaseUsing()` calls still do the real work -- it only
-stops vanilla's own `handleKeybinds()` from undoing it. Confirmed live:
-arrows now visibly consumed from inventory shot-over-shot, real damage
-landing, target actually dying.
+stops vanilla's own `handleKeybinds()` from undoing it.
 
-**Red herrings ruled out along the way, each confirmed by a real,
+**A second, independent contributor to the exact same symptom, found by
+re-isolating one piece of `onClientTick` at a time after the bow broke
+again once everything was restored**: `FoodEater.releaseUseKey()` called
+`Options.keyUse.setDown(false)` *unconditionally* every single tick the
+bot's health wasn't low enough to eat -- silently overwriting
+`BowShooter`'s own `keyUse.setDown(true)` hold the moment both ran on
+the same client tick (both are called from the same `onClientTick`,
+`tickAttack` before `foodEater.maybeEat`). Vanilla's own
+`handleKeybinds()` then force-released the draw the very next tick,
+seeing `keyUse.isDown() == false` again -- the exact same underlying
+mechanism above, just re-introduced by a second, independent source.
+This one had actually been suspected earlier in the investigation
+(before the real `handleKeybinds()` mechanism was understood) and
+disabling `FoodEater` entirely was tried as a fix at the time -- but
+that test happened *before* `BowShooter` held `keyUse` at all, so
+disabling `FoodEater` alone couldn't have fixed anything either way; it
+looked like a dead end but was actually half of the real answer,
+confirmed properly afterward once both pieces were in place to test
+against each other in isolation.
+
+**Fix**: `FoodEater` now tracks `holdingUseKey` (whether *it* is the one
+currently holding the key) and `releaseUseKey()` is a no-op unless
+that's true -- so a tick where `FoodEater` has nothing to eat no longer
+clobbers a real hold some other system legitimately has. `BlockBreaker`
+holds a different keybind (`keyAttack`, for mining) entirely, so it has
+no equivalent conflict with the bow's `keyUse` hold and didn't need the
+same fix.
+
+Confirmed live, finally, with both fixes in place and `FoodEater` fully
+re-enabled: arrows visibly consumed from inventory shot-over-shot, real
+damage landing, target actually dying, reliably and repeatably.
+
+**Other things ruled out along the way, each confirmed by a real,
 deliberate test, worth recording since they're not obviously wrong in
 isolation:**
 - Server-side tick lag, anti-cheat, and the account/server itself --
@@ -3922,20 +3952,14 @@ isolation:**
   ever touching chat) and checking the installed plugin list (purely
   cosmetic: `CustomPlayerModels`, `ElytraTrails`, `Jade`, `JEI`, etc.,
   nothing combat/anti-cheat-related).
-- `FoodEater.maybeEat()` holding `keyUse` for its own eating logic --
-  a real, legitimate conflict in principle (it does run unconditionally
-  regardless of `ControlState.mode`, and does hold the same keybind),
-  and a live test (manual right-click bow-draw with `!stop` issued)
-  did fail the same way at the time -- but disabling `FoodEater`
-  entirely did NOT fix the bow on its own, proving it was never the
-  real cause, just a coincidental correlation from testing at a moment
-  when `FoodEater` also happened to be running. **Re-enabled** once the
-  real cause was found and fixed.
 - `MinebotInput` (replaces `LocalPlayer.input` every tick to drive bot
-  movement) -- confirmed via decompiled `Input`/`KeyboardInput` source
-  that this record only ever carries movement fields
-  (forward/backward/left/right/jump/shift/sprint), nothing related to
-  attack/use at all, so it structurally can't be involved.
+  movement) and automatic look-at-nearby-player -- confirmed via
+  decompiled `Input`/`KeyboardInput` source that `Input` only ever
+  carries movement fields (forward/backward/left/right/jump/shift/
+  sprint), nothing related to attack/use at all, and confirmed live
+  (bow worked correctly with both restored) that neither is involved.
+- `respawnHandler`/the death-tick cleanup block -- confirmed live (bow
+  worked correctly with this restored too) not to be involved.
 
 ## Known gaps / next steps
 
