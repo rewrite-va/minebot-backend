@@ -3767,6 +3767,114 @@ monotonic `now()` -- a live viewer wants to display a real clock time,
 not an offset from process start that's meaningless without knowing
 when the process itself started.
 
+## !attack never selected a weapon -- WeaponSelector/BowShooter added, bow aim ported from AbstractSkeleton's own AI
+
+Reported live: `!attack`/`!kill` fought with whatever happened to
+already be selected, no weapon selection at all -- the original
+implementation only ever called `MultiPlayerGameMode.attack`, the same
+minimal mechanism `!collect <entity>`'s kill loop already used, with no
+equivalent of `BlockBreaker.maybeSwitchToBestTool`'s tool-selection for
+mining. Explicit ask: prefer a real bow over melee if one is carried.
+
+**Melee weapon scoring needed real attribute data, not an Item field.**
+Confirmed via decompiled `ItemStack`/`ItemAttributeModifiers` source
+that modern vanilla has no per-item "attack damage" field on `Item`
+itself at all -- weapon damage is entirely data-driven through
+`ItemStack.forEachModifier(EquipmentSlot.MAINHAND, ...)`, summing
+whatever `Attributes.ATTACK_DAMAGE` modifiers a stack actually carries.
+The exact same "data-driven component, not a subclass hierarchy" shape
+`BlockBreaker`'s own docstring already found for mining tools
+(`Tool` component replacing `PickaxeItem`/`DiggerItem` subclasses).
+`WeaponSelector.attackDamageOf` (new) does this scan; `WeaponSelector.
+choose` mirrors `maybeSwitchToBestTool`'s shape overall (scan inventory,
+score each candidate, return the best) but scores real attack damage
+instead of `getDestroySpeed`.
+
+**A bow is only a real choice if there's also ammo -- `Player.
+getProjectile(weapon)` is the exact same real lookup vanilla's own
+`BowItem.releaseUsing` uses** to find matching ammo (confirmed via
+decompiled bytecode) before it will actually fire, so `WeaponSelector.
+findBowWithAmmo` asks the identical question a real draw attempt would,
+rather than separately scanning for `Items.ARROW` and hoping that
+matches whatever "counts" as ammo for a given bow (spectral arrows,
+tipped arrows, etc. all still count).
+
+**Real bow-drawing needed the same keybind-hold discovery FoodEater/
+BlockBreaker already made, not a fresh investigation.** Both of those
+classes independently found (via live A/B testing against real human
+input) that a direct API call to start/complete a use-item interaction
+does not reliably work, even though every individually-checked mechanism
+looks correct on paper -- the fix both times was holding the real
+`keyUse` keybind (`Options.keyUse.setDown(true/false)`) instead, letting
+vanilla's own `Minecraft.handleKeybinds()` (called every tick regardless
+of this mod) drive the actual interaction the same way a human's held
+right-click would. `BowShooter` (new) applies this same fix
+preemptively for drawing a bow, rather than re-discovering the identical
+failure mode a third time.
+
+**Full draw, every shot, per explicit instruction.** `BowItem.
+getPowerForTime(ticks)` (decompiled: `min(1.0, ((t/20)² + (t/20)·2) / 3)`)
+saturates at `t = MAX_DRAW_DURATION` (20 ticks/1s) -- `BowShooter` always
+holds the full 20 ticks before releasing (checked via `LivingEntity.
+getTicksUsingItem()`, the real elapsed-hold counter vanilla's own use-item
+state machine maintains once `keyUse` is held), rather than releasing
+earlier for a faster but weaker/less accurate partial-draw shot.
+
+**Aim direction ported directly from `AbstractSkeleton.
+performRangedAttack`, not solved from scratch -- confirmed live insight:
+"skeletons already use bows, can we use that code?"** Investigated
+whether real client-side arrow ballistics needed solving (arrows fall
+under gravity -- confirmed `AbstractArrow.getDefaultGravity()` returns
+`0.05` blocks/tick², decompiled) before realizing the *server's* own
+ranged-mob AI already solves this exact problem and its formula is
+directly readable from decompiled bytecode. `AbstractSkeleton.
+performRangedAttack` (decompiled): computes `dx`/`dz` to the target,
+`dy` to roughly a third of the target's body height
+(`target.getY(0.333)`) from the arrow's own spawn position, and
+`horizontalDistance = sqrt(dx² + dz²)` -- then calls
+`Projectile.spawnProjectileUsingShoot(arrow, level, weapon, dx,
+dy + horizontalDistance * 0.2, dz, 1.6f, inaccuracy)`. The key
+realization: **vanilla doesn't compute a solved launch angle at all** --
+it aims the *raw* direction vector to the target, just with a fixed,
+distance-proportional lift added to the direction's own Y component
+(more lift the farther away, compensating for the longer flight time
+gravity has to act on), at a flat velocity (`1.6`, not distance-scaled).
+`BowShooter.aimAt` ports this exact formula (`ARC_LIFT_PER_BLOCK = 0.2`)
+converted to yaw/pitch via the same `atan2`-based convention already
+established in `NearbyPlayerLookAt`/`BlockBreaker.aimAt` (both already
+confirmed via decompiled `Entity.calculateViewVector`) -- reusing the
+game's own already-tuned formula is simpler and more trustworthy than
+re-deriving an equivalent one by hand, and this class of "borrow the
+mob AI's own already-solved answer" is a new, generally-useful pattern
+for future combat/ranged-interaction work in this mod.
+
+**Real player release velocity differs from a skeleton's, confirmed via
+`BowItem.releaseUsing`'s own decompiled bytecode** (not used directly,
+but worth recording): a *player* shot's velocity is `power * 3.0`
+(`power` from `getPowerForTime`, so `3.0` at full draw) with inaccuracy
+`0` at exactly full power or `1` otherwise, whereas a *skeleton*'s is a
+flat `1.6` regardless of draw (skeletons don't "charge" a shot the way
+a player does) with inaccuracy scaling inversely with world difficulty
+(`14 - 4 * difficultyId`). Both are ultimately server-authoritative --
+the client (this mod, or a real human) only ever controls *when* to
+release and *which direction the player entity is currently facing* at
+that moment; `BowItem.shootProjectile`'s own decompiled bytecode
+confirms the server reads the shooter's live `getXRot()`/`getYRot()` at
+release time, not any client-passed direction vector, so aiming
+correctly via `setYRot`/`setXRot` before releasing is both necessary and
+sufficient -- there's no other hook for the client to influence the shot.
+
+**Engagement range and weapon re-selection are both live, per-tick, not
+fixed once per target.** `ControlState.stopDistance` (already a plain
+mutable field every other goal-setter also assigns once) is set to
+`ATTACK_BOW_RANGE` (15, matching the real `BowItem.DEFAULT_RANGE`) or
+`ATTACK_MELEE_RANGE` (3) depending on `WeaponSelector.choose`'s result,
+re-evaluated every tick `tickAttack` runs -- running out of arrows
+mid-fight is detected on the very next tick (no separate "ammo depleted"
+event/bookkeeping needed) and immediately starts closing the distance
+to melee range instead of standing stranded at the old, now-wrong bow
+range.
+
 ## Known gaps / next steps
 
 - **Deploying a mod change requires a rebuild, a jar copy, AND a full

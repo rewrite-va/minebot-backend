@@ -262,6 +262,31 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
   > with a single fire-and-forget `attack_result` event (`success`,
   > `query`, `reason` on failure) -- same one-attempt-in-flight-at-a-time
   > shape as `find_result`/`collect_result`.
+  >
+  > **Weapon selection added**: the first version fought with whatever
+  > happened to already be in hand -- no weapon selection at all.
+  > `WeaponSelector` (new, mod-side) now picks a real bow (if carried
+  > with arrows -- `Player.getProjectile`, the same real ammo lookup
+  > vanilla's own bow-use logic uses) over the best melee weapon by real
+  > attack damage (`ItemAttributeModifiers`' `ATTACK_DAMAGE`, since
+  > modern vanilla has no per-item damage field on `Item` at all) over
+  > bare hands, per the explicit ask ("prefer bows, then melee").
+  > `BowShooter` (new) draws and fires a real bow using the same
+  > `keyUse`-hold mechanism `FoodEater`/`BlockBreaker` already
+  > established (a direct API call doesn't reliably work), always
+  > holding a full draw (`BowItem.MAX_DRAW_DURATION`, 20 ticks) for
+  > maximum damage/accuracy rather than firing faster/weaker partial-
+  > draw shots. A bow user keeps distance (`stopDistance` tracks
+  > `BowItem.DEFAULT_RANGE`, 15 blocks) and shoots instead of closing to
+  > melee range; running out of arrows mid-fight falls back to melee
+  > (and starts closing distance again) on the very next tick, since
+  > `WeaponSelector` is re-checked every tick, not just once per target.
+  > Aim direction is ported directly from `AbstractSkeleton.
+  > performRangedAttack` (decompiled) rather than a from-scratch
+  > ballistic solve -- vanilla's own ranged-mob AI aims the raw vector to
+  > the target with a fixed, distance-proportional lift added to the Y
+  > component, not a solved launch angle; see `FINDINGS.md` for the full
+  > decompiled-source trail this came from.
 
 - ⬜ **`!attackPlayer`** -- attack a specific player by name until they
   die or run away. mindcraft ref: `actions.js:319`, →
