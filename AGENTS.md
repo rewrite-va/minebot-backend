@@ -34,6 +34,19 @@ a local WebSocket instead of speaking the Minecraft protocol directly).
   breaking. `build/libs/minebot-mod-0.1.0+26.1.2.jar` is the build
   output that needs copying out to actually take effect (see "Changing
   anything in the mod" below).
+- **`/home/colaila/git/minebot-frontend`** -- the wire-message viewer
+  repo. `src/App.tsx` is the main view; `src/useWireFeed.ts` connects to
+  `ObserverServer` and buffers incoming messages (`MAX_BUFFERED_MESSAGES`
+  bounds live DOM node count -- no virtualization); `src/wire.ts` has the
+  message type definitions; `src/typeColors.ts` maps message type to a
+  Tailwind color class; `src/useHiddenTypes.ts` +
+  `src/components/TypeFilterMenu.tsx` back the per-type suppression UI
+  (localStorage-backed). `pnpm dev` runs the Vite dev server --
+  `vite.config.ts` sets `server: { host: '0.0.0.0' }` so it's reachable
+  from Windows (WSL2 default of `127.0.0.1`-only isn't). Purely
+  observational (see "Three repos, one bot" above) -- never needs a
+  rebuild/redeploy dance the way `minebot-mod` does, just a normal Vite
+  dev server restart if it's already running.
 - **`/mnt/c/Users/colaila/AppData/Roaming/PrismLauncher/instances/26.1.2 - v1 ritebot/`**
   -- the PrismLauncher instance the bot's account actually runs in
   (Windows side, mounted into WSL2 under `/mnt/c`).
