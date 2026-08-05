@@ -17,7 +17,10 @@ from minebot.llm.controller import LLMController
 from minebot.places import PlaceMemory
 
 BOT_NAME = "minebot"
-CONFIG = BotConfig(mod_host="0.0.0.0", mod_port=0, bot_name=BOT_NAME, trigger_words=(), mod_repo_path=None)
+CONFIG = BotConfig(
+    mod_host="0.0.0.0", mod_port=0, bot_name=BOT_NAME, trigger_words=(), mod_repo_path=None,
+    observer_host="0.0.0.0", observer_port=0,
+)
 
 
 class FakeBridge:
@@ -217,7 +220,10 @@ async def test_run_loop_routes_trigger_word_chat_to_the_llm_controller(tmp_path)
         ModEvent(type="chat", data={"sender": "Alex", "text": "hey buddy, got food?"}),
     ])
     actions = ActionRegistry()
-    config = BotConfig(mod_host="0.0.0.0", mod_port=0, bot_name=BOT_NAME, trigger_words=("buddy",), mod_repo_path=None)
+    config = BotConfig(
+        mod_host="0.0.0.0", mod_port=0, bot_name=BOT_NAME, trigger_words=("buddy",), mod_repo_path=None,
+        observer_host="0.0.0.0", observer_port=0,
+    )
     tracker = EntityTracker()
 
     await run(bridge, actions, tracker, InventoryTracker(), RecordingLLM(), config, _movement(bridge, tracker, tmp_path), SelfPositionTracker(), _mining(bridge), _combat(bridge))

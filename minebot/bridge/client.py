@@ -28,6 +28,7 @@ from typing import Any, AsyncIterator
 import websockets
 from websockets.asyncio.server import ServerConnection, serve
 
+from minebot.bridge.observer import ObserverServer
 from minebot.timing import log_timing, now
 
 log = logging.getLogger("minebot.bridge")
@@ -40,12 +41,17 @@ class ModEvent:
 
 
 class ModBridge:
-    def __init__(self, host: str, port: int) -> None:
+    def __init__(self, host: str, port: int, observer: ObserverServer | None = None) -> None:
         self._host = host
         self._port = port
         self._connection: ServerConnection | None = None
         self._connected = asyncio.Event()
         self._server = None
+        # Optional -- None means "nobody's watching", and every call site
+        # below already no-ops cheaply in that case (see ObserverServer.
+        # broadcast's own docstring), so this stays a plain attribute
+        # rather than a null-object pattern.
+        self._observer = observer
 
     async def connect(self) -> None:
         """Starts listening and waits for the mod to connect in. Named to
@@ -128,10 +134,14 @@ class ModBridge:
         # "received" and "processed", logged separately by run_loop)
         # directly measurable instead of inferred from log line order alone.
         log_timing(log, "recv @ %.3f: type=%s %s", now(), event_type, data)
+        if self._observer is not None:
+            self._observer.broadcast("received", {"type": event_type, **data})
         return ModEvent(type=event_type, data=data)
 
     async def _send(self, payload: dict[str, Any]) -> None:
         log_timing(log, "send @ %.3f: %s", now(), payload)
+        if self._observer is not None:
+            self._observer.broadcast("sent", payload)
         if self._connection is None:
             # A dropped `chat` command is a real user-visible silent
             # failure (a player's command "worked" on the backend's side

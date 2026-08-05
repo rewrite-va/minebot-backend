@@ -41,6 +41,16 @@ class BotConfig:
     # doesn't exist).
     mod_repo_path: str | None
 
+    # Address/port for the wire-message observer WebSocket (see
+    # bridge/observer.py's ObserverServer) -- a separate server from the
+    # control channel itself, since any number of frontend clients (e.g.
+    # minebot-frontend's live viewer) can watch at once, unlike the mod
+    # connection which only ever has one. Same host default reasoning as
+    # mod_host: 0.0.0.0 works for both a same-machine browser and one on
+    # the Windows side of a WSL2 setup with no extra configuration.
+    observer_host: str
+    observer_port: int
+
     @classmethod
     def from_env(cls) -> "BotConfig":
         load_dotenv()  # loads .env into os.environ if present; no-op otherwise
@@ -50,6 +60,8 @@ class BotConfig:
             bot_name=os.environ.get("MINEBOT_BOT_NAME", "minebot"),
             trigger_words=_parse_trigger_words(os.environ.get("MINEBOT_TRIGGER_WORDS", "")),
             mod_repo_path=os.environ.get("MINEBOT_MOD_REPO_PATH", "/home/colaila/git/mods/minebot-mod"),
+            observer_host=os.environ.get("MINEBOT_OBSERVER_HOST", "0.0.0.0"),
+            observer_port=int(os.environ.get("MINEBOT_OBSERVER_PORT", "47894")),
         )
 
 

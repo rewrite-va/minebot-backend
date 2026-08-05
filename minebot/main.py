@@ -15,6 +15,7 @@ from minebot.bot.run_loop import run
 from minebot.bridge.client import ModBridge
 from minebot.bridge.entities import EntityTracker
 from minebot.bridge.inventory import InventoryTracker
+from minebot.bridge.observer import ObserverServer
 from minebot.bridge.self_position import SelfPositionTracker
 from minebot.config import BotConfig
 from minebot.llm.controller import LLMController
@@ -27,7 +28,10 @@ log.info("logging to %s", log_path)
 
 
 async def run_bot(config: BotConfig) -> None:
-    bridge = ModBridge(config.mod_host, config.mod_port)
+    observer = ObserverServer(config.observer_host, config.observer_port)
+    await observer.start()
+
+    bridge = ModBridge(config.mod_host, config.mod_port, observer)
     log.info("waiting for minebot-mod to connect on %s:%s", config.mod_host, config.mod_port)
     await bridge.connect()
 
@@ -54,6 +58,7 @@ async def run_bot(config: BotConfig) -> None:
         await run(bridge, actions, tracker, inventory, llm, config, movement, self_position, mining, combat)
     finally:
         await bridge.close()
+        await observer.close()
 
 
 def main() -> None:
