@@ -71,6 +71,10 @@ class MovementController:
         # target, so it can send a distinct "here is the X" message on
         # actual arrival instead of only ever confirming "going there".
         self._pending_arrival: asyncio.Future[None] | None = None
+        # Same single-slot shape as _pending_find, for !save chest's
+        # find_chest_result reply -- only one !save chest is ever in
+        # flight at a time (chat commands are dispatched one at a time).
+        self._pending_find_chest: asyncio.Future[dict] | None = None
 
     async def follow(self, sender: str | None, player_name: str | None = None) -> ActionResult:
         target_name = player_name if player_name else sender
@@ -95,28 +99,60 @@ class MovementController:
         await self.bridge.send_stop()
         return ActionResult(message="ok, stopped")
 
-    async def save(self, sender: str | None, name: str) -> ActionResult:
-        """Saves the *caller's* current position under `name`, not the
-        bot's own -- a player standing somewhere and typing "!save home"
-        means "remember where I'm standing", not "remember where the bot
-        happens to be" (found live: those two positions are rarely the
-        same -- the bot could be off following someone else, mid-!collect,
-        or just not have walked over yet). Resolved the same way !goto
-        resolves a player-name target, via EntityTracker's live position
-        mirror of the mod's own entity events.
+    async def save(self, sender: str | None, kind: str, name: str) -> ActionResult:
+        """Saves something under `name`, for later !goto -- `kind` picks
+        what: "location" saves the *caller's* current position (a player
+        standing somewhere and typing "!save location home" means
+        "remember where I'm standing", not "remember where the bot
+        happens to be" -- found live: those two positions are rarely the
+        same, the bot could be off following someone else, mid-!collect,
+        or just not have walked over yet); "chest" saves the position of
+        whichever chest the *caller* is currently looking at (resolved
+        mod-side via a real raycast from the caller's own eyes -- see
+        MinebotMod.runFindChest/LookingAt -- since only the mod has live
+        world/entity state to raycast against).
+
+        Both need the caller resolved to a live entity first (position
+        for "location", entity id for "chest" -- the mod raycasts, it
+        doesn't already know positions the way EntityTracker does), via
+        the same EntityTracker mirror !goto's player-name resolution uses.
         """
         if sender is None:
-            log.warning("save: no sender to resolve a position for")
-            return ActionResult(message="I don't know who's asking, so I don't know whose position to save")
+            log.warning("save: no sender to resolve for")
+            return ActionResult(message="I don't know who's asking, so I don't know what to save")
 
         caller = self.tracker.find_by_name(sender)
         if caller is None:
             log.warning("save: sender %r isn't a currently tracked player", sender)
             return ActionResult(message="I can't see you right now, try again once I can")
 
-        self.places.remember(name, caller.x, caller.y, caller.z)
-        log.info("saved %r at (%.1f, %.1f, %.1f) (caller=%s)", name, caller.x, caller.y, caller.z, sender)
-        return ActionResult(message=f"ok, saved this place as {name}")
+        if kind == "location":
+            self.places.remember(name, caller.x, caller.y, caller.z)
+            log.info("saved %r at (%.1f, %.1f, %.1f) (caller=%s)", name, caller.x, caller.y, caller.z, sender)
+            return ActionResult(message=f"ok, saved this place as {name}")
+
+        if kind == "chest":
+            found = asyncio.get_event_loop().create_future()
+            self._pending_find_chest = found
+            await self.bridge.send_find_chest(caller.id)
+            try:
+                result = await asyncio.wait_for(found, timeout=FIND_RESULT_TIMEOUT)
+            except asyncio.TimeoutError:
+                log.warning("save chest: no response from mod within %.0fs", FIND_RESULT_TIMEOUT)
+                return ActionResult(message="I couldn't find that chest (no response)")
+            finally:
+                self._pending_find_chest = None
+
+            if not result.get("found"):
+                log.info("save chest: %s isn't looking at a chest", sender)
+                return ActionResult(message="you don't seem to be looking at a chest")
+
+            x, y, z = result["x"], result["y"], result["z"]
+            self.places.remember(name, x, y, z)
+            log.info("saved chest %r at (%d, %d, %d) (caller=%s)", name, x, y, z, sender)
+            return ActionResult(message=f"ok, saved that chest as {name}")
+
+        return ActionResult(message=f"I don't know how to save a {kind!r} -- try \"location\" or \"chest\"")
 
     async def goto(self, sender: str | None, target: str | float, y: float | None = None, z: float | None = None) -> ActionResult:
         """Resolves `target` in order: explicit coordinates (all three
@@ -217,6 +253,11 @@ class MovementController:
         if self._pending_find is not None and not self._pending_find.done():
             self._pending_find.set_result(data)
 
+    def on_find_chest_result(self, data: dict) -> None:
+        """Called from the run loop for every find_chest_result event -- resolves save()'s pending future, if any."""
+        if self._pending_find_chest is not None and not self._pending_find_chest.done():
+            self._pending_find_chest.set_result(data)
+
     def on_arrived(self) -> None:
         """Called from the run loop for every `arrived` event (see
         MinebotMod's gotoArrived) -- resolves find()'s wait for actually
@@ -256,10 +297,14 @@ def register_movement_actions(registry: ActionRegistry, movement: MovementContro
     ))
     registry.register(Action(
         name="save",
-        description="Save the caller's current position under a name, for later !goto.",
+        description=(
+            "Save something under a name, for later !goto: \"location\" saves the caller's current position, "
+            "\"chest\" saves the position of the chest the caller is looking at."
+        ),
         handler=movement.save,
         params=[
-            ActionParam("name", "string", "Name to save this place as."),
+            ActionParam("kind", "string", "What to save: \"location\" or \"chest\"."),
+            ActionParam("name", "string", "Name to save it as."),
         ],
     ))
     registry.register(Action(

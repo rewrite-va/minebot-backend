@@ -34,6 +34,9 @@ class RecordingBridge:
     async def send_find(self, query, radius=64):
         self.sent.append(("find", {"query": query, "radius": radius}))
 
+    async def send_find_chest(self, entity_id):
+        self.sent.append(("find_chest", {"entity_id": entity_id}))
+
 
 def _add_player(tracker: EntityTracker, entity_id: int, name: str, x=0.0, y=0.0, z=0.0) -> None:
     tracker.handle_event(ModEvent(type="entity", data={"action": "add", "id": entity_id, "name": name, "x": x, "y": y, "z": z}))
@@ -159,7 +162,7 @@ async def test_stop_clears_the_followed_name_so_a_later_reconnect_does_not_resum
 
 
 @pytest.mark.asyncio
-async def test_save_saves_the_callers_position_not_the_bots(tmp_path):
+async def test_save_location_saves_the_callers_position_not_the_bots(tmp_path):
     places = PlaceMemory(tmp_path / "places.json")
     tracker = EntityTracker()
     _add_player(tracker, 7, "riterite", x=10.0, y=64.0, z=-5.0)
@@ -168,7 +171,7 @@ async def test_save_saves_the_callers_position_not_the_bots(tmp_path):
     bridge = RecordingBridge()
     movement = _movement(bridge, tracker=tracker, places=places, self_position=self_position)
 
-    result = await movement.save("riterite", "home")
+    result = await movement.save("riterite", "location", "home")
 
     place = places.get("home")
     assert place is not None
@@ -181,7 +184,7 @@ async def test_save_without_a_known_sender_reports_it_cannot(tmp_path):
     bridge = RecordingBridge()
     movement = _movement(bridge, tmp_path=tmp_path)
 
-    result = await movement.save(None, "home")
+    result = await movement.save(None, "location", "home")
 
     assert result.message is not None
     assert "don't know who" in result.message
@@ -192,10 +195,79 @@ async def test_save_for_an_untracked_sender_reports_it_cannot(tmp_path):
     bridge = RecordingBridge()
     movement = _movement(bridge, tmp_path=tmp_path)
 
-    result = await movement.save("someoneNotVisible", "home")
+    result = await movement.save("someoneNotVisible", "location", "home")
 
     assert result.message is not None
     assert "can't see you" in result.message
+
+
+@pytest.mark.asyncio
+async def test_save_with_an_unknown_kind_reports_it_cannot(tmp_path):
+    tracker = EntityTracker()
+    _add_player(tracker, 7, "riterite")
+    bridge = RecordingBridge()
+    movement = _movement(bridge, tracker=tracker, tmp_path=tmp_path)
+
+    result = await movement.save("riterite", "bogus", "home")
+
+    assert bridge.sent == []
+    assert "bogus" in result.message
+
+
+@pytest.mark.asyncio
+async def test_save_chest_sends_find_chest_and_saves_the_result(tmp_path):
+    places = PlaceMemory(tmp_path / "places.json")
+    tracker = EntityTracker()
+    _add_player(tracker, 7, "riterite")
+    bridge = RecordingBridge()
+    movement = _movement(bridge, tracker=tracker, places=places, tmp_path=tmp_path)
+
+    task = asyncio.ensure_future(movement.save("riterite", "chest", "stash"))
+    await asyncio.sleep(0)  # let save() send find_chest and start awaiting the result
+    movement.on_find_chest_result({"found": True, "x": 10, "y": 64, "z": -5})
+    result = await task
+
+    assert bridge.sent == [("find_chest", {"entity_id": 7})]
+    place = places.get("stash")
+    assert place is not None
+    assert (place.x, place.y, place.z) == (10, 64, -5)
+    assert result.message is not None
+
+
+@pytest.mark.asyncio
+async def test_save_chest_reports_when_the_caller_is_not_looking_at_a_chest(tmp_path):
+    tracker = EntityTracker()
+    _add_player(tracker, 7, "riterite")
+    bridge = RecordingBridge()
+    movement = _movement(bridge, tracker=tracker, tmp_path=tmp_path)
+
+    task = asyncio.ensure_future(movement.save("riterite", "chest", "stash"))
+    await asyncio.sleep(0)
+    movement.on_find_chest_result({"found": False})
+    result = await task
+
+    assert "chest" in result.message
+
+
+@pytest.mark.asyncio
+async def test_save_chest_times_out_if_the_mod_never_replies(tmp_path, monkeypatch):
+    monkeypatch.setattr(movement_module, "FIND_RESULT_TIMEOUT", 0.01)
+    tracker = EntityTracker()
+    _add_player(tracker, 7, "riterite")
+    bridge = RecordingBridge()
+    movement = _movement(bridge, tracker=tracker, tmp_path=tmp_path)
+
+    result = await movement.save("riterite", "chest", "stash")  # on_find_chest_result never called
+
+    assert "no response" in result.message
+
+
+@pytest.mark.asyncio
+async def test_on_find_chest_result_with_nothing_pending_is_ignored(tmp_path):
+    bridge = RecordingBridge()
+    movement = _movement(bridge, tmp_path=tmp_path)
+
+    movement.on_find_chest_result({"found": True, "x": 1, "y": 2, "z": 3})  # should not raise
 
 
 @pytest.mark.asyncio

@@ -157,11 +157,12 @@ async def _read_events(
     Fast-paths two kinds of event, both synchronously (no suspension
     point beyond the occasional `await` that only ever *sends*, never
     waits for a reply):
-    - find_result/arrived/dig_down_result/collect_result/query_result/
-      attack_result resolve a command handler's pending future the
-      instant they're read, since that handler may be suspended waiting
-      specifically for one of these (the original find_result deadlock
-      this pattern prevents -- see run()'s docstring).
+    - find_result/find_chest_result/arrived/dig_down_result/
+      collect_result/query_result/attack_result resolve a command
+      handler's pending future the instant they're read, since that
+      handler may be suspended waiting specifically for one of these
+      (the original find_result deadlock this pattern prevents -- see
+      run()'s docstring).
     - entity/inventory/position update their trackers immediately, and
       entity "add" additionally checks movement.on_entity_added (the
       !follow-resumes-after-reconnect logic) -- fast-pathing these here,
@@ -182,6 +183,8 @@ async def _read_events(
         log_timing(log, "read @ %.3f: type=%s", now(), event.type)
         if event.type == "find_result":
             movement.on_find_result(event.data)
+        elif event.type == "find_chest_result":
+            movement.on_find_chest_result(event.data)
         elif event.type == "arrived":
             movement.on_arrived()
         elif event.type == "dig_down_result":

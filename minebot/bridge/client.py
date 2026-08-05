@@ -179,6 +179,9 @@ class ModBridge:
     async def send_find(self, query: str, radius: int = 64) -> None:
         await self._send({"type": "find", "query": query, "radius": radius})
 
+    async def send_find_chest(self, entity_id: int) -> None:
+        await self._send({"type": "find_chest", "entity_id": entity_id})
+
     async def send_dig_down(self, count: int) -> None:
         await self._send({"type": "dig_down", "count": count})
 
