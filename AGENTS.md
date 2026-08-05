@@ -61,10 +61,25 @@ nothing until both of these happen:
 
 ```bash
 cd /home/colaila/git/mods/minebot-mod
-./gradlew build -x test
+./gradlew clean build -x test
 cp build/libs/minebot-mod-0.1.0+26.1.2.jar \
    "/mnt/c/Users/colaila/AppData/Roaming/PrismLauncher/instances/26.1.2 - v1 ritebot/minecraft/mods/minebot-mod-0.1.0+26.1.2.jar"
 ```
+
+**Use `clean build`, not a plain `build`.** Found live (twice): a plain
+`./gradlew build -x test` right after a fresh commit silently deployed
+a jar still baked from an *older* commit -- `generateBuildInfo` is
+configured to always rerun (`outputs.upToDateWhen { false }`), but some
+later task in the chain (`processResources`/`jar`) still incrementally
+reused stale output in practice, with no error or warning of any kind.
+Confirmed after the fact both times by unzipping the deployed jar's own
+`minebot-mod-build-info.properties` and finding it named an older
+commit than the one actually built. `clean build` forces every task to
+genuinely rerun, eliminating this whole class of silent-stale-jar bug
+rather than trying to spot it after the fact -- **verify the deployed
+jar's baked-in commit directly** (`unzip -p build/libs/minebot-mod-0.1.0+26.1.2.jar
+minebot-mod-build-info.properties`, compare against `git rev-parse HEAD`)
+after every build, not just after something looks wrong live.
 
 **Standing instruction: always run both of these commands yourself,
 every time a mod-side change is made** -- don't leave the jar built but
