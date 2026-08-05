@@ -4,6 +4,7 @@ __pycache__/
 *.egg-info/
 .venv/
 .env
+.env.server-logs
 msa_token.json
 logs/
 places.json

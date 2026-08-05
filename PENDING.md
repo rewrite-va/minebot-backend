@@ -271,10 +271,19 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
   > attack damage (`ItemAttributeModifiers`' `ATTACK_DAMAGE`, since
   > modern vanilla has no per-item damage field on `Item` at all) over
   > bare hands, per the explicit ask ("prefer bows, then melee").
-  > `BowShooter` (new) draws and fires a real bow using the same
-  > `keyUse`-hold mechanism `FoodEater`/`BlockBreaker` already
-  > established (a direct API call doesn't reliably work), always
-  > holding a full draw (`BowItem.MAX_DRAW_DURATION`, 20 ticks) for
+  > `BowShooter` (new) draws and fires a real bow via direct
+  > `MultiPlayerGameMode.useItem()`/`releaseUsingItem()` calls, tracking
+  > draw progress with its own local tick counter rather than polling
+  > `isUsingItem()`/`getTicksUsingItem()` (confirmed unreliable for the
+  > local player over the network) -- but still also holds the real
+  > `keyUse` keybind down for the draw's duration, the same mechanism
+  > `FoodEater`/`BlockBreaker` use, not to trigger the interaction (the
+  > direct calls do that) but because vanilla's own `Minecraft.
+  > handleKeybinds()` force-releases `isUsingItem()` every tick
+  > `keyUse.isDown()` is false -- see `FINDINGS.md`'s "Bow-drawing never
+  > actually fired an arrow" section for the full, long investigation
+  > this took to actually confirm. Always holding a full draw
+  > (`BowItem.MAX_DRAW_DURATION`, 20 ticks) for
   > maximum damage/accuracy rather than firing faster/weaker partial-
   > draw shots. A bow user keeps distance (`stopDistance` tracks
   > `BowItem.DEFAULT_RANGE`, 15 blocks) and shoots instead of closing to

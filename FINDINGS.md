@@ -3875,6 +3875,68 @@ event/bookkeeping needed) and immediately starts closing the distance
 to melee range instead of standing stranded at the old, now-wrong bow
 range.
 
+## Bow-drawing never actually fired an arrow -- root cause was vanilla's own handleKeybinds force-releasing isUsingItem every tick keyUse wasn't held down
+
+A very long live-debugging investigation (many iterations: draw state
+stuck at 0 ticks, "vibrating"/restarting every tick, a stall that
+confirmed `isUsingItem()` true for exactly one tick then permanently
+reverted false, switching the release call to `BowItem.releaseUsing`
+directly, suspecting `FoodEater`) kept finding real, individually-
+confirmed mechanism issues, but none of them were the actual cause.
+
+**Real root cause, confirmed via decompiled `Minecraft.handleKeybinds()`
+bytecode**: vanilla runs this method every tick `screen == null` (it is
+skipped entirely while ANY `Screen` is open -- confirmed live by the
+concrete clue that finally broke this open: opening the inventory or
+even just the ESC menu let the bow draw/fire normally in the
+background). Inside it: `if (player.isUsingItem() &&
+!options.keyUse.isDown()) gameMode.releaseUsingItem(player)` -- vanilla's
+own safety net for a real player letting go of right-click (or losing
+focus) mid-use. `BowShooter` always called `MultiPlayerGameMode.
+useItem()`/`releaseUsingItem()` directly and never called `Options.
+keyUse.setDown(true)` at all, on the (reasonable-looking, but wrong)
+assumption that a direct API call didn't need any keybind involvement
+since it doesn't go through `handleKeybinds()` to start with. Since
+`keyUse.isDown()` was therefore always false, **vanilla itself
+force-released our own draw, unconditionally, every single tick
+`isUsingItem()` was ever true** -- exactly the "confirms true for one
+tick, then permanently reverts false" pattern chased through this
+entire investigation.
+
+**Fix**: `BowShooter.tick()` now also calls `Options.keyUse.
+setDown(true)` for the draw's duration (cleared in `release()`), the
+same pattern `FoodEater`/`BlockBreaker` already use for their own real
+interactions. This doesn't trigger anything by itself -- the direct
+`useItem()`/`releaseUsing()` calls still do the real work -- it only
+stops vanilla's own `handleKeybinds()` from undoing it. Confirmed live:
+arrows now visibly consumed from inventory shot-over-shot, real damage
+landing, target actually dying.
+
+**Red herrings ruled out along the way, each confirmed by a real,
+deliberate test, worth recording since they're not obviously wrong in
+isolation:**
+- Server-side tick lag, anti-cheat, and the account/server itself --
+  ruled out by pulling the actual server log over SFTP
+  (`fetch_server_log.sh`, new, this repo's root -- reads connection
+  details from a gitignored `.env.server-logs` rather than a password
+  ever touching chat) and checking the installed plugin list (purely
+  cosmetic: `CustomPlayerModels`, `ElytraTrails`, `Jade`, `JEI`, etc.,
+  nothing combat/anti-cheat-related).
+- `FoodEater.maybeEat()` holding `keyUse` for its own eating logic --
+  a real, legitimate conflict in principle (it does run unconditionally
+  regardless of `ControlState.mode`, and does hold the same keybind),
+  and a live test (manual right-click bow-draw with `!stop` issued)
+  did fail the same way at the time -- but disabling `FoodEater`
+  entirely did NOT fix the bow on its own, proving it was never the
+  real cause, just a coincidental correlation from testing at a moment
+  when `FoodEater` also happened to be running. **Re-enabled** once the
+  real cause was found and fixed.
+- `MinebotInput` (replaces `LocalPlayer.input` every tick to drive bot
+  movement) -- confirmed via decompiled `Input`/`KeyboardInput` source
+  that this record only ever carries movement fields
+  (forward/backward/left/right/jump/shift/sprint), nothing related to
+  attack/use at all, so it structurally can't be involved.
+
 ## Known gaps / next steps
 
 - **Deploying a mod change requires a rebuild, a jar copy, AND a full
