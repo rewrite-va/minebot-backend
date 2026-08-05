@@ -12,8 +12,25 @@ from __future__ import annotations
 
 import logging
 import subprocess
+from datetime import datetime, timezone
 
 log = logging.getLogger("minebot.mod_version")
+
+
+def _format_built_at(built_at: str) -> str:
+    """Renders BuildInfo's ISO-8601 built_at ("2026-08-05T05:39:30.928Z")
+    as "v20260805 05.39.30" -- easier to read at a glance in the connect
+    log line than a raw ISO timestamp, while still sorting/comparing
+    naturally since it keeps the same year-month-day ordering. Falls back
+    to the raw string on anything unparseable (a malformed/placeholder
+    build info shouldn't crash the connect handshake over a display
+    nicety).
+    """
+    try:
+        parsed = datetime.fromisoformat(built_at.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except ValueError:
+        return built_at
+    return parsed.strftime("v%Y%m%d %H.%M.%S")
 
 
 def expected_commit(mod_repo_path: str | None) -> str | None:
@@ -33,7 +50,7 @@ def expected_commit(mod_repo_path: str | None) -> str | None:
 
 
 def check_hello(reported_commit: str, built_at: str, mod_repo_path: str | None) -> None:
-    log.info("minebot-mod connected: commit=%s built_at=%s", reported_commit, built_at)
+    log.info("backend: connected (%s, commit=%s)", _format_built_at(built_at), reported_commit)
 
     expected = expected_commit(mod_repo_path)
     if expected is None:
