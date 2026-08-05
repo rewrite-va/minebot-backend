@@ -160,9 +160,6 @@ class ModBridge:
             return
         await self._connection.send(json.dumps(payload))
 
-    async def send_goto(self, x: float, y: float, z: float, stop_distance: float = 2.0) -> None:
-        await self._send({"type": "goto", "x": x, "y": y, "z": z, "stop_distance": stop_distance})
-
     async def send_follow(self, entity_id: int, stop_distance: float = 2.0) -> None:
         await self._send({"type": "follow", "entity_id": entity_id, "stop_distance": stop_distance})
 
@@ -171,48 +168,3 @@ class ModBridge:
 
     async def send_chat(self, text: str) -> None:
         await self._send({"type": "chat", "text": text})
-
-    async def send_move_to_hotbar(self, slot: int, hotbar_slot: int) -> None:
-        await self._send({"type": "move_to_hotbar", "slot": slot, "hotbar_slot": hotbar_slot})
-
-    async def send_equip(self, slot: int) -> None:
-        await self._send({"type": "equip", "slot": slot})
-
-    async def send_drop(self, slot: int, count: int) -> None:
-        await self._send({"type": "drop", "slot": slot, "count": count})
-
-    async def send_give(self, entity_id: int, slot: int, count: int, stop_distance: float = 2.0) -> None:
-        await self._send({
-            "type": "give", "entity_id": entity_id, "slot": slot, "count": count, "stop_distance": stop_distance,
-        })
-
-    async def send_find(self, query: str, radius: int = 64) -> None:
-        await self._send({"type": "find", "query": query, "radius": radius})
-
-    async def send_find_chest(self, entity_id: int) -> None:
-        await self._send({"type": "find_chest", "entity_id": entity_id})
-
-    async def send_dig_down(self, count: int) -> None:
-        await self._send({"type": "dig_down", "count": count})
-
-    async def send_collect(self, query: str, radius: int = 64) -> None:
-        await self._send({"type": "collect", "query": query, "radius": radius})
-
-    async def send_attack(self, query: str | None, radius: int = 64) -> None:
-        await self._send({"type": "attack", "query": query, "radius": radius})
-
-    async def send_query(self, sub_type: str, arguments: list[str], key: str) -> None:
-        await self._send({"type": "query", "sub_type": sub_type, "arguments": arguments, "key": key})
-
-    async def send_debug_swap_test(self) -> None:
-        """Temporary !debug command -- see minebot-mod's runDebugSwapTest
-        and FINDINGS.md's "InventoryActions.moveToHotbar's local-only
-        swap genuinely desyncing the server's view of the held item"
-        section. Tests InventoryActions.moveToHotbar in isolation (no
-        mining involved at all): shift-clicks the diamond pickaxe out of
-        the hotbar into main storage first (a real, server-synced
-        container click), then calls moveToHotbar to bring it back into
-        hotbar slot 0 -- the exact mechanism suspected of desyncing the
-        server's view of the bot's held item from what other clients
-        actually see it holding."""
-        await self._send({"type": "debug_swap_test"})

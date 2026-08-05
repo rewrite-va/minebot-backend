@@ -58,29 +58,27 @@ class InventoryTracker:
         self._previous: dict[str, int] = {}
         self._current: dict[str, int] = {}
         # Plain callback list, not an asyncio.Event -- deliberately
-        # decoupled from any single consumer's own waiting mechanism.
-        # !collect's "did the count of item X actually go up" wait
-        # (MiningController) and the independent "announce any real gain
-        # to chat" observer (see run_loop.py's on_inventory_change) are
-        # two unrelated consumers of the same underlying signal ("the
-        # inventory just changed, gained_items() is worth checking
-        # again"), registered here rather than either one owning the
-        # other. Called synchronously, right after _current/_previous
-        # are updated, so every callback always sees fully up-to-date
-        # state by the time it runs.
+        # decoupled from any single consumer's own waiting mechanism, so
+        # more than one independent observer (currently just
+        # InventoryAnnouncer's "announce any real gain to chat") can react
+        # to the same underlying signal ("the inventory just changed,
+        # gained_items() is worth checking again") without either one
+        # owning the other. Called synchronously, right after
+        # _current/_previous are updated, so every callback always sees
+        # fully up-to-date state by the time it runs.
         self._on_change: list[Callable[[], None]] = []
 
     def add_change_listener(self, callback: Callable[[], None]) -> None:
         self._on_change.append(callback)
 
     def remove_change_listener(self, callback: Callable[[], None]) -> None:
-        """Callers that add a short-lived listener (e.g. MiningController's
-        per-collect-attempt wait) must remove it once they're done waiting,
-        or the list grows unbounded across a long-running process -- this
-        is a plain list.remove, so removing something never added (or
-        already removed) would raise; every caller is expected to pair
-        add/remove in a try/finally around its own wait, same shape as
-        any other resource-cleanup pattern in this codebase.
+        """Callers that add a short-lived listener must remove it once
+        they're done waiting, or the list grows unbounded across a
+        long-running process -- this is a plain list.remove, so removing
+        something never added (or already removed) would raise; every
+        caller is expected to pair add/remove in a try/finally around its
+        own wait, same shape as any other resource-cleanup pattern in
+        this codebase.
         """
         self._on_change.remove(callback)
 
@@ -107,13 +105,11 @@ class InventoryTracker:
         # pure slot-position swap (a hotbar tool-switch) between a real
         # pickup and whenever something checks can evict that pickup's
         # "gained" status even though the item is still sitting right
-        # there in inventory (confirmed live chasing a report of !give
-        # saying "I haven't picked up anything" right after a !collect
-        # pickup). Callers that need to reliably confirm "did item X's
-        # count actually increase since some earlier point" (MiningController.
-        # collect, notably) should snapshot count_of(item) themselves
-        # before the action and compare directly afterward, not rely on
-        # gained_items() alone across a gap of unknown length.
+        # there in inventory. Callers that need to reliably confirm "did
+        # item X's count actually increase since some earlier point"
+        # should snapshot count_of(item) themselves before the action and
+        # compare directly afterward, not rely on gained_items() alone
+        # across a gap of unknown length.
         log.debug("inventory event: previous=%s current=%s gained=%s", self._previous, self._current, self.gained_items())
         for callback in self._on_change:
             callback()

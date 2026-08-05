@@ -1,10 +1,10 @@
 """Tracks the bot's own live position, fed from the mod's `position`
 events (broadcast every client tick -- see minebot-mod's
-broadcastPositionEvent). Nothing tracked this before now; run_loop.py
-only ever logged position events at debug level and threw them away --
-needed as soon as any action wants to know "where am I right now"
-(e.g. InventoryController._closest_player, resolving !give's default
-recipient).
+broadcastPositionEvent). Also carries the bot's own account name
+(own_name), used by run_loop.py to recognize and ignore the bot's own
+chat messages (see FINDINGS.md's "chat self-echo loop" section) --
+without that, a command's own reply gets heard as a fresh chat message
+the same as anyone else's.
 """
 
 from __future__ import annotations

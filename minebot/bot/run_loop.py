@@ -17,8 +17,6 @@ import asyncio
 import logging
 
 from minebot.actions.registry import ActionRegistry
-from minebot.bot.combat import CombatController
-from minebot.bot.mining import MiningController
 from minebot.bot.movement import MovementController
 from minebot.bridge.client import ModBridge, ModEvent
 from minebot.bridge.entities import EntityTracker
@@ -42,43 +40,33 @@ async def run(
     config: BotConfig,
     movement: MovementController,
     self_position: SelfPositionTracker,
-    mining: MiningController,
-    combat: CombatController,
 ) -> None:
     """Splits reading the mod's events from processing them into two
-    concurrent tasks joined by a queue -- found live that a single
-    combined loop deadlocks itself: !find's handler suspends the very
-    same coroutine that reads bridge.events(), awaiting a find_result
-    event that can now never be read off the socket to unblock it (the
-    mod actually replies within milliseconds -- confirmed with
-    monotonic-clock instrumentation showing the reply sitting fully
-    received on the wire for a full 10 seconds, unread, until find()'s own
-    timeout gave up and the loop finally got back around to it).
+    concurrent tasks joined by a queue -- found live (back when !find
+    existed) that a single combined loop can deadlock itself: a handler
+    that suspends awaiting a later event can starve the very coroutine
+    that reads bridge.events(), since nothing else is left to read the
+    reply that would unblock it.
 
     _read_events (below) never blocks on processing -- it only ever
     awaits the next raw event and immediately either fast-paths it or
-    queues it. State-tracking events (entity/inventory/position) and the
-    various pending-future resolvers (find_result/arrived/
-    dig_down_result/collect_progress/collect_result) are all fast-pathed
-    synchronously in _read_events itself, so every command handler always
-    sees fully up-to-date tracker state regardless of how concurrently
-    chat commands end up scheduled (see the chat-command-cancellation
-    note below for why that matters).
+    queues it. State-tracking events (entity/inventory/position) are
+    fast-pathed synchronously in _read_events itself, so every command
+    handler always sees fully up-to-date tracker state regardless of how
+    concurrently chat commands end up scheduled (see the
+    chat-command-cancellation note below for why that matters).
 
     Chat commands are dispatched as their own cancellable task, not
-    awaited inline -- reported live: a long-running !collect left the
-    bot unresponsive to !follow/!stop typed while it was still running,
-    since a single earlier version of this loop only ever processed one
-    chat command fully before looking at the next. A newly-arrived chat
-    command now cancels whatever chat-command task is still in flight
-    before starting its own (see _dispatch_chat_command/
-    current_command_task below) -- "stop collecting, follow me instead"
-    now actually interrupts the collect() call, and the *mod*-side goal
-    it was driving gets naturally superseded too, since ControlState's
-    setGoto/setFollow/setCollect/etc. all unconditionally overwrite
-    whatever mode was previously active (confirmed in minebot-mod's
-    ControlState.java -- there is no separate "cancel current goal first"
-    step needed mod-side, a fresh command already wins outright).
+    awaited inline -- a long-running command must not leave the bot
+    unresponsive to !follow/!stop typed while it's still running. A
+    newly-arrived chat command cancels whatever chat-command task is
+    still in flight before starting its own (see _dispatch_chat_command/
+    current_command_task below) -- the *mod*-side goal a superseded
+    command was driving gets naturally superseded too, since
+    ControlState's setFollow/etc. unconditionally overwrite whatever mode
+    was previously active (confirmed in minebot-mod's ControlState.java --
+    there is no separate "cancel current goal first" step needed
+    mod-side, a fresh command already wins outright).
 
     This used to be unsafe for a different reason (see FINDINGS.md's
     "background-task approach... rejected" note): backgrounding a chat
@@ -94,7 +82,7 @@ async def run(
     finish executing in.
     """
     queue: asyncio.Queue[ModEvent] = asyncio.Queue()
-    reader = asyncio.ensure_future(_read_events(bridge, movement, mining, combat, tracker, inventory, self_position, queue))
+    reader = asyncio.ensure_future(_read_events(bridge, movement, tracker, inventory, self_position, queue))
     current_command_task: asyncio.Task | None = None
 
     try:
@@ -142,8 +130,6 @@ async def run(
 async def _read_events(
     bridge: ModBridge,
     movement: MovementController,
-    mining: MiningController,
-    combat: CombatController,
     tracker: EntityTracker,
     inventory: InventoryTracker,
     self_position: SelfPositionTracker,
@@ -154,48 +140,21 @@ async def _read_events(
     block on anything that itself waits for a *later* event (that's
     exactly the deadlock run()'s docstring describes).
 
-    Fast-paths two kinds of event, both synchronously (no suspension
-    point beyond the occasional `await` that only ever *sends*, never
-    waits for a reply):
-    - find_result/find_chest_result/arrived/dig_down_result/
-      collect_result/query_result/attack_result resolve a command
-      handler's pending future the instant they're read, since that
-      handler may be suspended waiting specifically for one of these
-      (the original find_result deadlock this pattern prevents -- see
-      run()'s docstring).
-    - entity/inventory/position update their trackers immediately, and
-      entity "add" additionally checks movement.on_entity_added (the
-      !follow-resumes-after-reconnect logic) -- fast-pathing these here,
-      not through the queue, is what makes chat-command dispatch safe to
-      run as independent concurrent tasks (see run()'s own docstring):
-      every tracker read a command handler ever does is guaranteed
-      current as of every event received so far, regardless of which
-      order concurrently-running command tasks happen to finish in.
-
-    item_drop (ground-truth "a real item appeared/disappeared nearby",
-    independent of inventory) is intentionally *not* handled here at
-    all yet -- nothing currently consumes it; !collect's own drop
-    confirmation reads InventoryTracker directly instead (see
-    MiningController.collect's docstring). Left as a known gap/future
-    hook rather than silently dropped -- see _process_event.
+    Fast-paths state-tracking events synchronously (no suspension point
+    beyond the occasional `await` that only ever *sends*, never waits for
+    a reply): entity/inventory/position update their trackers
+    immediately, and entity "add" additionally checks
+    movement.on_entity_added (the !follow-resumes-after-reconnect logic)
+    -- fast-pathing these here, not through the queue, is what makes
+    chat-command dispatch safe to run as independent concurrent tasks
+    (see run()'s own docstring): every tracker read a command handler
+    ever does is guaranteed current as of every event received so far,
+    regardless of which order concurrently-running command tasks happen
+    to finish in.
     """
     async for event in bridge.events():
         log_timing(log, "read @ %.3f: type=%s", now(), event.type)
-        if event.type == "find_result":
-            movement.on_find_result(event.data)
-        elif event.type == "find_chest_result":
-            movement.on_find_chest_result(event.data)
-        elif event.type == "arrived":
-            movement.on_arrived()
-        elif event.type == "dig_down_result":
-            mining.on_dig_down_result(event.data)
-        elif event.type == "collect_result":
-            mining.on_collect_result(event.data)
-        elif event.type == "query_result":
-            mining.on_query_result(event.data)
-        elif event.type == "attack_result":
-            combat.on_attack_result(event.data)
-        elif event.type == "entity":
+        if event.type == "entity":
             log.debug("entity event: %s", event.data)
             tracker.handle_event(event)
             if event.data.get("action") == "add":
@@ -252,18 +211,16 @@ async def _dispatch_chat_command(
     """Cancels whatever chat-command task is still running, then starts
     this one as a fresh task and returns it (the new current_command_task
     for run()'s next iteration to track). A cancelled command's own
-    cleanup still runs (see MiningController.collect's `finally` block,
-    for instance) -- asyncio.CancelledError propagates through
-    ActionRegistry.dispatch_chat's `except Exception` untouched (it's a
-    BaseException, not caught there), so a superseded !collect/!digDown/
-    !find unwinds cleanly rather than leaking its pending-future state.
+    cleanup still runs (any handler with a `finally` block still gets it)
+    -- asyncio.CancelledError propagates through ActionRegistry.
+    dispatch_chat's `except Exception` untouched (it's a BaseException,
+    not caught there), so a superseded command unwinds cleanly rather
+    than leaking any pending state.
 
     Only one command task is ever tracked at a time -- chat commands are
     typed by a human one at a time in practice, so "the newest command
-    wins, cancelling whatever was running" is the intended behavior (per
-    the live report this exists to fix: "!collect 10, in the middle I
-    say follow, do that, and stop collecting"), not a queue of commands
-    to run one after another.
+    wins, cancelling whatever was running" is the intended behavior, not
+    a queue of commands to run one after another.
     """
     sender = event.data.get("sender")
     text = event.data.get("text", "")
@@ -273,22 +230,15 @@ async def _dispatch_chat_command(
         # The mod hears its own chat messages the same as anyone else's
         # (they go through the normal server chat broadcast) -- without
         # this guard, a command's own error reply ("something went wrong
-        # running !find") got re-parsed as a fresh !find with no args,
+        # running !follow") got re-parsed as a fresh command with no args,
         # which itself errored and replied again, forever (found live: an
         # infinite crash loop from a single mistyped command). Checked
         # *before* cancelling current_command_task, not just before
-        # dispatch -- reported live: !collect's own progress replies
-        # ("I got a cobblestone (3 total)") each cancelled the very
-        # !collect task that sent them, since the old code cancelled
-        # unconditionally for every chat event and only skipped
-        # re-dispatching afterward. collect() kept counting only 1/4
-        # confirmed gains while the mod-side ControlState.COLLECT goal
-        # (never told to stop -- nothing cancels *that*, see this
-        # function's own docstring) kept mining for real, producing
-        # further genuine drops that inventory_announcer reported
-        # independently -- looking like a completed !collect 4 in chat
-        # while the actual counted total was wrong and no further
-        # collect_result confirmation was ever awaited.
+        # dispatch -- a long-running command's own progress replies
+        # cancelling the very task that sent them would corrupt whatever
+        # state that task was tracking, since the mod-side goal it was
+        # driving is never told to stop on its own (nothing cancels
+        # *that*, see this function's own docstring).
         return current_command_task
 
     if current_command_task is not None and not current_command_task.done():

@@ -32,29 +32,19 @@ async def test_send_methods_produce_correctly_shaped_json():
     async with websockets.connect(f"ws://127.0.0.1:{port}") as mod_client:
         await connect_task  # now resolves, since a connection just arrived
 
-        await bridge.send_goto(1.0, 2.0, 3.0, stop_distance=1.5)
         await bridge.send_follow(42, stop_distance=3.0)
         await bridge.send_stop()
         await bridge.send_chat("hello")
-        await bridge.send_move_to_hotbar(12, 3)
-        await bridge.send_equip(5)
-        await bridge.send_drop(5, 2)
-        await bridge.send_give(42, 5, 2, stop_distance=1.5)
 
-        for _ in range(8):
+        for _ in range(3):
             received.append(json.loads(await mod_client.recv()))
 
         await bridge.close()
 
     assert received == [
-        {"type": "goto", "x": 1.0, "y": 2.0, "z": 3.0, "stop_distance": 1.5},
         {"type": "follow", "entity_id": 42, "stop_distance": 3.0},
         {"type": "stop"},
         {"type": "chat", "text": "hello"},
-        {"type": "move_to_hotbar", "slot": 12, "hotbar_slot": 3},
-        {"type": "equip", "slot": 5},
-        {"type": "drop", "slot": 5, "count": 2},
-        {"type": "give", "entity_id": 42, "slot": 5, "count": 2, "stop_distance": 1.5},
     ]
 
 
