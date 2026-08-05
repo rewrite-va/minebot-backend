@@ -4,7 +4,7 @@ Python brain/controller for a Minecraft bot. See `FINDINGS.md` for the
 full architecture writeup (why this talks to a companion Fabric mod over
 a local WebSocket instead of speaking the Minecraft protocol directly).
 
-## Two repos, one bot
+## Three repos, one bot
 
 - **This repo** (`minebot`) -- the Python backend. Runs the control-channel
   WebSocket *server*; connects, dispatches chat commands/LLM tool calls,
@@ -13,6 +13,13 @@ a local WebSocket instead of speaking the Minecraft protocol directly).
   repo). Runs inside a real Minecraft client logged into the bot's
   account. The only thing that actually speaks the Minecraft protocol;
   connects *out* to this backend as a WebSocket client.
+- **`/home/colaila/git/minebot-frontend`** -- a React/TypeScript/Tailwind
+  live viewer (separate repo) for the wire messages flowing between this
+  backend and minebot-mod. Connects to this backend's `ObserverServer`
+  (`minebot/bridge/observer.py`, a separate WebSocket port from the
+  control channel itself -- `MINEBOT_OBSERVER_PORT`, default 47894), a
+  read-only broadcast of every message sent/received. Purely observational
+  -- has no way to send commands or affect the bot.
 
 ## Important folders
 

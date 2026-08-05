@@ -3718,6 +3718,55 @@ established, since `!save` is a chat command and only one is ever
 dispatched at a time. `MovementController._pending_find_chest` is the
 same single-slot pending-future pattern `_pending_find` already uses.
 
+## A separate observer WebSocket for a live wire-message viewer (minebot-frontend)
+
+A third repo, `minebot-frontend` (React/TypeScript/Tailwind), wants to
+show every wire message flowing between this backend and minebot-mod
+live in a browser -- not from the log files (gitignored, local-only,
+and only timestamped at all when `DEBUG=true`; see `timing.py`'s own
+docstring), a real live push.
+
+**New, separate server, not reusing the control channel.** `ModBridge`'s
+own WebSocket server (`bridge/client.py`) only ever expects exactly one
+connection that matters -- the mod itself; `events()`'s reconnect
+handling is explicitly built around "there is one connection, and it
+may occasionally drop and come back," not "many independent clients."
+Rather than bolt frontend-viewer semantics onto that, `ObserverServer`
+(new, `minebot/bridge/observer.py`) is its own WebSocket server on a
+separate port (`MINEBOT_OBSERVER_PORT`, default 47894, alongside the
+existing `MINEBOT_MOD_PORT` 47893) -- any number of browser tabs can
+connect, and zero connected is the common case (nobody has the frontend
+open most of the time) and costs nothing (`broadcast` no-ops immediately
+if `self._connections` is empty).
+
+**Hooked at the two real chokepoints every wire message already passes
+through.** `ModBridge._send` (every command Python sends) and
+`ModBridge._parse_event` (every event the mod sends back) are the only
+two places a wire message exists as a plain dict before being
+serialized/after being deserialized -- `ObserverServer.broadcast` is
+called from both, right next to the existing `log_timing` calls,
+covering both directions (Python->mod and mod->Python) from the same
+two spots that already had everything needed to log them. `ModBridge`
+holds an optional `ObserverServer` (`None` if not configured, e.g. in
+every existing test that constructs a bare `ModBridge` without one) --
+every call site already treats "no observer" the same as "no observers
+connected," so passing `None` doesn't need special-casing beyond the
+constructor's own default.
+
+**Deliberately fire-and-forget, never on the hot path.** `broadcast` is
+a plain (non-async) method that schedules a send to each connected
+client via `asyncio.ensure_future` and returns immediately -- a slow or
+stuck browser tab must never be able to backpressure real command
+dispatch or event processing, the actual game-facing behavior this
+whole project exists for. A send that fails (client disconnected
+mid-flight) is caught and logged at debug, not surfaced anywhere else.
+
+**Wire shape sent to observers**: `{"direction":"sent"|"received","message":{...the original message, "type" included...},"timestamp":<wall-clock float>}`.
+Uses `time.time()` (wall clock) rather than `bridge/timing.py`'s
+monotonic `now()` -- a live viewer wants to display a real clock time,
+not an offset from process start that's meaningless without knowing
+when the process itself started.
+
 ## Known gaps / next steps
 
 - **Deploying a mod change requires a rebuild, a jar copy, AND a full
