@@ -98,16 +98,28 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
   **Want it?**
   > no
 
-- ✅ **`!rememberHere`** / **`!goToRememberedPlace`** -- save the bot's
-  current location under a name, and later walk back to it by that name.
-  → **`remember`**, `movement.py:74`, + resolved as part of **`goto`**'s
-  chain, `movement.py:84` (commit `c75685b`). Backed by
-  `minebot/places.py`'s `PlaceMemory` (new: JSON-backed, `places.json`,
-  gitignored -- the first persistence layer in this project). mindcraft
-  ref: `actions.js:161` / `actions.js:171`, backed by `agent.memory_bank`
-  (in-memory + persisted, not skills.js).
-  **Want it?** already done, with the shorter `!remember <name>` /
+- ✅ **`!rememberHere`** / **`!goToRememberedPlace`** -- save a location
+  under a name, and later walk back to it by that name. → **`save`**,
+  `movement.py:98` + resolved as part of **`goto`**'s chain,
+  `movement.py:121`. Backed by `minebot/places.py`'s `PlaceMemory` (JSON-
+  backed, `places.json`, gitignored -- the first persistence layer in
+  this project). mindcraft ref: `actions.js:161` / `actions.js:171`,
+  backed by `agent.memory_bank` (in-memory + persisted, not skills.js).
+  **Want it?** already done, with the shorter `!save <name>` /
   `!goto <name>` aliases you asked for (not the longer mindcraft names).
+  Renamed from `!remember` to `!save` since it saves the *caller's*
+  position, not the bot's own.
+  >
+  > **Refactored again**: `!save` now takes a `kind` argument --
+  > `!save location <name>` is the original behavior (caller's current
+  > position); `!save chest <name>` saves the position of the chest the
+  > *caller* is currently looking at, resolved via a real raycast
+  > mod-side from the caller's own eyes/view direction (`LookingAt.
+  > blockPos`, `minebot-mod`'s new standalone raycast utility -- see
+  > `FINDINGS.md`). Both kinds land in the same `PlaceMemory`/`!goto`
+  > flow, since a chest is still just an x/y/z as far as that's
+  > concerned. Wire protocol: `{"type":"find_chest","entity_id":..}` ->
+  > `find_chest_result` (`found`, `x`/`y`/`z` on success).
 
 - ⬜ **`!goToBed`** -- walk to the nearest bed and sleep in it. mindcraft
   ref: `actions.js:332`, → `skills.goToBed`, `skills.js:1543`. No

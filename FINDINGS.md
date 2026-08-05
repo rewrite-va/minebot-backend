@@ -3662,6 +3662,62 @@ handler/params as `!attack` -- `ActionRegistry`'s plain name-keyed dict
 has no dedicated alias concept, so two full `Action` entries sharing one
 handler is the simplest way to get a second name without inventing one.
 
+## !save refactored to take a kind (location|chest), and LookingAt extracted as a reusable raycast utility
+
+`!save <name>` (the caller's current position) became `!save <kind> <name>`
+-- `!save location a` is the old behavior unchanged; `!save chest a`
+saves the position of whichever chest the *caller* is currently looking
+at, not any chest near the bot.
+
+**"What block is the caller looking at" needed a real per-player
+raycast, which had existed once before and been deliberately deleted.**
+An earlier `!debug` implementation (`ControlState.Mode.DEBUG_BREAK`,
+long since removed -- see the "cobblestone drops confirmed working"
+section above) raycast from the chat sender's own eyes specifically to
+test block-breaking against a real player's aim rather than the bot's
+own unfocused window's crosshair, using `Level.clip(ClipContext)` from
+`Entity.getEyePosition()`/`getViewVector()` -- ordinary, real,
+server-synced entity state available for *any* visible entity, not just
+the bot's own `LocalPlayer`. That whole mechanism was intentionally
+deleted once `!debug` was redesigned into a narrower hotbar-swap test
+with no raycast involved at all. `!save chest` needs the exact same
+capability again, so rather than re-deriving it inline a second time,
+it's pulled out as a real standalone utility this time: `LookingAt.
+blockPos(Entity, ClientLevel, maxDistance)` (new,
+`minebot/mod/LookingAt.java`) -- a plain static method with no
+mode/tick-loop involvement, since (unlike the old `!debug`) this is a
+single instant lookup, not something that needs per-tick continuation.
+Intended to be reused again for PENDING.md's own planned `!look`/`!use`
+commands, both of which will need the same "what is this entity looking
+at" question answered.
+
+**Resolution is mod-side, not Python-side, for the same reason `!find`/
+`!collect`/`!attack` all are.** `EntityTracker` only mirrors position
+(x/y/z) for tracked players -- yaw/pitch were never broadcast, since
+nothing needed them before this. Rather than adding yaw/pitch to the
+`entity` wire event and reimplementing a raycast in Python (which has no
+access to real chunk/block data at all -- the mod is the only thing
+that ever touches the actual Minecraft world), `!save chest` sends the
+caller's already-known entity id (`MovementController.save`, resolved
+via the same `EntityTracker.find_by_name` lookup `!goto`'s player-name
+case already uses) and lets the mod do the real lookup: `MinebotMod.
+handleFindChest`/`runFindChest` resolves the id back to a live `Entity`
+via `level.getEntity(id)`, raycasts via `LookingAt.blockPos` using
+`FIND_CHEST_MAX_DISTANCE` (4.5 blocks -- matches `BlockBreaker`/
+`DoorOpener`'s own real-interaction-reach convention), and confirms the
+hit is actually a chest (`instanceof ChestBlock`, which also covers
+`TrappedChestBlock` since it extends `ChestBlock`) before reporting
+success. Same thread-hop-to-the-tick-thread pattern `handleFind` already
+uses (`Minecraft.getInstance().execute(...)`), for the same reason:
+iterating live entities/chunks off the network thread is unsafe.
+
+**Wire protocol**: `{"type":"find_chest","entity_id":42}` -> a single
+fire-and-forget `find_chest_result` event (`found`, `x`/`y`/`z` on
+success) -- same one-in-flight-at-a-time shape `find_result` already
+established, since `!save` is a chat command and only one is ever
+dispatched at a time. `MovementController._pending_find_chest` is the
+same single-slot pending-future pattern `_pending_find` already uses.
+
 ## Known gaps / next steps
 
 - **Deploying a mod change requires a rebuild, a jar copy, AND a full
