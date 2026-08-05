@@ -12,22 +12,27 @@ from __future__ import annotations
 
 import logging
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 log = logging.getLogger("minebot.mod_version")
+
+_LOCAL_TZ = ZoneInfo("America/Los_Angeles")
 
 
 def _format_built_at(built_at: str) -> str:
     """Renders BuildInfo's ISO-8601 built_at ("2026-08-05T05:39:30.928Z")
-    as "v20260805 05.39.30" -- easier to read at a glance in the connect
-    log line than a raw ISO timestamp, while still sorting/comparing
-    naturally since it keeps the same year-month-day ordering. Falls back
-    to the raw string on anything unparseable (a malformed/placeholder
-    build info shouldn't crash the connect handshake over a display
-    nicety).
+    as "v20260804 22.39.30" (Pacific time, matching the user's own local
+    clock -- confirmed live that the UTC rendering this used to produce
+    read as "incorrect" at a glance) -- easier to read than a raw ISO
+    timestamp in the connect log line, while still sorting/comparing
+    naturally since it keeps the same year-month-day ordering. Falls
+    back to the raw string on anything unparseable (a malformed/
+    placeholder build info shouldn't crash the connect handshake over a
+    display nicety).
     """
     try:
-        parsed = datetime.fromisoformat(built_at.replace("Z", "+00:00")).astimezone(timezone.utc)
+        parsed = datetime.fromisoformat(built_at.replace("Z", "+00:00")).astimezone(_LOCAL_TZ)
     except ValueError:
         return built_at
     return parsed.strftime("v%Y%m%d %H.%M.%S")

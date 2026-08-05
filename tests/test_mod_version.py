@@ -63,7 +63,7 @@ def test_check_hello_does_not_raise_when_no_repo_path_configured():
 
 
 def test_format_built_at_renders_a_readable_version_string():
-    assert _format_built_at("2026-08-04T22:35:51.123Z") == "v20260804 22.35.51"
+    assert _format_built_at("2026-08-05T05:35:51.123Z") == "v20260804 22.35.51"
 
 
 def test_format_built_at_falls_back_to_the_raw_string_on_bad_input():
@@ -72,6 +72,6 @@ def test_format_built_at_falls_back_to_the_raw_string_on_bad_input():
 
 def test_check_hello_logs_a_readable_connected_line(caplog):
     with caplog.at_level("INFO"):
-        check_hello("abc123", "2026-08-04T22:35:51.123Z", None)
+        check_hello("abc123", "2026-08-05T05:35:51.123Z", None)
 
     assert any("backend: connected (v20260804 22.35.51" in record.message for record in caplog.records)
