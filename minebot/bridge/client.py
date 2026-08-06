@@ -166,5 +166,11 @@ class ModBridge:
     async def send_stop(self) -> None:
         await self._send({"type": "stop"})
 
+    async def send_kill(self, query: str | None = None) -> None:
+        await self._send({"type": "kill", "query": query})
+
+    async def send_defend(self, entity_id: int | None = None) -> None:
+        await self._send({"type": "defend", "entity_id": entity_id})
+
     async def send_chat(self, text: str) -> None:
         await self._send({"type": "chat", "text": text})

@@ -30,16 +30,6 @@ class MovementController:
     def __init__(self, bridge: ModBridge, tracker: EntityTracker) -> None:
         self.bridge = bridge
         self.tracker = tracker
-        # The mod's FOLLOW goal is pinned to a fixed entity ID, but a
-        # player who disconnects and reconnects gets a brand new one --
-        # the old id then never resolves again and the bot just stands
-        # idle forever with no error (found live: !follow silently
-        # stopped working the moment the followed player rejoined).
-        # Tracking the *name* we're supposed to be following (as opposed
-        # to just fire-and-forgetting the id to the mod) lets
-        # on_entity_added re-issue `follow` with the fresh id the moment
-        # that name reappears.
-        self._following_name: str | None = None
 
     async def follow(self, sender: str | None, player_name: str | None = None) -> ActionResult:
         target_name = player_name if player_name else sender
@@ -54,27 +44,13 @@ class MovementController:
             log.warning("follow: no known entity named %s (not currently visible?)", target_name)
             return ActionResult(message=f"I can't see {target_name}")
 
-        self._following_name = target_name
         log.info("starting follow of %s (entity %d)", target_name, entity.id)
         await self.bridge.send_follow(entity.id, stop_distance=FOLLOW_STOP_DISTANCE)
         return ActionResult(message=f"ok, following {target_name}")
 
     async def stop(self, sender: str | None) -> ActionResult:
-        self._following_name = None
         await self.bridge.send_stop()
         return ActionResult(message="ok, stopped")
-
-    async def on_entity_added(self, name: str | None, entity_id: int) -> None:
-        """Called from the run loop for every `entity` "add" event -- if
-        the entity that just appeared is the player we're supposed to be
-        following, re-sends `follow` with their fresh id so a
-        disconnect/reconnect doesn't silently strand the goal on an id
-        that will never resolve again.
-        """
-        if name is None or name != self._following_name:
-            return
-        log.info("resuming follow of %s after reconnect (new entity %d)", name, entity_id)
-        await self.bridge.send_follow(entity_id, stop_distance=FOLLOW_STOP_DISTANCE)
 
 
 def register_movement_actions(registry: ActionRegistry, movement: MovementController) -> None:

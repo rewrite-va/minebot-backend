@@ -17,7 +17,6 @@ import asyncio
 import logging
 
 from minebot.actions.registry import ActionRegistry
-from minebot.bot.movement import MovementController
 from minebot.bridge.client import ModBridge, ModEvent
 from minebot.bridge.entities import EntityTracker
 from minebot.bridge.inventory import InventoryTracker
@@ -38,7 +37,6 @@ async def run(
     inventory: InventoryTracker,
     llm: LLMController,
     config: BotConfig,
-    movement: MovementController,
     self_position: SelfPositionTracker,
 ) -> None:
     """Splits reading the mod's events from processing them into two
@@ -72,17 +70,17 @@ async def run(
     "background-task approach... rejected" note): backgrounding a chat
     command's *entire* dispatch, including the tracker updates it used to
     read/write inline via _process_event, could let a later entity event
-    race ahead of an earlier chat command's own state mutations (e.g.
-    !follow's _following_name assignment). That hazard is gone now that
-    entity/inventory/position events are fast-pathed synchronously in
-    _read_events instead of flowing through chat-command-adjacent
-    concurrency at all -- a command handler that runs later always sees
-    a tracker state that's already fully caught up to every event
-    received so far, independent of whichever order commands themselves
-    finish executing in.
+    race ahead of an earlier chat command's own tracker reads (e.g.
+    !follow resolving a player name via EntityTracker.find_by_name). That
+    hazard is gone now that entity/inventory/position events are
+    fast-pathed synchronously in _read_events instead of flowing through
+    chat-command-adjacent concurrency at all -- a command handler that
+    runs later always sees a tracker state that's already fully caught up
+    to every event received so far, independent of whichever order
+    commands themselves finish executing in.
     """
     queue: asyncio.Queue[ModEvent] = asyncio.Queue()
-    reader = asyncio.ensure_future(_read_events(bridge, movement, tracker, inventory, self_position, queue))
+    reader = asyncio.ensure_future(_read_events(bridge, tracker, inventory, self_position, queue))
     current_command_task: asyncio.Task | None = None
 
     try:
@@ -129,7 +127,6 @@ async def run(
 
 async def _read_events(
     bridge: ModBridge,
-    movement: MovementController,
     tracker: EntityTracker,
     inventory: InventoryTracker,
     self_position: SelfPositionTracker,
@@ -143,22 +140,18 @@ async def _read_events(
     Fast-paths state-tracking events synchronously (no suspension point
     beyond the occasional `await` that only ever *sends*, never waits for
     a reply): entity/inventory/position update their trackers
-    immediately, and entity "add" additionally checks
-    movement.on_entity_added (the !follow-resumes-after-reconnect logic)
-    -- fast-pathing these here, not through the queue, is what makes
-    chat-command dispatch safe to run as independent concurrent tasks
-    (see run()'s own docstring): every tracker read a command handler
-    ever does is guaranteed current as of every event received so far,
-    regardless of which order concurrently-running command tasks happen
-    to finish in.
+    immediately -- fast-pathing these here, not through the queue, is
+    what makes chat-command dispatch safe to run as independent
+    concurrent tasks (see run()'s own docstring): every tracker read a
+    command handler ever does is guaranteed current as of every event
+    received so far, regardless of which order concurrently-running
+    command tasks happen to finish in.
     """
     async for event in bridge.events():
         log_timing(log, "read @ %.3f: type=%s", now(), event.type)
         if event.type == "entity":
             log.debug("entity event: %s", event.data)
             tracker.handle_event(event)
-            if event.data.get("action") == "add":
-                await movement.on_entity_added(event.data.get("name"), event.data.get("id"))
         elif event.type == "inventory":
             log.debug("inventory event: %s", event.data)
             inventory.handle_event(event)

@@ -60,7 +60,7 @@ async def test_run_loop_feeds_entity_events_into_tracker():
     tracker = EntityTracker()
     actions = ActionRegistry()
 
-    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, _movement(bridge, tracker), SelfPositionTracker())
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, SelfPositionTracker())
 
     assert tracker.find_by_name("Alex") is not None
 
@@ -74,7 +74,7 @@ async def test_run_loop_feeds_inventory_events_into_tracker():
     tracker = EntityTracker()
     actions = ActionRegistry()
 
-    await run(bridge, actions, tracker, inventory, _llm(bridge, actions), CONFIG, _movement(bridge, tracker), SelfPositionTracker())
+    await run(bridge, actions, tracker, inventory, _llm(bridge, actions), CONFIG, SelfPositionTracker())
 
     assert inventory.count_of("minecraft:bread") == 5
 
@@ -88,7 +88,7 @@ async def test_run_loop_feeds_position_events_into_self_position_tracker():
     actions = ActionRegistry()
     self_position = SelfPositionTracker()
 
-    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, _movement(bridge, tracker), self_position)
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, self_position)
 
     assert self_position.current is not None
     assert (self_position.current.x, self_position.current.y, self_position.current.z) == (10.0, 64.0, -5.0)
@@ -109,7 +109,7 @@ async def test_run_loop_dispatches_chat_commands():
     actions.register(Action(name="ping", description="", handler=ping_handler))
     tracker = EntityTracker()
 
-    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, _movement(bridge, tracker), SelfPositionTracker())
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, SelfPositionTracker())
 
     assert calls == ["Alex"]
 
@@ -129,7 +129,7 @@ async def test_run_loop_sends_action_result_message_to_chat():
     ))
     tracker = EntityTracker()
 
-    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, _movement(bridge, tracker), SelfPositionTracker())
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, SelfPositionTracker())
 
     assert bridge.sent_chat == ["here's your bread"]
 
@@ -142,7 +142,7 @@ async def test_run_loop_replies_to_unknown_commands():
     actions = ActionRegistry()
     tracker = EntityTracker()
 
-    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, _movement(bridge, tracker), SelfPositionTracker())
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, SelfPositionTracker())
 
     assert bridge.sent_chat == ["unknown command: !doesnotexist"]
 
@@ -155,7 +155,7 @@ async def test_run_loop_does_not_reply_to_unaddressed_non_command_chat():
     actions = ActionRegistry()
     tracker = EntityTracker()
 
-    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, _movement(bridge, tracker), SelfPositionTracker())
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, SelfPositionTracker())
 
     assert bridge.sent_chat == []
 
@@ -174,7 +174,7 @@ async def test_run_loop_routes_bot_addressed_chat_to_the_llm_controller():
     actions = ActionRegistry()
     tracker = EntityTracker()
 
-    await run(bridge, actions, tracker, InventoryTracker(), RecordingLLM(), CONFIG, _movement(bridge, tracker), SelfPositionTracker())
+    await run(bridge, actions, tracker, InventoryTracker(), RecordingLLM(), CONFIG, SelfPositionTracker())
 
     assert handled == [("Alex", f"hey {BOT_NAME}, got food?")]
 
@@ -197,7 +197,7 @@ async def test_run_loop_routes_trigger_word_chat_to_the_llm_controller():
     )
     tracker = EntityTracker()
 
-    await run(bridge, actions, tracker, InventoryTracker(), RecordingLLM(), config, _movement(bridge, tracker), SelfPositionTracker())
+    await run(bridge, actions, tracker, InventoryTracker(), RecordingLLM(), config, SelfPositionTracker())
 
     assert handled == [("Alex", "hey buddy, got food?")]
 
@@ -215,65 +215,8 @@ async def test_run_loop_ignores_position_health_death_and_respawn_events_without
     actions = ActionRegistry()
     tracker = EntityTracker()
 
-    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, _movement(bridge, tracker), SelfPositionTracker())  # should not raise
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, SelfPositionTracker())  # should not raise
     assert bridge.sent_chat == []
-
-
-@pytest.mark.asyncio
-async def test_run_loop_resumes_follow_after_target_reconnects_with_a_new_entity_id():
-    # Regression test: a followed player disconnecting and reconnecting
-    # gets a brand new entity id on the mod side, but the mod's FOLLOW
-    # goal was pinned to the old (now-gone) id -- found live: the bot
-    # just stood idle forever after the target rejoined, with no error,
-    # until a human retyped !follow. The run loop now watches entity
-    # "add" events and re-issues follow via MovementController.
-    # on_entity_added whenever the currently-followed name reappears.
-    #
-    # Asserts on the outcome (ends up following the reconnected id, 42),
-    # not the exact wire-command sequence -- chat commands now run as
-    # independent concurrent tasks (see run_loop.py's own docstring on
-    # why), so there's no longer a guaranteed order between !follow's own
-    # _following_name assignment and a same-instant entity-reconnect's
-    # on_entity_added check. In the case where on_entity_added's resume
-    # loses that race (as it does here, since FakeBridge.events() yields
-    # all four canned events with no realistic delay between them), the
-    # bot still ends up correctly following 42 -- follow() itself resolves
-    # Alex's *current* entity id directly from EntityTracker, which by
-    # then already reflects the reconnect. Only the very last "follow"
-    # command sent is what matters for correctness, not how many were
-    # sent getting there.
-    bridge = FakeBridge([
-        ModEvent(type="entity", data={"action": "add", "id": 7, "name": "Alex", "x": 0.0, "y": 0.0, "z": 0.0}),
-        ModEvent(type="chat", data={"sender": "Alex", "text": "!follow"}),
-        ModEvent(type="entity", data={"action": "remove", "id": 7}),
-        ModEvent(type="entity", data={"action": "add", "id": 42, "name": "Alex", "x": 1.0, "y": 0.0, "z": 1.0}),
-    ])
-    actions = ActionRegistry()
-    tracker = EntityTracker()
-    movement = _movement(bridge, tracker)
-    register_movement_actions(actions, movement)
-
-    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, movement, SelfPositionTracker())
-
-    assert bridge.sent
-    assert bridge.sent[-1] == ("follow", {"entity_id": 42, "stop_distance": FOLLOW_STOP_DISTANCE})
-
-
-@pytest.mark.asyncio
-async def test_run_loop_does_not_resume_follow_for_an_unrelated_reconnecting_player():
-    bridge = FakeBridge([
-        ModEvent(type="entity", data={"action": "add", "id": 7, "name": "Alex", "x": 0.0, "y": 0.0, "z": 0.0}),
-        ModEvent(type="chat", data={"sender": "Alex", "text": "!follow"}),
-        ModEvent(type="entity", data={"action": "add", "id": 99, "name": "Someone", "x": 0.0, "y": 0.0, "z": 0.0}),
-    ])
-    actions = ActionRegistry()
-    tracker = EntityTracker()
-    movement = _movement(bridge, tracker)
-    register_movement_actions(actions, movement)
-
-    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, movement, SelfPositionTracker())
-
-    assert bridge.sent == [("follow", {"entity_id": 7, "stop_distance": FOLLOW_STOP_DISTANCE})]
 
 
 class StuckThenFollowBridge(FakeBridge):
@@ -331,7 +274,7 @@ async def test_run_loop_lets_a_new_chat_command_interrupt_a_stuck_one():
     register_movement_actions(actions, movement)
 
     await asyncio.wait_for(
-        run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, movement, SelfPositionTracker()),
+        run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, SelfPositionTracker()),
         timeout=2.0,
     )
 
@@ -362,6 +305,6 @@ async def test_run_loop_survives_a_chat_reply_that_fails_to_send(caplog):
     tracker = EntityTracker()
 
     with caplog.at_level("ERROR"):
-        await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, _movement(bridge, tracker), SelfPositionTracker())
+        await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, SelfPositionTracker())
 
     assert any("failed to send chat reply" in record.message for record in caplog.records)
