@@ -8,3 +8,4 @@ __pycache__/
 msa_token.json
 logs/
 places.json
+*.txt

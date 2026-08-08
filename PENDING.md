@@ -22,33 +22,13 @@ registering `Action`s right now
 (`grep -n 'name="' minebot/bot/*.py` to recheck). Everything not in that
 list is pending.
 
-Legend: ✅ done · ⬜ not started · 🟡 partial (see note)
+Legend: ✅ done · [] not started · 🟡 partial (see note)
 
 Each pending entry has a **Want it?** line -- add your yes/no/notes there.
 
 ## Movement
 
-- 🟡 **`!followPlayer`** -- walk to and continuously follow a player.
-  → **`follow`**, `minebot/bot/movement.py:34` (chat action) +
-  `minebot-mod`'s `FOLLOW` goal, `ControlState.java`. mindcraft ref:
-  `actions.js:103`, → `skills.followPlayer`, `skills.js:1331`. Partial:
-  minebot's version also auto-resumes on reconnect (a fix mindcraft
-  doesn't need, no persistent world-side entity id problem there) and
-  looks at the followed player once close (`NearbyPlayerLookAt.java`,
-  generalized beyond just FOLLOW) -- but has no separate `follow_dist`
-  param the way mindcraft's does (stop distance is a fixed constant,
-  `FOLLOW_STOP_DISTANCE` in `movement.py:26`).
-  **Want it?** already done.
-  > fix the auto-resume on reconnect gap
-
-- ✅ **`!stop`** -- cancel the current action/movement. → **`stop`**,
-  `movement.py:51`. mindcraft ref: `actions.js:53` (note: mindcraft's
-  `!stop` is a broader "cancel everything" than just movement -- this
-  project's `stop` only clears the mod's movement goal; worth
-  reconciling once there are other running actions to cancel).
-  **Want it?** already done.
-
-- 🟡 **`!goToPlayer`** / **`!goToCoordinates`** -- walk to a player once
+- [] **`!goToPlayer`** / **`!goToCoordinates`** -- walk to a player once
   (no continued following), or to explicit x,y,z. → **`goto`**,
   `minebot/bot/movement.py:84` (commit `c75685b`). mindcraft ref:
   `actions.js:92` / `114`, → `skills.goToPlayer`/`skills.goToPosition`,
@@ -63,14 +43,14 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
   place) -- player+coords+remembered-place done, block/entity pending
   their own prerequisites.
 
-- ✅ **`!searchForBlock`** -- find and walk to the nearest block of a
+- [] **`!searchForBlock`** -- find and walk to the nearest block of a
   given type within a search range. mindcraft ref: `actions.js:127`, →
   `skills.goToNearestBlock`, `skills.js:1237`. Implemented as part of the
   unified `!find` below (`BlockFinder.java`, `BlockPos.findClosestMatch`).
   **Want it?**
   > yes
 
-- ✅ **`!searchForEntity`** -- find and walk to the nearest entity of a
+- [] **`!searchForEntity`** -- find and walk to the nearest entity of a
   given type (mob, animal, etc.). mindcraft ref: `actions.js:142`, →
   `skills.goToNearestEntity`, `skills.js:1274`. Implemented as part of the
   unified `!find` below (`EntityFinder.java`, a one-shot on-demand scan --
@@ -90,37 +70,6 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
   > awaits it via a single-slot pending future (`_pending_find`) since
   > only one `!find` is ever in flight at a time.
 
-- ⬜ **`!moveAway`** -- move away from the current position by a distance,
-  in any direction. mindcraft ref: `actions.js:153`, → `skills.moveAway`,
-  `skills.js:1397`. No mod-side equivalent; would need a new
-  `ControlState` mode or reuse `GOTO` with a computed away-from-here
-  point.
-  **Want it?**
-  > no
-
-- ✅ **`!rememberHere`** / **`!goToRememberedPlace`** -- save a location
-  under a name, and later walk back to it by that name. → **`save`**,
-  `movement.py:98` + resolved as part of **`goto`**'s chain,
-  `movement.py:121`. Backed by `minebot/places.py`'s `PlaceMemory` (JSON-
-  backed, `places.json`, gitignored -- the first persistence layer in
-  this project). mindcraft ref: `actions.js:161` / `actions.js:171`,
-  backed by `agent.memory_bank` (in-memory + persisted, not skills.js).
-  **Want it?** already done, with the shorter `!save <name>` /
-  `!goto <name>` aliases you asked for (not the longer mindcraft names).
-  Renamed from `!remember` to `!save` since it saves the *caller's*
-  position, not the bot's own.
-  >
-  > **Refactored again**: `!save` now takes a `kind` argument --
-  > `!save location <name>` is the original behavior (caller's current
-  > position); `!save chest <name>` saves the position of the chest the
-  > *caller* is currently looking at, resolved via a real raycast
-  > mod-side from the caller's own eyes/view direction (`LookingAt.
-  > blockPos`, `minebot-mod`'s new standalone raycast utility -- see
-  > `FINDINGS.md`). Both kinds land in the same `PlaceMemory`/`!goto`
-  > flow, since a chest is still just an x/y/z as far as that's
-  > concerned. Wire protocol: `{"type":"find_chest","entity_id":..}` ->
-  > `find_chest_result` (`found`, `x`/`y`/`z` on success).
-
 - ⬜ **`!goToBed`** -- walk to the nearest bed and sleep in it. mindcraft
   ref: `actions.js:332`, → `skills.goToBed`, `skills.js:1543`. No
   bed-finding exists; would need the same block-scan capability
@@ -129,23 +78,6 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
   interaction).
   **Want it?**
   > yes, but !sleep would be a better alias for it, since it's shorter and more intuitive.
-
-- ⬜ **`!stay`** -- stay in place, pausing all autonomous behavior, for N
-  seconds (-1 = forever). mindcraft ref: `actions.js:339`, →
-  `skills.stay`, `skills.js:1475`. No autonomous "modes" system exists in
-  this project to pause yet (mindcraft's modes are its own separate
-  concept, `modes.js`) -- lower priority until there's actual autonomous
-  behavior worth pausing.
-  **Want it?**
-  > not for now
-
-- ⬜ **`!goToSurface`** -- move to the highest block directly above the
-  bot (usually the surface, e.g. climbing out of a cave/mine).
-  mindcraft ref: `actions.js:484`, → `skills.goToSurface`,
-  `skills.js:1963`. Straightforward once basic Y-scanning exists; no
-  current mod-side equivalent.
-  **Want it?**
-  > no
 
 ## Mining / digging
 
