@@ -46,17 +46,20 @@ class InventoryTracker:
         # phantom membrane, and "biggest increase" mistakenly attributed
         # the pre-existing carrots -- present in both snapshots, so a real
         # per-item diff shows zero change for them -- as the latest gain).
-        # `_previous`/`_current` both start empty -- the very first
+        # `_previous`/`_current` both start empty. The very first
         # `inventory` event this tracker ever sees has nothing genuine to
-        # diff against, so everything in it reads as "gained" that one
-        # time (accepted as unavoidable: there's no way to know what the
-        # bot carried before the mod started reporting). The mod now
-        # sends one snapshot immediately on connect (see
-        # InventoryReporter.forceNextBroadcast) specifically so this
-        # baseline gets established right away instead of waiting for the
-        # first real change after connecting.
+        # diff against -- an earlier version let everything in that first
+        # snapshot read as "gained", which confirmed live floods chat with
+        # one "I got a ..." announcement per already-carried item the
+        # instant the mod (re)connects (InventoryReporter.
+        # forceNextBroadcast sends a full snapshot right away specifically
+        # so a baseline gets established immediately -- it was never meant
+        # to be read as one enormous simultaneous pickup). handle_event's
+        # own `_seen_first_snapshot` guard below treats that first
+        # snapshot as pure baseline instead, with nothing "gained".
         self._previous: dict[str, int] = {}
         self._current: dict[str, int] = {}
+        self._seen_first_snapshot = False
         # Plain callback list, not an asyncio.Event -- deliberately
         # decoupled from any single consumer's own waiting mechanism, so
         # more than one independent observer (currently just
@@ -99,8 +102,15 @@ class InventoryTracker:
             )
             self._by_slot[slot.slot] = slot
 
-        self._previous = self._current
-        self._current = self._totals_by_item()
+        new_current = self._totals_by_item()
+        # The first snapshot ever received is pure baseline -- diff it
+        # against itself (nothing "gained") rather than against the empty
+        # dict _previous starts as (see __init__'s own docstring for the
+        # live chat-spam bug this fixes). Every snapshot after that still
+        # diffs normally against whatever was current just before it.
+        self._previous = new_current if not self._seen_first_snapshot else self._current
+        self._current = new_current
+        self._seen_first_snapshot = True
         # gained_items()'s 2-snapshot window is real but narrow -- e.g. a
         # pure slot-position swap (a hotbar tool-switch) between a real
         # pickup and whenever something checks can evict that pickup's

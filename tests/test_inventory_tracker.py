@@ -77,20 +77,30 @@ def test_non_inventory_events_are_ignored():
     assert tracker.slots() == []
 
 
-def test_gained_items_treats_the_very_first_snapshot_as_a_full_gain():
-    # `_previous` starts at nothing (an empty baseline, not a prior
-    # snapshot to genuinely diff against) -- so the very first `inventory`
-    # event the tracker ever sees reads as "gained everything in it".
-    # Accepted tradeoff, not a bug: there's no way to know what came
-    # before the mod ever started reporting, and the mod now sends one
-    # snapshot immediately on connect (InventoryReporter.forceNextBroadcast)
-    # specifically so this first-snapshot baseline is established right
-    # away rather than waiting for the first real change.
+def test_gained_items_treats_the_very_first_snapshot_as_pure_baseline():
+    # The very first `inventory` event this tracker ever sees has nothing
+    # genuine to diff against -- it's establishing what the bot already
+    # carries (InventoryReporter.forceNextBroadcast sends one immediately
+    # on connect specifically for this), not one enormous simultaneous
+    # pickup. An earlier version diffed it against an empty baseline
+    # instead, so everything in it read as "gained" -- confirmed live this
+    # flooded chat with one "I got a ..." announcement per already-carried
+    # item on every mod (re)connect, badly enough to get the bot kicked
+    # for spamming.
     tracker = InventoryTracker()
     tracker.handle_event(_inventory_event(0, [{"slot": 0, "item": "minecraft:bread", "count": 5}]))
 
-    assert tracker.gained_items() == ["minecraft:bread"]
-    assert tracker.last_gained_item == "minecraft:bread"
+    assert tracker.gained_items() == []
+    assert tracker.last_gained_item is None
+
+
+def test_gained_items_detects_a_real_gain_after_the_first_snapshot():
+    tracker = InventoryTracker()
+    tracker.handle_event(_inventory_event(0, [{"slot": 0, "item": "minecraft:bread", "count": 5}]))
+    tracker.handle_event(_inventory_event(0, [{"slot": 0, "item": "minecraft:bread", "count": 5}, {"slot": 1, "item": "minecraft:stone", "count": 1}]))
+
+    assert tracker.gained_items() == ["minecraft:stone"]
+    assert tracker.last_gained_item == "minecraft:stone"
 
 
 def test_gained_items_detects_a_new_item_appearing():

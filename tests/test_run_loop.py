@@ -203,20 +203,45 @@ async def test_run_loop_routes_trigger_word_chat_to_the_llm_controller():
 
 
 @pytest.mark.asyncio
-async def test_run_loop_ignores_position_health_death_and_respawn_events_without_crashing():
+async def test_run_loop_ignores_position_and_health_events_without_crashing():
     bridge = FakeBridge([
         ModEvent(type="hello", data={"commit": "abc123", "built_at": "2026-01-01T00:00:00Z"}),
         ModEvent(type="position", data={"x": 1.0, "y": 2.0, "z": 3.0, "yaw": 0.0, "on_ground": True}),
         ModEvent(type="health", data={"health": 20.0}),
         ModEvent(type="health", data={"health": 0.0}),
-        ModEvent(type="death", data={}),
-        ModEvent(type="respawn", data={}),
     ])
     actions = ActionRegistry()
     tracker = EntityTracker()
 
     await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, SelfPositionTracker())  # should not raise
     assert bridge.sent_chat == []
+
+
+@pytest.mark.asyncio
+async def test_run_loop_announces_death_in_chat():
+    bridge = FakeBridge([
+        ModEvent(type="death", data={}),
+    ])
+    actions = ActionRegistry()
+    tracker = EntityTracker()
+
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, SelfPositionTracker())
+
+    assert bridge.sent_chat == ["I died"]
+
+
+@pytest.mark.asyncio
+async def test_run_loop_does_not_announce_respawn_in_chat():
+    bridge = FakeBridge([
+        ModEvent(type="death", data={}),
+        ModEvent(type="respawn", data={}),
+    ])
+    actions = ActionRegistry()
+    tracker = EntityTracker()
+
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, SelfPositionTracker())
+
+    assert bridge.sent_chat == ["I died"]
 
 
 class StuckThenFollowBridge(FakeBridge):

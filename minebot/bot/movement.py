@@ -1,4 +1,4 @@
-"""Movement actions -- follow/stop, driven by minebot-mod's goal-based
+"""Movement actions -- follow/stop/pickup, driven by minebot-mod's goal-based
 control channel instead of computing movement ourselves. All the real work
 (yaw-toward-target, forward/jump timing, actual physics) happens inside
 the mod, which runs a real Minecraft client; this class is just the
@@ -52,6 +52,14 @@ class MovementController:
         await self.bridge.send_stop()
         return ActionResult(message="ok, stopped")
 
+    async def pickup(self, sender: str | None) -> ActionResult:
+        # No name resolution needed -- unlike follow, this takes no
+        # target argument at all (the mod resolves "near the bot" itself,
+        # from the bot's own live position at the moment this arrives --
+        # see minebot-mod's Command.Pickup/LegsPickupItemsNode).
+        await self.bridge.send_pickup()
+        return ActionResult(message="ok, picking up nearby items")
+
 
 def register_movement_actions(registry: ActionRegistry, movement: MovementController) -> None:
     registry.register(Action(
@@ -66,4 +74,9 @@ def register_movement_actions(registry: ActionRegistry, movement: MovementContro
         name="stop",
         description="Stop whatever movement goal is currently active (follow) and stand still.",
         handler=movement.stop,
+    ))
+    registry.register(Action(
+        name="pickup",
+        description="Walk over and pick up every dropped item near the bot's current position.",
+        handler=movement.pickup,
     ))

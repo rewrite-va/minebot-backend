@@ -117,7 +117,7 @@ async def run(
                 )
                 continue
 
-            await _process_event(event, config)
+            await _process_event(event, config, bridge)
     finally:
         if not reader.done():
             reader.cancel()
@@ -166,7 +166,7 @@ async def _read_events(
             await queue.put(event)
 
 
-async def _process_event(event: ModEvent, config: BotConfig) -> None:
+async def _process_event(event: ModEvent, config: BotConfig, bridge: ModBridge) -> None:
     """Handles whatever's left after _read_events' fast-path -- hello/
     health/death/respawn. Everything state-tracking (entity/inventory/
     position) and every pending-future resolver is already handled
@@ -185,6 +185,11 @@ async def _process_event(event: ModEvent, config: BotConfig) -> None:
 
     if event.type == "death":
         log.info("we died")
+        # Confirmed live: dying otherwise happened silently from a human
+        # observer's perspective -- the mod's own DeathWatcher/Legs SM
+        # handle recovery entirely on their own, so without this a death
+        # produced no visible signal at all in chat.
+        await _send_chat_reply(bridge, "I died")
         return
 
     if event.type == "respawn":

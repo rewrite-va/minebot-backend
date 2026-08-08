@@ -41,6 +41,24 @@ class ModEvent:
 
 
 class ModBridge:
+    # Chat is a real vanilla chat SEND (see minebot-mod's own MinebotMod.
+    # dispatchMessage "chat" case) -- visible to every player on the
+    # server, subject to the SAME spam limits/kick risk a human typing too
+    # fast would hit. Confirmed live: once that mod-side gap was fixed
+    # (chat replies previously arrived at the mod but were silently never
+    # displayed at all), a burst of unthrottled sends -- e.g.
+    # InventoryAnnouncer firing once per gained item type, or a fresh
+    # reconnect re-announcing the bot's entire inventory in one go -- got
+    # the bot kicked for spamming. CHAT_RATE_PER_SECOND caps real sends to
+    # a conservative, sustainable rate. Lowered from 2.0 to 1.0 -- even
+    # this queue's own guaranteed-spread-out sends still got the bot
+    # kicked for spamming at 2/sec during a real burst (confirmed live,
+    # the same InventoryAnnouncer first-snapshot flood InventoryTracker's
+    # own docstring describes -- that flood is separately fixed at the
+    # source now, but the rate cap itself is still worth keeping
+    # conservative for any future burst source).
+    CHAT_RATE_PER_SECOND = 1.0
+
     def __init__(self, host: str, port: int, observer: ObserverServer | None = None) -> None:
         self._host = host
         self._port = port
@@ -52,6 +70,16 @@ class ModBridge:
         # broadcast's own docstring), so this stays a plain attribute
         # rather than a null-object pattern.
         self._observer = observer
+        # Real chat SENDS (not every _send call -- movement/combat
+        # commands aren't rate-limited by the server the way chat is) go
+        # through this queue instead of straight to _send, so a burst
+        # never gets dropped -- see send_chat/_drain_chat_queue's own
+        # docstrings for why this is a queue+fixed-interval drain (every
+        # message eventually goes out, just spaced apart) rather than a
+        # token-bucket-with-drop or a simple per-call rate check that
+        # would silently lose messages during a burst.
+        self._chat_queue: asyncio.Queue[str] = asyncio.Queue()
+        self._chat_drain_task: asyncio.Task | None = None
 
     async def connect(self) -> None:
         """Starts listening and waits for the mod to connect in. Named to
@@ -60,6 +88,11 @@ class ModBridge:
         """
         self._server = await serve(self._on_connection, self._host, self._port)
         log.info("listening for minebot-mod on %s:%s", self._host, self._port)
+        # Started here (not in __init__, which can't create tasks before
+        # an event loop exists) and lives for the bridge's whole
+        # connect()/close() lifetime, same bracketing main.py already uses
+        # -- see close()'s own cleanup.
+        self._chat_drain_task = asyncio.ensure_future(self._drain_chat_queue())
         await self._connected.wait()
 
     async def _on_connection(self, connection: ServerConnection) -> None:
@@ -78,6 +111,13 @@ class ModBridge:
                 self._connected.clear()
 
     async def close(self) -> None:
+        if self._chat_drain_task is not None:
+            self._chat_drain_task.cancel()
+            try:
+                await self._chat_drain_task
+            except asyncio.CancelledError:
+                pass
+            self._chat_drain_task = None
         if self._connection is not None:
             await self._connection.close()
         if self._server is not None:
@@ -172,5 +212,48 @@ class ModBridge:
     async def send_defend(self, entity_id: int | None = None) -> None:
         await self._send({"type": "defend", "entity_id": entity_id})
 
+    async def send_pickup(self) -> None:
+        await self._send({"type": "pickup"})
+
+    async def send_give(self, recipient_entity_id: int | None, item: str | None, quantity: int) -> None:
+        """`recipient_entity_id`/`item` None and `quantity` 0 match
+        minebot-mod's own Command.Give "give to the caller"/"the last item
+        picked up"/"the whole stack" defaults exactly (see its own
+        docstring) -- Python passes those through as-is rather than
+        resolving them itself.
+        """
+        await self._send({
+            "type": "give",
+            "recipient_entity_id": recipient_entity_id,
+            "item": item,
+            "quantity": quantity,
+        })
+
     async def send_chat(self, text: str) -> None:
-        await self._send({"type": "chat", "text": text})
+        """Enqueues `text` for a real chat send and returns immediately --
+        does NOT wait for its actual turn in the queue (see this class's
+        own docstring for why: callers -- chat command replies,
+        InventoryAnnouncer, the death announcer -- shouldn't block on
+        chat throughput, and the queue guarantees every message eventually
+        goes out in order regardless of how bursty the callers are).
+        """
+        await self._chat_queue.put(text)
+
+    async def _drain_chat_queue(self) -> None:
+        """Sends one queued chat message every 1/CHAT_RATE_PER_SECOND,
+        forever, until cancelled (see close()'s own cleanup) -- a fixed-
+        interval drain rather than a token-bucket-with-burst-allowance:
+        simpler, and per explicit direction ("lets have a queue so we
+        dont drop messages"), the actual requirement is "never drop, just
+        spread out", which a steady drain satisfies directly without
+        needing separate burst-capacity/refill-rate bookkeeping. Blocks on
+        _chat_queue.get() when idle (no busy-polling) and reuses _send
+        (not the raw connection) so observer broadcasting/the "mod not
+        connected" drop-and-log path both still apply to queued chat the
+        same as any other command.
+        """
+        interval = 1.0 / self.CHAT_RATE_PER_SECOND
+        while True:
+            text = await self._chat_queue.get()
+            await self._send({"type": "chat", "text": text})
+            await asyncio.sleep(interval)

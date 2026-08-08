@@ -34,18 +34,25 @@ async def test_send_methods_produce_correctly_shaped_json():
 
         await bridge.send_follow(42, stop_distance=3.0)
         await bridge.send_stop()
+        await bridge.send_give(7, "minecraft:diamond", 5)
+        # send_chat only enqueues (see its own docstring) -- doesn't wait
+        # for its actual turn through the rate-limited drain queue, so it
+        # isn't guaranteed to arrive in the same relative order as the
+        # two synchronous sends above. Received separately below instead.
         await bridge.send_chat("hello")
 
         for _ in range(3):
             received.append(json.loads(await mod_client.recv()))
+        chat_received = json.loads(await asyncio.wait_for(mod_client.recv(), timeout=2.0))
 
         await bridge.close()
 
     assert received == [
         {"type": "follow", "entity_id": 42, "stop_distance": 3.0},
         {"type": "stop"},
-        {"type": "chat", "text": "hello"},
+        {"type": "give", "recipient_entity_id": 7, "item": "minecraft:diamond", "quantity": 5},
     ]
+    assert chat_received == {"type": "chat", "text": "hello"}
 
 
 @pytest.mark.asyncio
@@ -107,6 +114,49 @@ async def test_send_is_a_no_op_when_mod_not_connected():
     bridge = ModBridge("127.0.0.1", 0)
     # Never actually connected -- send_* must not raise, just drop the command.
     await bridge.send_stop()
+
+
+@pytest.mark.asyncio
+async def test_send_chat_is_a_no_op_when_mod_not_connected():
+    # send_chat's own queue/drain task never even started (connect() was
+    # never called) -- must not raise, just silently accept the enqueue.
+    bridge = ModBridge("127.0.0.1", 0)
+    await bridge.send_chat("hello")
+
+
+@pytest.mark.asyncio
+async def test_send_chat_rate_limits_a_burst_without_dropping_any():
+    """Regression test: InventoryAnnouncer firing once per gained item
+    type (or a fresh reconnect re-announcing the whole inventory) used to
+    queue up many real chat sends with zero throttling, which got the bot
+    kicked from the server for spamming once minebot-mod's own "chat"
+    command handler was reintroduced (see minebot-mod's MinebotMod.
+    dispatchMessage). send_chat now enqueues instead of sending directly,
+    and a background task drains at CHAT_RATE_PER_SECOND -- this asserts
+    a burst of 5 messages all eventually arrive, in order, spaced out
+    rather than dropped or sent all at once.
+    """
+    bridge = ModBridge("127.0.0.1", 0)
+    connect_task = asyncio.create_task(bridge.connect())
+
+    while bridge._server is None:
+        await asyncio.sleep(0.01)
+    port = bridge._server.sockets[0].getsockname()[1]
+
+    async with websockets.connect(f"ws://127.0.0.1:{port}") as mod_client:
+        await connect_task
+
+        messages = [f"message {i}" for i in range(5)]
+        for message in messages:
+            await bridge.send_chat(message)  # returns immediately for all 5
+
+        received = []
+        for _ in range(5):
+            received.append(json.loads(await asyncio.wait_for(mod_client.recv(), timeout=5.0))["text"])
+
+        await bridge.close()
+
+    assert received == messages
 
 
 @pytest.mark.asyncio

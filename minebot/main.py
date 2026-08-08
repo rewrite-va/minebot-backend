@@ -7,6 +7,7 @@ import os
 from minebot.actions.registry import ActionRegistry
 from minebot.bot.combat import CombatController, register_combat_actions
 from minebot.bot.help import register_help_action
+from minebot.bot.inventory import InventoryController, register_inventory_actions
 from minebot.bot.inventory_announcer import InventoryAnnouncer
 from minebot.bot.movement import MovementController, register_movement_actions
 from minebot.bot.run_loop import run
@@ -41,6 +42,8 @@ async def run_bot(config: BotConfig) -> None:
     register_movement_actions(actions, movement)
     combat = CombatController(bridge, tracker)
     register_combat_actions(actions, combat)
+    inventory_controller = InventoryController(bridge, inventory, tracker)
+    register_inventory_actions(actions, inventory_controller)
     InventoryAnnouncer(bridge, inventory)  # registers itself as an inventory-change listener; not otherwise referenced
     register_help_action(actions)
 

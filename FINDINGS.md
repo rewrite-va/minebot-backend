@@ -3961,6 +3961,153 @@ isolation:**
 - `respawnHandler`/the death-tick cleanup block -- confirmed live (bow
   worked correctly with this restored too) not to be involved.
 
+## Combat rework: distance-aware weapon selection, crossbow support, DEFEND targeting fixed twice, and hitbox-center/velocity-lead aiming (state-machine era, `minebot-mod`)
+
+A cluster of related combat fixes on the `PlayerIntention`/`Hands`/`Head`
+state machines (the post-rewrite architecture -- see STATE_MACHINE.md in
+`minebot-mod`), each found live against a real server, in the order
+reported.
+
+**`InventoryController.findBestWeapon` always preferred a bow with ammo,
+even standing next to the target.** The state-machine port of the old
+`WeaponSelector.choose` (see "!attack never selected a weapon" above)
+kept its "bow beats melee whenever ammo is carried" rule unconditionally
+-- correct for the original ranged-vs-melee split, wrong once melee
+weapons got real damage numbers worth comparing: a diamond sword at
+melee range usually deals more real damage per hit than a point-blank
+arrow. Fixed by scoring every carried weapon (bow, later crossbow, every
+melee item) as a `(kind, slot, damage, maxRange)` candidate, dropping any
+whose `maxRange` can't reach the live `distanceToTarget`
+`CombatEngagement.publish` now computes *before* selecting a weapon (previously
+distance was computed *after*, from whichever weapon had already been picked --
+had to be reordered), then picking the highest-damage survivor. Melee's
+`maxRange` is `Attributes.ENTITY_INTERACTION_RANGE`'s vanilla default (3.0);
+ranged is `BOW_RANGE` (15, `BowItem.DEFAULT_RANGE`).
+
+**Infinity does NOT let a bow/crossbow fire with zero arrows --
+confirmed via decompiled `Player.getProjectile`/`ProjectileWeaponItem.
+useAmmo`.** Considered adding a separate Infinity check to let the bot
+treat an Infinity-enchanted bow as always-usable regardless of carried
+arrows, then traced the actual bytecode: `getProjectile` returns
+`ItemStack.EMPTY` unless a real arrow is in inventory (or creative mode),
+full stop -- Infinity (via `EnchantmentHelper.processAmmoUse`, called
+from `useAmmo`) only stops *that one arrow* from being consumed once you
+already have it, never lets you start with zero. So the existing
+`player.getProjectile(stack).isEmpty()` ammo check was already correct
+and sufficient; no special-casing needed.
+
+**Crossbow support added -- real mechanics are NOT a bow with different
+numbers.** Decompiled `CrossbowItem` in full: `use()` branches on
+`CrossbowItem.isCharged(stack)` first -- if already charged, it fires
+immediately (`performShooting`, no ammo check at all) and clears the
+charge; otherwise it starts charging (`startUsingItem`) if real ammo is
+available. The charge-complete step (`onUseTick`'s own
+`tryLoadProjectiles` call, which loads a bolt into the stack's
+`CHARGED_PROJECTILES` component) is gated on `!level.isClientSide()` in
+its own decompiled bytecode -- i.e. **server-authoritative, never runs
+locally at all**, the opposite problem from the bow's own local-echo gap
+(see "Bow-drawing never actually fired an arrow" above, which needed a
+manual local `releaseUsing` call to work around vanilla's echo never
+completing). For crossbow there's nothing to drive locally -- the fix is
+trusting the real synced `isCharged()` state on `player.getMainHandItem()`
+rather than a locally-estimated timer, since server round-trip may take a
+tick or two beyond `CrossbowItem.getChargeDuration()`. `HandsDrawCrossbowNode`
+(new) implements this as two phases: CHARGING (hold draw until
+`isCharged()` reads true) then FIRE (release any stale hold, one fresh
+`useItem()` call). `InventoryController.Kind.CROSSBOW` added alongside
+`BOW`/`MELEE`; both share `BOW_RANGE` and the arc-lift-aim branch in
+`HeadAimAtTargetNode`.
+
+**DEFEND was searching for and ranking threats around the DEFEND TARGET's
+position, not the bot's.** `PlayerIntentionDefendNode`'s own
+`EntityFinder.findNearestHostile` call passed the defend target's
+`anchor` as the search center -- the one outlier among every other
+`findNearestHostile` call site in the codebase (`PlayerIntentionKillNode`/
+`TaskController` both already search around `ctx.player.position()`).
+Explicit ask: "when defending a target, it targets the closest hostile
+of the defending target, it should be the closest to the bot regardless."
+Fixed by switching both the search radius center and the retarget-
+preemption distance comparison to `ctx.player.position()`; `anchor` is
+still used for the separate "follow the defend target between fights"
+positioning, unchanged.
+
+**DEFEND then needed a leash: don't chase a threat far from the defend
+target, even if it's the closest one to the bot.** Follow-up explicit
+ask, immediately after the fix above: "do not engage in combat too far
+away of the defending target, we dont want to leave the defending target
+alone... if the hostile is way too far from the defending target, just
+disengage." Added `withinDefendRange(threat, anchor)`, reusing
+`THREAT_SEARCH_RADIUS` (16, same as `CombatEngagement.SEARCH_RADIUS`)
+rather than a new tunable. Applied in two places: a `nearestThreat`
+candidate too far from `anchor` is discarded before ever being compared
+against the bot's current target (even if it's the closest thing to the
+bot), and an *already-engaged* `currentThreat` that drifts past the cap
+is dropped outright (a real disengage, not just deprioritized) -- falls
+straight through to the follow-anchor branch.
+
+**Aiming missed small/oddly-shaped mobs and anything moving fast --
+fixed in three separately-toggleable steps, per explicit direction, which
+is exactly what let the real bug get isolated live instead of guessed
+at.** `HeadAimAtTargetNode`'s old aim point was a fixed height fraction
+of the target's feet position (eye-height for melee, `target.getY(1/3)`
+for ranged, both tuned for a roughly humanoid skeleton silhouette --
+see "!attack never selected a weapon" above for where that `1/3`
+originally came from) -- reported live missing small hostiles
+consistently. Three fixes, added and *tested independently* by
+temporarily stripping the method down to just the first step and having
+the user confirm live before adding the next:
+1. **Hitbox center** (`Entity.getBoundingBox().getCenter()`, real AABB
+   geometric center) replaced the fixed-fraction guess entirely, for
+   both melee and ranged. Confirmed live correct on its own before
+   anything else was added back.
+2. **Velocity lead** for ranged shots only: `target.getDeltaMovement()`
+   (the entity's real per-tick motion vector) scaled by an estimated
+   travel time (`distanceToTarget / 3.0`, `3.0` being `BowItem.
+   releaseUsing`'s own full-draw launch speed, confirmed via decompiled
+   `power * 3.0F`) and added to the hitbox-center aim point. A fast
+   mover is long gone from its current position by the time a
+   3-blocks/tick arrow actually arrives.
+3. **Arc lift** (vertical compensation for real arrow drop) -- ported
+   the exact `AbstractSkeleton.performRangedAttack` formula unchanged
+   from the old pre-state-machine `BowShooter` (see "!attack never
+   selected a weapon" above: `dy + horizontalDistance * 0.2`, added to
+   the un-normalized aim direction before the game normalizes it and
+   scales by launch speed -- confirmed via decompiled `Projectile.
+   getMovementToShoot` that `atan2`-derived pitch is identical whether
+   computed before or after that normalize+scale, which is why doing the
+   addition directly in world-space Y and re-deriving pitch afterward is
+   equivalent). **Confirmed live this constant alone made shots land
+   consistently too high.** Root cause, found by finally reading WHERE
+   `0.2` actually came from instead of treating it as an opaque tuned
+   number: `AbstractSkeleton.performRangedAttack` passes a flat `1.6f`
+   velocity into `spawnProjectileUsingShoot` -- a **mob's** shot, weaker
+   than a player's full-draw `3.0`. The needed vertical launch
+   compensation for a fixed gravity (`AbstractArrow.getDefaultGravity()`
+   == `0.05` blocks/tick², decompiled) to hit a level target at distance
+   `D` scales as roughly `D / velocity²` (the standard small-angle
+   "half the total drop as initial upward velocity" approximation) -- so
+   reusing a mob-tuned constant at a player's much faster, flatter arrow
+   overshoots by the square of the velocity ratio, `(3.0/1.6)² ≈ 3.5x`.
+   Corrected constant: `0.2 * (1.6/3.0)² ≈ 0.057`. Moved out of
+   `HandsDrawBowNode` (which never actually used it, just held it for
+   `HeadAimAtTargetNode` to read) into `HeadAimAtTargetNode` itself,
+   where the derivation and its only real consumer now live together.
+   Still a small-angle linear approximation, not a full parabolic solve
+   -- flagged as possibly needing further live tuning.
+
+**Recurring staleness trap, hit again this session**: `InventoryController.
+findBestWeapon`'s distance-aware rewrite was finished at 20:45 but the
+deployed jar was still the 19:31 build -- the running client fought with
+code over an hour stale the whole time with zero error/warning, exactly
+the failure mode the mod's own `hello`-commit-mismatch check (see "Known
+gaps" below) exists to catch. Confirmed via the client log's own baked-in
+`built_at` timestamp predating the source file's own mtime; fixed by the
+same `clean build` + jar copy + full client relaunch every other entry in
+this file already documents -- recorded again here only because it
+recurred even with the automatic mismatch-detection in place (the
+detection caught it on the *next* connect, after the relaunch, not
+before).
+
 ## Known gaps / next steps
 
 - **Deploying a mod change requires a rebuild, a jar copy, AND a full
