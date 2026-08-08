@@ -35,13 +35,14 @@ async def test_send_methods_produce_correctly_shaped_json():
         await bridge.send_follow("Alex", stop_distance=3.0)
         await bridge.send_stop()
         await bridge.send_give(7, "minecraft:diamond", 5)
+        await bridge.send_sleep()
         # send_chat only enqueues (see its own docstring) -- doesn't wait
         # for its actual turn through the rate-limited drain queue, so it
         # isn't guaranteed to arrive in the same relative order as the
         # two synchronous sends above. Received separately below instead.
         await bridge.send_chat("hello")
 
-        for _ in range(3):
+        for _ in range(4):
             received.append(json.loads(await mod_client.recv()))
         chat_received = json.loads(await asyncio.wait_for(mod_client.recv(), timeout=2.0))
 
@@ -51,6 +52,7 @@ async def test_send_methods_produce_correctly_shaped_json():
         {"type": "follow", "player_name": "Alex", "stop_distance": 3.0},
         {"type": "stop"},
         {"type": "give", "recipient_entity_id": 7, "item": "minecraft:diamond", "quantity": 5},
+        {"type": "sleep"},
     ]
     assert chat_received == {"type": "chat", "text": "hello"}
 

@@ -1,4 +1,4 @@
-"""Movement actions -- follow/stop/pickup, driven by minebot-mod's goal-based
+"""Movement actions -- follow/stop/pickup/sleep, driven by minebot-mod's goal-based
 control channel instead of computing movement ourselves. All the real work
 (yaw-toward-target, forward/jump timing, actual physics) happens inside
 the mod, which runs a real Minecraft client; this class is just the
@@ -63,6 +63,14 @@ class MovementController:
         await self.bridge.send_pickup()
         return ActionResult(message="ok, picking up nearby items")
 
+    async def sleep(self, sender: str | None) -> ActionResult:
+        # Same no-target shape as pickup -- "nearest bed" is resolved
+        # entirely mod-side (BlockFinder.findNearestBed), since Python has
+        # no block-scanning of its own (see minebot-mod's
+        # Command.Sleep/PlayerIntentionSleepNode).
+        await self.bridge.send_sleep()
+        return ActionResult(message="ok, looking for a bed")
+
 
 def register_movement_actions(registry: ActionRegistry, movement: MovementController) -> None:
     registry.register(Action(
@@ -82,4 +90,9 @@ def register_movement_actions(registry: ActionRegistry, movement: MovementContro
         name="pickup",
         description="Walk over and pick up every dropped item near the bot's current position.",
         handler=movement.pickup,
+    ))
+    registry.register(Action(
+        name="sleep",
+        description="Walk to the nearest bed and sleep in it.",
+        handler=movement.sleep,
     ))
