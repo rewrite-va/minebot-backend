@@ -3,6 +3,20 @@
 Python brain/controller for a Minecraft bot. See `FINDINGS.md` for the
 full architecture writeup and investigation history.
 
+## Standing instruction: restart after EVERY backend change, no exceptions
+
+Any edit under `minebot/*.py` -- not just ones you were explicitly asked
+to make live, and not just ones in a controller/action file -- leaves the
+already-running process on stale code with zero warning. There's no
+mismatch check on this side the way the mod has (see below). **The
+moment you finish editing, before reporting the task done: kill and
+restart it yourself, without asking.** See "Python backend also needs a
+restart after every change" below for the exact commands. Confirmed live
+this gets skipped even on substantial changes (a full new command,
+multiple files, tests passing) when the restart isn't the very next
+action taken after the last edit -- treat it as part of the edit, not a
+followup step to remember separately.
+
 ## Three repos, one bot
 
 - **This repo** (`minebot`) -- Python backend. Runs the control-channel
@@ -90,11 +104,14 @@ asking.** Then ask the user to fully quit and relaunch the client
 
 Editing `minebot/*.py` does nothing to an already-running process --
 no equivalent of the mod's mismatch warning exists for this side yet.
+See the standing instruction at the top of this file -- this section is
+just the exact commands.
 
-**Standing instruction: kill and restart yourself, every time, without
-asking.** `ps aux | grep minebot.main` (kill both the `uv run` wrapper
-and the real `python3 -m minebot.main` process), then `./start.sh` in
-the background.
+```bash
+ps aux | grep minebot.main   # kill both the `uv run` wrapper and the
+                              # real `python3 -m minebot.main` process
+./start.sh                   # in the background
+```
 
 A "feature does nothing" report can be **both** staleness traps stacked
 at once -- check the client log's commit AND the backend process's start
