@@ -15,7 +15,14 @@ full architecture writeup and investigation history.
   Runs inside a real Minecraft client on the bot's account; the only
   thing that speaks the Minecraft protocol; connects *out* to this
   backend as a WebSocket client. `src/main/java/minebot/mod/` = mod
-  source; `.../pathfinding/` = A* port + block breaking.
+  source; `.../pathfinding/` = A* port + block breaking; `.../mixin/` =
+  Fabric Mixin accessors/invokers for reaching vanilla `protected`/
+  `private` members with no public equivalent (first added for
+  `AbstractArrowAccessor`'s `isInGround()` -- see its own docstring).
+  Config is `src/main/resources/minebot-mod.mixins.json`, referenced from
+  `fabric.mod.json`'s `mixins` array -- add new mixin classes to both the
+  `client` list in the JSON and `minebot.mod.mixin`, or Loom won't apply
+  them (silent no-op at runtime, not a build error).
 - **`/home/colaila/git/minebot-frontend`** -- React/TS/Tailwind live
   wire-message viewer, separate repo, read-only (connects to this
   backend's `ObserverServer`, a separate port from the control channel --
@@ -34,9 +41,23 @@ full architecture writeup and investigation history.
   in the Python log; check this first when something silently doesn't
   work. Sibling instances (`26.1.2 - v1 riterite`, `26.1.2(1)`) are other
   accounts, not this bot's.
-- `~/.gradle/caches/fabric-loom/decompile/` -- Loom's decompiled vanilla
-  source cache. Ground truth for real vanilla/Fabric API behavior --
-  check here before guessing.
+- `~/.gradle/caches/fabric-loom/decompile/v1.zip` -- Loom's decompiled
+  vanilla source cache. Ground truth for real vanilla/Fabric API
+  behavior -- check here before guessing. **Not a browsable-by-filename
+  tree**: it's a content-addressed blob store (every entry named by
+  hash, not by class name). Extract it once (`unzip -q
+  ~/.gradle/caches/fabric-loom/decompile/v1.zip -d /some/tmp/dir`), then
+  grep blob *contents* for the class you want (`grep -rl "class Wolf "
+  /some/tmp/dir`) -- filename search finds nothing. Modern MC classes
+  also live in less-obvious subpackages than you'd guess from older MC
+  versions/mineflayer/mindcraft docs -- confirmed live examples: `Bee`
+  is `net.minecraft.world.entity.animal.bee.Bee` (not `.animal.Bee`),
+  `Wolf` is `.animal.wolf.Wolf`, `PolarBear` is `.animal.polarbear.
+  PolarBear`, `Breeze` is `.monster.breeze.Breeze` -- when the compiler
+  says "cannot find symbol" on an import that looks right, check the
+  actual package via `unzip -l
+  ~/.gradle/caches/fabric-loom/26.1.2/minecraft-client.jar | grep -i
+  ClassName` rather than guessing subpackage variations.
 
 ## Mod changes need rebuild + redeploy + relaunch (all three, every time)
 
