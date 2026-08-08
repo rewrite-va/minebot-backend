@@ -84,17 +84,24 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
   > (`minebot-mod/.../pathfinding/BlockFinder.java`, the first real
   > block-scan helper in the mod -- `BlockPos.betweenClosed` over a cube,
   > filtered by real Euclidean distance, same shape `EntityFinder`'s own
-  > entity scans use) finds the nearest bed; a new `PlayerIntentionState.
-  > SLEEP` (`PlayerIntentionSleepNode`) walks to it via the same
-  > NavIntent.NAV_TARGET/NAV_ARRIVED channel FOLLOW/KILL already publish
-  > through, then right-clicks it once in range via `useItemOn` -- the
-  > same real interaction `HandsOpenDoorNode` uses for doors (that class
-  > is `DoorOpener.java`'s actual replacement; `DoorOpener` itself no
-  > longer exists, deleted in the state-machine rewrite). SLEEP is a
-  > one-shot TRIGGER wired exactly like KILL (reachable from IDLE/FOLLOW/
-  > DEFEND, resumes intention's current state once finished), not a
-  > standing PlayerIntention value, since "walk to a bed and sleep"
-  > finishes on its own the same way a kill does.
+  > entity scans use) finds the nearest bed; `SleepTask`
+  > (`minebot-mod/.../task/SleepTask.java`) walks to it via the same
+  > NavIntent.NAV_TARGET/NAV_ARRIVED channel FOLLOW/KILL/GiveTask already
+  > publish through, then right-clicks it once in range via `useItemOn` --
+  > the same real interaction `HandsOpenDoorNode` uses for doors (that
+  > class is `DoorOpener.java`'s actual replacement; `DoorOpener` itself
+  > no longer exists, deleted in the state-machine rewrite). `!sleep` is a
+  > queued `TaskController` `Task`, the same home `!give`'s `GiveTask`
+  > already established, NOT a `PlayerIntentionState` -- an earlier
+  > version made it a `PlayerIntentionState.SLEEP` peer-SM node mirroring
+  > KILL's one-shot-trigger shape, reworked per explicit direction
+  > ("implement it more like !give, which is a task in a queue"): "walk to
+  > a bed and sleep" has no need to interrupt or be resumed by
+  > IDLE/FOLLOW/DEFEND the way a real fight does, it's just a queued unit
+  > of work. `TaskController.isBusy()`'s existing DEFEND-with-nearby-
+  > hostile check already holds off dequeuing it during a real fight, the
+  > same protection the old SLEEP state's KILL-interrupt edges existed
+  > to provide.
 
 ## Mining / digging
 

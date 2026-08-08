@@ -66,8 +66,10 @@ class MovementController:
     async def sleep(self, sender: str | None) -> ActionResult:
         # Same no-target shape as pickup -- "nearest bed" is resolved
         # entirely mod-side (BlockFinder.findNearestBed), since Python has
-        # no block-scanning of its own (see minebot-mod's
-        # Command.Sleep/PlayerIntentionSleepNode).
+        # no block-scanning of its own. Mod-side, this is a queued
+        # TaskController Task (SleepTask), the same home !give's GiveTask
+        # already established, not a peer-SM concern (see minebot-mod's
+        # Command.Sleep/task.SleepTask).
         await self.bridge.send_sleep()
         return ActionResult(message="ok, looking for a bed")
 
