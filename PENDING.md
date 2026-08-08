@@ -70,14 +70,31 @@ Each pending entry has a **Want it?** line -- add your yes/no/notes there.
   > awaits it via a single-slot pending future (`_pending_find`) since
   > only one `!find` is ever in flight at a time.
 
-- ⬜ **`!goToBed`** -- walk to the nearest bed and sleep in it. mindcraft
-  ref: `actions.js:332`, → `skills.goToBed`, `skills.js:1543`. No
-  bed-finding exists; would need the same block-scan capability
-  `!searchForBlock` needs, plus a real "use bed" interaction (likely
-  following `DoorOpener.java`'s `useItemOn` pattern for the actual sleep
-  interaction).
+- ✅ **`!goToBed`** -- walk to the nearest bed and sleep in it. mindcraft
+  ref: `actions.js:332`, → `skills.goToBed`, `skills.js:1543`.
   **Want it?**
   > yes, but !sleep would be a better alias for it, since it's shorter and more intuitive.
+  >
+  > **Done**: `!sleep` (`minebot/bot/movement.py`'s `MovementController.
+  > sleep`) -- a one-shot trigger, no arguments, same shape as `!pickup`.
+  > Wire protocol: Python sends `{"type": "sleep"}`, no reply event (the
+  > mod's real vanilla chat system message, if sleep is rejected for a
+  > real in-game reason, is relayed back the same way any other chat line
+  > already is). Mod-side: `BlockFinder.findNearestBed`
+  > (`minebot-mod/.../pathfinding/BlockFinder.java`, the first real
+  > block-scan helper in the mod -- `BlockPos.betweenClosed` over a cube,
+  > filtered by real Euclidean distance, same shape `EntityFinder`'s own
+  > entity scans use) finds the nearest bed; a new `PlayerIntentionState.
+  > SLEEP` (`PlayerIntentionSleepNode`) walks to it via the same
+  > NavIntent.NAV_TARGET/NAV_ARRIVED channel FOLLOW/KILL already publish
+  > through, then right-clicks it once in range via `useItemOn` -- the
+  > same real interaction `HandsOpenDoorNode` uses for doors (that class
+  > is `DoorOpener.java`'s actual replacement; `DoorOpener` itself no
+  > longer exists, deleted in the state-machine rewrite). SLEEP is a
+  > one-shot TRIGGER wired exactly like KILL (reachable from IDLE/FOLLOW/
+  > DEFEND, resumes intention's current state once finished), not a
+  > standing PlayerIntention value, since "walk to a bed and sleep"
+  > finishes on its own the same way a kill does.
 
 ## Mining / digging
 

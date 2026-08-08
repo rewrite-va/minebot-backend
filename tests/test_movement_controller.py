@@ -23,6 +23,9 @@ class RecordingBridge:
     async def send_pickup(self):
         self.sent.append(("pickup", {}))
 
+    async def send_sleep(self):
+        self.sent.append(("sleep", {}))
+
     async def send_chat(self, text):
         self.sent.append(("chat", {"text": text}))
 
@@ -100,4 +103,15 @@ async def test_pickup_sends_pickup_command():
     result = await movement.pickup(None)
 
     assert bridge.sent == [("pickup", {})]
+    assert result.message is not None
+
+
+@pytest.mark.asyncio
+async def test_sleep_sends_sleep_command():
+    bridge = RecordingBridge()
+    movement = _movement(bridge)
+
+    result = await movement.sleep(None)
+
+    assert bridge.sent == [("sleep", {})]
     assert result.message is not None
