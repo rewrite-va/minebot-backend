@@ -32,7 +32,7 @@ async def test_send_methods_produce_correctly_shaped_json():
     async with websockets.connect(f"ws://127.0.0.1:{port}") as mod_client:
         await connect_task  # now resolves, since a connection just arrived
 
-        await bridge.send_follow(42, stop_distance=3.0)
+        await bridge.send_follow("Alex", stop_distance=3.0)
         await bridge.send_stop()
         await bridge.send_give(7, "minecraft:diamond", 5)
         # send_chat only enqueues (see its own docstring) -- doesn't wait
@@ -48,7 +48,7 @@ async def test_send_methods_produce_correctly_shaped_json():
         await bridge.close()
 
     assert received == [
-        {"type": "follow", "entity_id": 42, "stop_distance": 3.0},
+        {"type": "follow", "player_name": "Alex", "stop_distance": 3.0},
         {"type": "stop"},
         {"type": "give", "recipient_entity_id": 7, "item": "minecraft:diamond", "quantity": 5},
     ]

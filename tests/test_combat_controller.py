@@ -17,8 +17,8 @@ class RecordingBridge:
     async def send_kill(self, query=None, entity_id=None):
         self.sent.append(("kill", {"query": query, "entity_id": entity_id}))
 
-    async def send_defend(self, entity_id=None):
-        self.sent.append(("defend", {"entity_id": entity_id}))
+    async def send_defend(self, player_name=None):
+        self.sent.append(("defend", {"player_name": player_name}))
 
 
 def _add_player(tracker: EntityTracker, entity_id: int, name: str, x=0.0, y=0.0, z=0.0) -> None:
@@ -71,29 +71,32 @@ async def test_defend_with_no_target_defends_self():
 
     result = await combat.defend(None)
 
-    assert bridge.sent == [("defend", {"entity_id": None})]
+    assert bridge.sent == [("defend", {"player_name": None})]
     assert result.message is not None
 
 
 @pytest.mark.asyncio
-async def test_defend_with_known_player_name_sends_entity_id():
-    tracker = EntityTracker()
-    _add_player(tracker, 9, "Alex")
+async def test_defend_with_explicit_name_sends_defend_for_that_name():
     bridge = RecordingBridge()
-    combat = _combat(bridge, tracker)
+    combat = _combat(bridge)
 
     result = await combat.defend(None, "Alex")
 
-    assert bridge.sent == [("defend", {"entity_id": 9})]
+    assert bridge.sent == [("defend", {"player_name": "Alex"})]
     assert result.message is not None
 
 
 @pytest.mark.asyncio
-async def test_defend_unknown_player_sends_nothing_and_returns_a_message():
+async def test_defend_unseen_player_still_sends_defend_by_name():
+    # Unlike the old EntityTracker-gated behavior, a name the bot has
+    # never seen as a loaded entity is still sent straight through --
+    # PlayerController (mod-side) may still resolve it via the tab list
+    # even though Python itself has no record of them (see combat.py's
+    # own module docstring).
     bridge = RecordingBridge()
     combat = _combat(bridge)
 
     result = await combat.defend(None, "NobodyHome")
 
-    assert bridge.sent == []
+    assert bridge.sent == [("defend", {"player_name": "NobodyHome"})]
     assert result.message is not None

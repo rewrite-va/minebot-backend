@@ -200,8 +200,8 @@ class ModBridge:
             return
         await self._connection.send(json.dumps(payload))
 
-    async def send_follow(self, entity_id: int, stop_distance: float = 2.0) -> None:
-        await self._send({"type": "follow", "entity_id": entity_id, "stop_distance": stop_distance})
+    async def send_follow(self, player_name: str, stop_distance: float = 2.0) -> None:
+        await self._send({"type": "follow", "player_name": player_name, "stop_distance": stop_distance})
 
     async def send_stop(self) -> None:
         await self._send({"type": "stop"})
@@ -209,8 +209,8 @@ class ModBridge:
     async def send_kill(self, query: str | None = None, entity_id: int | None = None) -> None:
         await self._send({"type": "kill", "query": query, "entity_id": entity_id})
 
-    async def send_defend(self, entity_id: int | None = None) -> None:
-        await self._send({"type": "defend", "entity_id": entity_id})
+    async def send_defend(self, player_name: str | None = None) -> None:
+        await self._send({"type": "defend", "player_name": player_name})
 
     async def send_pickup(self) -> None:
         await self._send({"type": "pickup"})

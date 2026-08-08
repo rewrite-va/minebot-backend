@@ -8,8 +8,16 @@ via ActionRegistry.
 Every handler takes `sender` as its first argument, matching
 ActionRegistry's dispatch contract -- !follow uses `sender` as the default
 target so "!follow" with no argument follows whoever typed it; an explicit
-"!follow name" resolves the name through EntityTracker's name->id
-mapping (fed by the mod's own entity events) instead.
+"!follow name" is sent straight through as a bare player name, not
+resolved to an entity id here. The mod itself (PlayerController, see its
+own docstring) resolves whatever it actually needs from that name, fresh
+every tick, via whichever real channel currently has an answer (a loaded
+entity, or the server-wide tab list) -- Python's own EntityTracker (fed
+only by the mod's own entity-load events) can't tell whether a name is a
+real online player at all, only whether the mod has happened to see them
+loaded, which is exactly the gap this stopped gating on: a player who has
+never been visible this session (or is currently out of simulation range)
+can still be followed, as long as they're actually on the server.
 """
 
 from __future__ import annotations
@@ -39,13 +47,8 @@ class MovementController:
                 "(e.g. triggered from console/system chat, not a player message)"
             )
 
-        entity = self.tracker.find_by_name(target_name)
-        if entity is None:
-            log.warning("follow: no known entity named %s (not currently visible?)", target_name)
-            return ActionResult(message=f"I can't see {target_name}")
-
-        log.info("starting follow of %s (entity %d)", target_name, entity.id)
-        await self.bridge.send_follow(entity.id, stop_distance=FOLLOW_STOP_DISTANCE)
+        log.info("starting follow of %s", target_name)
+        await self.bridge.send_follow(target_name, stop_distance=FOLLOW_STOP_DISTANCE)
         return ActionResult(message=f"ok, following {target_name}")
 
     async def stop(self, sender: str | None) -> ActionResult:

@@ -37,8 +37,8 @@ class FakeBridge:
     async def send_chat(self, text: str) -> None:
         self.sent_chat.append(text)
 
-    async def send_follow(self, entity_id, stop_distance=2.0):
-        self.sent.append(("follow", {"entity_id": entity_id, "stop_distance": stop_distance}))
+    async def send_follow(self, player_name, stop_distance=2.0):
+        self.sent.append(("follow", {"player_name": player_name, "stop_distance": stop_distance}))
 
     async def send_stop(self):
         self.sent.append(("stop", {}))
@@ -260,8 +260,8 @@ class StuckThenFollowBridge(FakeBridge):
         ])
         self._follow_sent = asyncio.Event()
 
-    async def send_follow(self, entity_id, stop_distance=2.0):
-        await super().send_follow(entity_id, stop_distance)
+    async def send_follow(self, player_name, stop_distance=2.0):
+        await super().send_follow(player_name, stop_distance)
         self._follow_sent.set()
 
     async def events(self):
@@ -303,7 +303,7 @@ async def test_run_loop_lets_a_new_chat_command_interrupt_a_stuck_one():
         timeout=2.0,
     )
 
-    assert ("follow", {"entity_id": 7, "stop_distance": FOLLOW_STOP_DISTANCE}) in bridge.sent
+    assert ("follow", {"player_name": "Alex", "stop_distance": FOLLOW_STOP_DISTANCE}) in bridge.sent
     assert "ok, following Alex" in bridge.sent_chat
 
 

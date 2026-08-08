@@ -1,15 +1,20 @@
 """Combat actions -- kill/defend, driven by minebot-mod's goal-based
 control channel, same shape as movement.py's follow/stop. !kill's target
-is first tried as a PLAYER name via EntityTracker (same lookup !defend
-and !follow already use, since Python does track players) and sent as a
-resolved entity_id; if no such player is currently tracked, it's treated
-as a MOB type ("zombie") and forwarded as a raw query string instead, or
-nothing at all for "nearest hostile" -- Python has no non-player entity
-tracking to resolve a mob type itself, so that case is resolved
-client-side by the mod's own PlayerIntentionKillNode (mirroring the
-deleted EntityFinder's old shape -- see that class's own docstring in
-the mod repo). !defend's target, when given, is always a PLAYER name --
-resolved to an entity id here via EntityTracker the same way.
+is first tried as a PLAYER name via EntityTracker (a one-shot trigger,
+not a standing goal -- see minebot-mod's own Command.Kill docstring for
+why this stays a one-time Python-side resolution, unlike follow/defend
+below) and sent as a resolved entity_id; if no such player is currently
+tracked, it's treated as a MOB type ("zombie") and forwarded as a raw
+query string instead, or nothing at all for "nearest hostile" -- Python
+has no non-player entity tracking to resolve a mob type itself, so that
+case is resolved client-side by the mod's own PlayerIntentionKillNode
+(mirroring the deleted EntityFinder's old shape -- see that class's own
+docstring in the mod repo). !defend's target, when given, is a PLAYER
+name sent straight through, NOT resolved to an entity id here -- the mod
+itself (PlayerController) resolves whatever it actually needs from the
+name fresh every tick, the same reasoning movement.py's own follow uses
+(see its module docstring): a defend target who's never been visible
+this session, or is currently out of range, can still be defended.
 """
 
 from __future__ import annotations
@@ -51,13 +56,15 @@ class CombatController:
             await self.bridge.send_defend(None)
             return ActionResult(message="ok, defending myself")
 
-        entity = self.tracker.find_by_name(player_name)
-        if entity is None:
-            log.warning("defend: no known entity named %s (not currently visible?)", player_name)
-            return ActionResult(message=f"I can't see {player_name}")
-
-        log.info("starting defend mode -- protecting %s (entity %d)", player_name, entity.id)
-        await self.bridge.send_defend(entity.id)
+        # Sent straight through as a bare player name, not resolved to an
+        # entity id here -- same reasoning as MovementController.follow's
+        # own docstring: PlayerController (mod-side) resolves whatever it
+        # actually needs from the name fresh every tick, via whichever
+        # real channel currently has an answer, so a player who's never
+        # been visible this session (or is currently out of range) can
+        # still be defended, as long as they're actually on the server.
+        log.info("starting defend mode -- protecting %s", player_name)
+        await self.bridge.send_defend(player_name)
         return ActionResult(message=f"ok, defending {player_name}")
 
 
