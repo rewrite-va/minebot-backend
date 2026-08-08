@@ -4276,6 +4276,33 @@ before).
   added later) would need its own `Messages.get(...)` calls and message
   keys added to both JSON files.
 
+- **`!kill <name>` now accepts a player name, not just a mob type.**
+  `CombatController.kill` tries `EntityTracker.find_by_name` first (same
+  lookup `!follow`/`!defend` already use); a hit sends the resolved
+  `entity_id` over the wire, a miss falls back to the old "raw string
+  forwarded as a mob-type `query`" behavior unchanged. `Command.Kill`
+  gained an `entityId` field alongside `query` for this --
+  `PlayerIntentionKillNode.resolveTarget` checks it first (direct
+  `ctx.level.getEntity` lookup, no `EntityFinder` scan) before falling
+  back to `query`/nearest-hostile, same priority order the wire message
+  itself carries.
+
+- **DEFEND now only engages VISIBLE hostiles** -- was locking onto and
+  pathing toward hostiles it had no real line to (an underground/behind-
+  a-wall zombie, for instance), sending Legs toward a target it could
+  never actually reach in a straight line. `EntityFinder.
+  findNearestVisibleHostile` (new, mod-side) adds a clear eye-to-eye
+  raycast requirement (`ClipContext.Block.COLLIDER`, same formula
+  `HandsDrawBowNode`/`HandsDrawCrossbowNode`'s own `hasLineOfSight`
+  already used for firing) on top of the existing hostile/radius scan;
+  `PlayerIntentionDefendNode` also drops an already-engaged target the
+  instant it loses line of sight mid-fight, same as it already did for
+  drifting out of defend range. Deliberately DEFEND-only -- the plain
+  `EntityFinder.findNearestHostile` PlayerIntentionKillNode's bare
+  `!kill` fallback and TaskController's busy-threat interrupt use is
+  untouched, so an explicit `!kill` can still path toward a
+  heard-but-not-yet-seen mob same as before.
+
 ## Key external paths referenced (outside these two repos)
 
 - `/home/colaila/git/mindcraft` -- Node.js reference project (mineflayer-

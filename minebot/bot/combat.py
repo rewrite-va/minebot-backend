@@ -1,13 +1,15 @@
 """Combat actions -- kill/defend, driven by minebot-mod's goal-based
 control channel, same shape as movement.py's follow/stop. !kill's target
-is a MOB type ("zombie") or nothing at all ("nearest hostile") -- Python
-has no non-player entity tracking to resolve that itself, so the raw
-query is forwarded as-is and resolved client-side by the mod's own
-GeneralKillNode (mirroring the deleted EntityFinder's old shape -- see
-that class's own docstring in the mod repo). !defend's target, when
-given, is a PLAYER name -- resolved to an entity id here via
-EntityTracker, same as !follow's own name resolution, since Python does
-track players (just not arbitrary mobs).
+is first tried as a PLAYER name via EntityTracker (same lookup !defend
+and !follow already use, since Python does track players) and sent as a
+resolved entity_id; if no such player is currently tracked, it's treated
+as a MOB type ("zombie") and forwarded as a raw query string instead, or
+nothing at all for "nearest hostile" -- Python has no non-player entity
+tracking to resolve a mob type itself, so that case is resolved
+client-side by the mod's own PlayerIntentionKillNode (mirroring the
+deleted EntityFinder's old shape -- see that class's own docstring in
+the mod repo). !defend's target, when given, is always a PLAYER name --
+resolved to an entity id here via EntityTracker the same way.
 """
 
 from __future__ import annotations
@@ -28,9 +30,20 @@ class CombatController:
         self.tracker = tracker
 
     async def kill(self, sender: str | None, target: str | None = None) -> ActionResult:
-        log.info("starting combat -- target=%s", target or "(nearest hostile)")
-        await self.bridge.send_kill(target)
-        return ActionResult(message=f"ok, fighting {target}" if target else "ok, fighting the nearest hostile")
+        if target is None:
+            log.info("starting combat -- target=(nearest hostile)")
+            await self.bridge.send_kill(None)
+            return ActionResult(message="ok, fighting the nearest hostile")
+
+        entity = self.tracker.find_by_name(target)
+        if entity is not None:
+            log.info("starting combat -- target=%s (player, entity %d)", target, entity.id)
+            await self.bridge.send_kill(entity_id=entity.id)
+            return ActionResult(message=f"ok, fighting {target}")
+
+        log.info("starting combat -- target=%s (mob type)", target)
+        await self.bridge.send_kill(query=target)
+        return ActionResult(message=f"ok, fighting {target}")
 
     async def defend(self, sender: str | None, player_name: str | None = None) -> ActionResult:
         if player_name is None:
@@ -54,7 +67,7 @@ def register_combat_actions(registry: ActionRegistry, combat: CombatController) 
         description="Fight a target. If no target is given, fights the nearest hostile mob.",
         handler=combat.kill,
         params=[
-            ActionParam("target", "string", "Mob type to fight (e.g. \"zombie\"). Omit for the nearest hostile mob.", required=False),
+            ActionParam("target", "string", "Player name or mob type to fight (e.g. \"Steve\" or \"zombie\"). Omit for the nearest hostile mob.", required=False),
         ],
     ))
     registry.register(Action(
