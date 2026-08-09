@@ -3,19 +3,41 @@
 Python brain/controller for a Minecraft bot. See `FINDINGS.md` for the
 full architecture writeup and investigation history.
 
-## Standing instruction: restart after EVERY backend change, no exceptions
+## Standing instructions -- do these yourself, without asking
 
-Any edit under `minebot/*.py` -- not just ones you were explicitly asked
-to make live, and not just ones in a controller/action file -- leaves the
-already-running process on stale code with zero warning. There's no
-mismatch check on this side the way the mod has (see below). **The
-moment you finish editing, before reporting the task done: kill and
-restart it yourself, without asking.** See "Python backend also needs a
-restart after every change" below for the exact commands. Confirmed live
-this gets skipped even on substantial changes (a full new command,
-multiple files, tests passing) when the restart isn't the very next
-action taken after the last edit -- treat it as part of the edit, not a
-followup step to remember separately.
+- **After ANY edit under `minebot/*.py`**: kill and restart the backend
+  before reporting the task done. No mismatch warning exists on this
+  side (unlike the mod), so a stale process fails silently. Confirmed
+  live this gets skipped even on substantial changes when the restart
+  isn't the very next action after the last edit -- treat it as part of
+  the edit, not a followup to remember separately.
+  ```bash
+  ps aux | grep minebot.main   # kill both the `uv run` wrapper and the
+                                # real `python3 -m minebot.main` process
+  ./start.sh                   # in the background
+  ```
+- **After ANY edit in `minebot-mod`**: rebuild + redeploy, every time.
+  ```bash
+  cd /home/colaila/git/mods/minebot-mod
+  ./gradlew clean build -x test   # always clean -- a plain build has
+                                   # silently deployed a stale-commit jar
+                                   # before (processResources/jar reusing
+                                   # old output despite generateBuildInfo
+                                   # claiming to always rerun)
+  cp build/libs/minebot-mod-0.1.0+26.1.2.jar \
+     "/mnt/c/Users/colaila/AppData/Roaming/PrismLauncher/instances/26.1.2 - v1 ritebot/minecraft/mods/minebot-mod-0.1.0+26.1.2.jar"
+  ```
+  Verify: `unzip -p build/libs/minebot-mod-0.1.0+26.1.2.jar minebot-mod-build-info.properties`
+  and compare its commit against `git rev-parse HEAD`. Then ask the user
+  to fully quit and relaunch the client -- can't be automated (real
+  Windows desktop app), and Fabric loads jars once at startup, so a
+  running client keeps stale code even after the jar on disk changes.
+
+A "feature does nothing" report can be **both** staleness traps stacked
+at once. The backend auto-detects a client still on an old build (mod
+broadcasts its commit on connect, `minebot/mod_version.py` logs a loud
+WARNING on mismatch) -- check that log line, and the backend process's
+own start time, before assuming a logic bug.
 
 ## Three repos, one bot
 
@@ -50,7 +72,7 @@ followup step to remember separately.
 - `/mnt/c/Users/colaila/AppData/Roaming/PrismLauncher/instances/26.1.2 - v1 ritebot/`
   -- the bot's actual Minecraft client (Windows side, mounted via WSL2).
   `minecraft/mods/minebot-mod-0.1.0+26.1.2.jar` = deployed jar (redeploy
-  target below). `minecraft/logs/latest.log` = the *client's* own log --
+  target above). `minecraft/logs/latest.log` = the *client's* own log --
   chat lines, mod `LOGGER` output, Java exceptions all show up here, not
   in the Python log; check this first when something silently doesn't
   work. Sibling instances (`26.1.2 - v1 riterite`, `26.1.2(1)`) are other
@@ -73,50 +95,6 @@ followup step to remember separately.
   ~/.gradle/caches/fabric-loom/26.1.2/minecraft-client.jar | grep -i
   ClassName` rather than guessing subpackage variations.
 
-## Mod changes need rebuild + redeploy + relaunch (all three, every time)
-
-```bash
-cd /home/colaila/git/mods/minebot-mod
-./gradlew clean build -x test
-cp build/libs/minebot-mod-0.1.0+26.1.2.jar \
-   "/mnt/c/Users/colaila/AppData/Roaming/PrismLauncher/instances/26.1.2 - v1 ritebot/minecraft/mods/minebot-mod-0.1.0+26.1.2.jar"
-```
-
-**Standing instruction: run both commands yourself, every time, without
-asking.** Then ask the user to fully quit and relaunch the client
-(can't be automated -- real Windows desktop app).
-
-- **Always `clean build`, never plain `build`.** A plain build has
-  silently deployed a stale-commit jar before (`processResources`/`jar`
-  incrementally reusing old output despite `generateBuildInfo` claiming
-  to always rerun) -- `clean build` eliminates the whole bug class.
-  Verify after every build: `unzip -p build/libs/minebot-mod-0.1.0+26.1.2.jar
-  minebot-mod-build-info.properties` and compare its commit against
-  `git rev-parse HEAD`.
-- **Fabric loads jars once at startup** -- a running client keeps the old
-  code even after the jar on disk changes. The backend auto-detects this:
-  the mod broadcasts its own build commit on connect, and
-  `minebot/mod_version.py` logs a loud WARNING on mismatch against
-  `minebot-mod`'s current HEAD. Check the backend log right after a
-  relaunch if something still seems off.
-
-## Python backend also needs a restart after every change
-
-Editing `minebot/*.py` does nothing to an already-running process --
-no equivalent of the mod's mismatch warning exists for this side yet.
-See the standing instruction at the top of this file -- this section is
-just the exact commands.
-
-```bash
-ps aux | grep minebot.main   # kill both the `uv run` wrapper and the
-                              # real `python3 -m minebot.main` process
-./start.sh                   # in the background
-```
-
-A "feature does nothing" report can be **both** staleness traps stacked
-at once -- check the client log's commit AND the backend process's start
-time before assuming a logic bug.
-
 ## Chat rate limiting
 
 `ModBridge.CHAT_RATE_PER_SECOND` (1.0) caps outgoing chat, but only
@@ -128,13 +106,12 @@ event count at the source over leaning on the rate cap to survive it.
 ## Running the backend
 
 ```bash
-./start.sh
+./start.sh   # wraps `uv run python -m minebot.main`
 ```
 
-Wraps `uv run python -m minebot.main`. Blocks waiting for the mod to
-connect on `MINEBOT_MOD_HOST:MINEBOT_MOD_PORT` (default `0.0.0.0:47893`).
-Copy `.env.example` to `.env` first (`MINEBOT_BOT_NAME`, optionally
-`MINEBOT_TRIGGER_WORDS`).
+Blocks waiting for the mod to connect on `MINEBOT_MOD_HOST:MINEBOT_MOD_PORT`
+(default `0.0.0.0:47893`). Copy `.env.example` to `.env` first
+(`MINEBOT_BOT_NAME`, optionally `MINEBOT_TRIGGER_WORDS`).
 
 ## Tests
 

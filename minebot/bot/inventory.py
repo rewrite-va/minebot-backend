@@ -1,7 +1,7 @@
 """Inventory actions -- !give, mirroring movement.py's shape: chat-
 command-to-command translation only, all the real work (walking to the
 recipient, the actual drop) happens inside the mod (see minebot-mod's
-GiveTask). Restored from git history (see AGENTS.md/git log for the
+GiveTask). Restored from git history (see CLAUDE.md/git log for the
 original inventory/equip/drop/give module this repo used to have, deleted
 in 6a0b692's mass command strip and never brought back) -- scoped down to
 just !give, matching prompt.txt's own grammar

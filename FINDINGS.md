@@ -1075,7 +1075,7 @@ decision entirely lives in the Python backend, matching the design intent
   commit (stripping a trailing `-dirty` suffix first) and logs a loud
   WARNING on mismatch. Called from `run_loop.run` on the mod's `hello`
   event. This is the fix for the stale-jar-deploy trap documented
-  above and in `AGENTS.md` -- previously that failure mode was silent
+  above and in `CLAUDE.md` -- previously that failure mode was silent
   and required manually diffing jar files to diagnose.
 - `minebot/main.py` -- wires it all together: configure logging, connect
   the bridge, build the `ActionRegistry`/trackers/movement+inventory
@@ -4120,7 +4120,7 @@ before).
   running (no eating, no chat lines, health silently reaching 2 hearts
   with nothing logged) because the installed jar in the PrismLauncher
   instance's `mods/` folder was hours stale relative to the rebuilt one.
-  See `AGENTS.md` for the exact rebuild+copy+relaunch steps. **Now
+  See `CLAUDE.md` for the exact rebuild+copy+relaunch steps. **Now
   automatically detected**: the mod's `hello` event + `minebot/
   mod_version.py`'s check (see above) logs a WARNING the moment a
   mismatched build connects, instead of this needing manual jar-diffing

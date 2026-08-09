@@ -69,6 +69,6 @@ def check_hello(reported_commit: str, built_at: str, mod_repo_path: str | None) 
         "minebot-mod's connected build (commit=%s) does not match this machine's "
         "current minebot-mod checkout (commit=%s) -- the running game client is likely "
         "still on a stale/undeployed build. Rebuild, redeploy the jar, and fully restart "
-        "the game client (see AGENTS.md).",
+        "the game client (see CLAUDE.md).",
         reported_commit, expected,
     )
