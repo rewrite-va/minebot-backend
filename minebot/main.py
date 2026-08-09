@@ -10,7 +10,9 @@ from minebot.bot.help import register_help_action
 from minebot.bot.inventory import InventoryController, register_inventory_actions
 from minebot.bot.inventory_announcer import InventoryAnnouncer
 from minebot.bot.movement import MovementController, register_movement_actions
+from minebot.bot.player_intention import PlayerIntentionController
 from minebot.bot.run_loop import run
+from minebot.bot.self_defense import SelfDefenseTrigger
 from minebot.bridge.client import ModBridge
 from minebot.bridge.entities import EntityTracker
 from minebot.bridge.inventory import InventoryTracker
@@ -38,10 +40,12 @@ async def run_bot(config: BotConfig) -> None:
     inventory = InventoryTracker()
     self_position = SelfPositionTracker()
 
-    movement = MovementController(bridge, tracker)
-    register_movement_actions(actions, movement)
-    combat = CombatController(bridge, tracker)
+    intention = PlayerIntentionController()
+    combat = CombatController(bridge, tracker, intention)
     register_combat_actions(actions, combat)
+    movement = MovementController(bridge, tracker, intention)
+    register_movement_actions(actions, movement)
+    self_defense = SelfDefenseTrigger(combat, intention)
     inventory_controller = InventoryController(bridge, inventory, tracker)
     register_inventory_actions(actions, inventory_controller)
     InventoryAnnouncer(bridge, inventory)  # registers itself as an inventory-change listener; not otherwise referenced
@@ -50,7 +54,7 @@ async def run_bot(config: BotConfig) -> None:
     llm = LLMController(bridge, actions)  # no provider configured yet -- see llm/controller.py
 
     try:
-        await run(bridge, actions, tracker, inventory, llm, config, self_position)
+        await run(bridge, actions, tracker, inventory, llm, config, self_position, self_defense)
     finally:
         await bridge.close()
         await observer.close()

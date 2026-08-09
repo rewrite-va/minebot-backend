@@ -17,6 +17,7 @@ import asyncio
 import logging
 
 from minebot.actions.registry import ActionRegistry
+from minebot.bot.self_defense import SelfDefenseTrigger
 from minebot.bridge.client import ModBridge, ModEvent
 from minebot.bridge.entities import EntityTracker
 from minebot.bridge.inventory import InventoryTracker
@@ -38,6 +39,7 @@ async def run(
     llm: LLMController,
     config: BotConfig,
     self_position: SelfPositionTracker,
+    self_defense: SelfDefenseTrigger,
 ) -> None:
     """Splits reading the mod's events from processing them into two
     concurrent tasks joined by a queue -- found live (back when !find
@@ -117,7 +119,7 @@ async def run(
                 )
                 continue
 
-            await _process_event(event, config, bridge)
+            await _process_event(event, config, bridge, self_defense)
     finally:
         if not reader.done():
             reader.cancel()
@@ -166,12 +168,12 @@ async def _read_events(
             await queue.put(event)
 
 
-async def _process_event(event: ModEvent, config: BotConfig, bridge: ModBridge) -> None:
+async def _process_event(event: ModEvent, config: BotConfig, bridge: ModBridge, self_defense: SelfDefenseTrigger) -> None:
     """Handles whatever's left after _read_events' fast-path -- hello/
-    health/death/respawn. Everything state-tracking (entity/inventory/
-    position) and every pending-future resolver is already handled
-    synchronously in _read_events; chat is dispatched separately by
-    run()'s own _dispatch_chat_command, not routed through here at all.
+    health/damage/death/respawn. Everything state-tracking (entity/
+    inventory/position) and every pending-future resolver is already
+    handled synchronously in _read_events; chat is dispatched separately
+    by run()'s own _dispatch_chat_command, not routed through here at all.
     """
     log_timing(log, "processing @ %.3f: type=%s", now(), event.type)
 
@@ -181,6 +183,11 @@ async def _process_event(event: ModEvent, config: BotConfig, bridge: ModBridge) 
 
     if event.type == "health":
         log.debug("health: %s", event.data.get("health"))
+        return
+
+    if event.type == "damage":
+        log.debug("damage: %s", event.data)
+        self_defense.handle_event(event)
         return
 
     if event.type == "death":

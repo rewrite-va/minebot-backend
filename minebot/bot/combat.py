@@ -23,6 +23,7 @@ import logging
 
 from minebot.actions.registry import ActionRegistry
 from minebot.actions.types import Action, ActionParam, ActionResult
+from minebot.bot.player_intention import PlayerIntention, PlayerIntentionController
 from minebot.bridge.client import ModBridge
 from minebot.bridge.entities import EntityTracker
 
@@ -30,11 +31,18 @@ log = logging.getLogger("minebot.combat")
 
 
 class CombatController:
-    def __init__(self, bridge: ModBridge, tracker: EntityTracker) -> None:
+    def __init__(self, bridge: ModBridge, tracker: EntityTracker, intention: PlayerIntentionController) -> None:
         self.bridge = bridge
         self.tracker = tracker
+        self.intention = intention
 
     async def kill(self, sender: str | None, target: str | None = None) -> ActionResult:
+        # Deliberately does NOT touch self.intention -- mirrors minebot-
+        # mod's own PlayerIntentionKillNode: KILL is a one-shot self-loop
+        # reachable from IDLE/FOLLOW/DEFEND that returns straight back to
+        # whatever PlayerIntention already said once the kill finishes, so
+        # a !kill mid-DEFEND doesn't actually end it (see
+        # PlayerIntentionState's own docstring's KILL section).
         if target is None:
             log.info("starting combat -- target=(nearest hostile)")
             await self.bridge.send_kill(None)
@@ -51,6 +59,8 @@ class CombatController:
         return ActionResult(message=f"ok, fighting {target}")
 
     async def defend(self, sender: str | None, player_name: str | None = None) -> ActionResult:
+        self.intention.set_intention(PlayerIntention.DEFEND)
+
         if player_name is None:
             log.info("starting defend mode -- protecting self")
             await self.bridge.send_defend(None)

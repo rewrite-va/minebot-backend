@@ -1,6 +1,7 @@
 import pytest
 
 from minebot.bot.combat import CombatController
+from minebot.bot.player_intention import PlayerIntention, PlayerIntentionController
 from minebot.bridge.client import ModEvent
 from minebot.bridge.entities import EntityTracker
 
@@ -26,7 +27,7 @@ def _add_player(tracker: EntityTracker, entity_id: int, name: str, x=0.0, y=0.0,
 
 
 def _combat(bridge, tracker=None) -> CombatController:
-    return CombatController(bridge, tracker if tracker is not None else EntityTracker())
+    return CombatController(bridge, tracker if tracker is not None else EntityTracker(), PlayerIntentionController())
 
 
 @pytest.mark.asyncio
@@ -100,3 +101,29 @@ async def test_defend_unseen_player_still_sends_defend_by_name():
 
     assert bridge.sent == [("defend", {"player_name": "NobodyHome"})]
     assert result.message is not None
+
+
+@pytest.mark.asyncio
+async def test_defend_sets_player_intention_to_defend():
+    bridge = RecordingBridge()
+    intention = PlayerIntentionController()
+    combat = CombatController(bridge, EntityTracker(), intention)
+
+    await combat.defend(None)
+
+    assert intention.current == PlayerIntention.DEFEND
+
+
+@pytest.mark.asyncio
+async def test_kill_does_not_change_player_intention():
+    # KILL is a one-shot self-loop mod-side, not a real PlayerIntention
+    # value -- see PlayerIntentionState's own docstring -- so it must not
+    # touch the tracked intention here either, even mid-DEFEND.
+    bridge = RecordingBridge()
+    intention = PlayerIntentionController()
+    intention.set_intention(PlayerIntention.DEFEND)
+    combat = CombatController(bridge, EntityTracker(), intention)
+
+    await combat.kill(None, "zombie")
+
+    assert intention.current == PlayerIntention.DEFEND

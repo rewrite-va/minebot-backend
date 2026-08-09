@@ -1,6 +1,7 @@
 import pytest
 
 from minebot.bot.movement import FOLLOW_STOP_DISTANCE, MovementController
+from minebot.bot.player_intention import PlayerIntention, PlayerIntentionController
 from minebot.bridge.entities import EntityTracker
 
 
@@ -29,8 +30,10 @@ class RecordingBridge:
         self.sent.append(("chat", {"text": text}))
 
 
-def _movement(bridge, tracker=None) -> MovementController:
-    return MovementController(bridge, tracker if tracker is not None else EntityTracker())
+def _movement(bridge, tracker=None, intention=None) -> MovementController:
+    tracker = tracker if tracker is not None else EntityTracker()
+    intention = intention if intention is not None else PlayerIntentionController()
+    return MovementController(bridge, tracker, intention)
 
 
 @pytest.mark.asyncio
@@ -89,6 +92,34 @@ async def test_stop_sends_stop_command():
 
     assert bridge.sent == [("stop", {})]
     assert result.message is not None
+
+
+@pytest.mark.asyncio
+async def test_stop_sets_player_intention_to_idle():
+    # Mirrors minebot-mod's PlayerIntention: !stop ends DEFEND there too
+    # (see PlayerIntentionState's own docstring), so the tracked intention
+    # here must follow the same edge, or a later hostile hit would wrongly
+    # stay silent thinking DEFEND is still active.
+    bridge = RecordingBridge()
+    intention = PlayerIntentionController()
+    intention.set_intention(PlayerIntention.DEFEND)
+    movement = _movement(bridge, intention=intention)
+
+    await movement.stop(None)
+
+    assert intention.current == PlayerIntention.IDLE
+
+
+@pytest.mark.asyncio
+async def test_follow_sets_player_intention_to_follow():
+    bridge = RecordingBridge()
+    intention = PlayerIntentionController()
+    intention.set_intention(PlayerIntention.DEFEND)
+    movement = _movement(bridge, intention=intention)
+
+    await movement.follow(None, "Alex")
+
+    assert intention.current == PlayerIntention.FOLLOW
 
 
 @pytest.mark.asyncio

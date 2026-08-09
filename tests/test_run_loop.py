@@ -4,8 +4,11 @@ import pytest
 
 from minebot.actions.registry import ActionRegistry
 from minebot.actions.types import Action, ActionParam, ActionResult
+from minebot.bot.combat import CombatController, register_combat_actions
 from minebot.bot.movement import FOLLOW_STOP_DISTANCE, MovementController, register_movement_actions
+from minebot.bot.player_intention import PlayerIntentionController
 from minebot.bot.run_loop import run
+from minebot.bot.self_defense import SelfDefenseTrigger
 from minebot.bridge.client import ModEvent
 from minebot.bridge.entities import EntityTracker
 from minebot.bridge.inventory import InventoryTracker
@@ -43,13 +46,22 @@ class FakeBridge:
     async def send_stop(self):
         self.sent.append(("stop", {}))
 
+    async def send_defend(self, player_name=None):
+        self.sent.append(("defend", {"player_name": player_name}))
+
 
 def _llm(bridge: FakeBridge, actions: ActionRegistry) -> LLMController:
     return LLMController(bridge, actions)  # default NullLLMProvider -- never replies
 
 
-def _movement(bridge: FakeBridge, tracker: EntityTracker) -> MovementController:
-    return MovementController(bridge, tracker)
+def _movement(bridge: FakeBridge, tracker: EntityTracker, intention: PlayerIntentionController | None = None) -> MovementController:
+    return MovementController(bridge, tracker, intention if intention is not None else PlayerIntentionController())
+
+
+def _self_defense(bridge: FakeBridge, tracker: EntityTracker | None = None) -> SelfDefenseTrigger:
+    tracker = tracker if tracker is not None else EntityTracker()
+    combat = CombatController(bridge, tracker, PlayerIntentionController())
+    return SelfDefenseTrigger(combat, combat.intention)
 
 
 @pytest.mark.asyncio
@@ -60,7 +72,7 @@ async def test_run_loop_feeds_entity_events_into_tracker():
     tracker = EntityTracker()
     actions = ActionRegistry()
 
-    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, SelfPositionTracker())
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, SelfPositionTracker(), _self_defense(bridge, tracker))
 
     assert tracker.find_by_name("Alex") is not None
 
@@ -74,7 +86,7 @@ async def test_run_loop_feeds_inventory_events_into_tracker():
     tracker = EntityTracker()
     actions = ActionRegistry()
 
-    await run(bridge, actions, tracker, inventory, _llm(bridge, actions), CONFIG, SelfPositionTracker())
+    await run(bridge, actions, tracker, inventory, _llm(bridge, actions), CONFIG, SelfPositionTracker(), _self_defense(bridge, tracker))
 
     assert inventory.count_of("minecraft:bread") == 5
 
@@ -88,7 +100,7 @@ async def test_run_loop_feeds_position_events_into_self_position_tracker():
     actions = ActionRegistry()
     self_position = SelfPositionTracker()
 
-    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, self_position)
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, self_position, _self_defense(bridge, tracker))
 
     assert self_position.current is not None
     assert (self_position.current.x, self_position.current.y, self_position.current.z) == (10.0, 64.0, -5.0)
@@ -109,7 +121,7 @@ async def test_run_loop_dispatches_chat_commands():
     actions.register(Action(name="ping", description="", handler=ping_handler))
     tracker = EntityTracker()
 
-    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, SelfPositionTracker())
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, SelfPositionTracker(), _self_defense(bridge, tracker))
 
     assert calls == ["Alex"]
 
@@ -129,7 +141,7 @@ async def test_run_loop_sends_action_result_message_to_chat():
     ))
     tracker = EntityTracker()
 
-    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, SelfPositionTracker())
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, SelfPositionTracker(), _self_defense(bridge, tracker))
 
     assert bridge.sent_chat == ["here's your bread"]
 
@@ -142,7 +154,7 @@ async def test_run_loop_replies_to_unknown_commands():
     actions = ActionRegistry()
     tracker = EntityTracker()
 
-    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, SelfPositionTracker())
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, SelfPositionTracker(), _self_defense(bridge, tracker))
 
     assert bridge.sent_chat == ["unknown command: !doesnotexist"]
 
@@ -155,7 +167,7 @@ async def test_run_loop_does_not_reply_to_unaddressed_non_command_chat():
     actions = ActionRegistry()
     tracker = EntityTracker()
 
-    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, SelfPositionTracker())
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, SelfPositionTracker(), _self_defense(bridge, tracker))
 
     assert bridge.sent_chat == []
 
@@ -174,7 +186,7 @@ async def test_run_loop_routes_bot_addressed_chat_to_the_llm_controller():
     actions = ActionRegistry()
     tracker = EntityTracker()
 
-    await run(bridge, actions, tracker, InventoryTracker(), RecordingLLM(), CONFIG, SelfPositionTracker())
+    await run(bridge, actions, tracker, InventoryTracker(), RecordingLLM(), CONFIG, SelfPositionTracker(), _self_defense(bridge, tracker))
 
     assert handled == [("Alex", f"hey {BOT_NAME}, got food?")]
 
@@ -197,7 +209,7 @@ async def test_run_loop_routes_trigger_word_chat_to_the_llm_controller():
     )
     tracker = EntityTracker()
 
-    await run(bridge, actions, tracker, InventoryTracker(), RecordingLLM(), config, SelfPositionTracker())
+    await run(bridge, actions, tracker, InventoryTracker(), RecordingLLM(), config, SelfPositionTracker(), _self_defense(bridge, tracker))
 
     assert handled == [("Alex", "hey buddy, got food?")]
 
@@ -213,8 +225,98 @@ async def test_run_loop_ignores_position_and_health_events_without_crashing():
     actions = ActionRegistry()
     tracker = EntityTracker()
 
-    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, SelfPositionTracker())  # should not raise
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, SelfPositionTracker(), _self_defense(bridge, tracker))  # should not raise
     assert bridge.sent_chat == []
+
+
+@pytest.mark.asyncio
+async def test_run_loop_enters_self_defend_on_hostile_damage():
+    bridge = FakeBridge([
+        ModEvent(type="damage", data={"hostile": True, "cause": "mob_attack", "attacker": "Zombie"}),
+    ])
+    actions = ActionRegistry()
+    tracker = EntityTracker()
+
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, SelfPositionTracker(), _self_defense(bridge, tracker))
+    # SelfDefenseTrigger fires combat.defend() via asyncio.ensure_future
+    # (fire-and-forget, see its own docstring), so it may not have run yet
+    # the instant run() itself returns -- give the loop one more turn.
+    await asyncio.sleep(0)
+
+    assert ("defend", {"player_name": None}) in bridge.sent
+
+
+@pytest.mark.asyncio
+async def test_run_loop_ignores_non_hostile_damage():
+    # Fall/fire/drown/etc damage must NOT trigger self-defend -- there's
+    # nothing to fight, so entering combat stance over it would just be
+    # wrong (see self_defense.py's own docstring).
+    bridge = FakeBridge([
+        ModEvent(type="damage", data={"hostile": False, "cause": "fall", "attacker": None}),
+    ])
+    actions = ActionRegistry()
+    tracker = EntityTracker()
+
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, SelfPositionTracker(), _self_defense(bridge, tracker))
+
+    assert bridge.sent == []
+
+
+@pytest.mark.asyncio
+async def test_run_loop_does_not_override_an_active_defend_on_further_hostile_damage():
+    # Once defend mode is active (whether from a manual !defend or an
+    # earlier auto-trigger), a further hostile hit must not re-send
+    # !defend -- in particular it must never clobber a standing
+    # "!defend <other player>" order with self-defense just because the
+    # bot itself also took a hit.
+    bridge = FakeBridge([
+        ModEvent(type="chat", data={"sender": "Alex", "text": "!defend Alex"}),
+        ModEvent(type="damage", data={"hostile": True, "cause": "mob_attack", "attacker": "Zombie"}),
+    ])
+    actions = ActionRegistry()
+    tracker = EntityTracker()
+    intention = PlayerIntentionController()
+    combat = CombatController(bridge, tracker, intention)
+    register_combat_actions(actions, combat)
+    self_defense = SelfDefenseTrigger(combat, intention)
+
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, SelfPositionTracker(), self_defense)
+
+    assert bridge.sent == [("defend", {"player_name": "Alex"})]
+
+
+@pytest.mark.asyncio
+async def test_run_loop_re_arms_self_defend_after_follow_supersedes_it():
+    # Regression test for the drift bug an earlier version had: a bare
+    # bool on CombatController, set True by defend() and never correctly
+    # cleared, meant auto-defend could only ever fire once per session --
+    # a later !follow (which really does end DEFEND mod-side, see
+    # PlayerIntentionState's own docstring) left Python thinking DEFEND
+    # was still active, so a fresh hostile hit after !follow silently did
+    # nothing. Reading PlayerIntentionController.current instead (kept in
+    # sync by MovementController.follow itself) fixes this.
+    bridge = FakeBridge([
+        ModEvent(type="damage", data={"hostile": True, "cause": "mob_attack", "attacker": "Zombie"}),
+        ModEvent(type="chat", data={"sender": "Alex", "text": "!follow"}),
+        ModEvent(type="damage", data={"hostile": True, "cause": "mob_attack", "attacker": "Skeleton"}),
+    ])
+    actions = ActionRegistry()
+    tracker = EntityTracker()
+    intention = PlayerIntentionController()
+    combat = CombatController(bridge, tracker, intention)
+    register_combat_actions(actions, combat)
+    movement = MovementController(bridge, tracker, intention)
+    register_movement_actions(actions, movement)
+    self_defense = SelfDefenseTrigger(combat, intention)
+
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, SelfPositionTracker(), self_defense)
+    await asyncio.sleep(0)
+
+    assert bridge.sent == [
+        ("defend", {"player_name": None}),
+        ("follow", {"player_name": "Alex", "stop_distance": FOLLOW_STOP_DISTANCE}),
+        ("defend", {"player_name": None}),
+    ]
 
 
 @pytest.mark.asyncio
@@ -225,7 +327,7 @@ async def test_run_loop_announces_death_in_chat():
     actions = ActionRegistry()
     tracker = EntityTracker()
 
-    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, SelfPositionTracker())
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, SelfPositionTracker(), _self_defense(bridge, tracker))
 
     assert bridge.sent_chat == ["I died"]
 
@@ -239,7 +341,7 @@ async def test_run_loop_does_not_announce_respawn_in_chat():
     actions = ActionRegistry()
     tracker = EntityTracker()
 
-    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, SelfPositionTracker())
+    await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, SelfPositionTracker(), _self_defense(bridge, tracker))
 
     assert bridge.sent_chat == ["I died"]
 
@@ -299,7 +401,7 @@ async def test_run_loop_lets_a_new_chat_command_interrupt_a_stuck_one():
     register_movement_actions(actions, movement)
 
     await asyncio.wait_for(
-        run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, SelfPositionTracker()),
+        run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, SelfPositionTracker(), _self_defense(bridge, tracker)),
         timeout=2.0,
     )
 
@@ -330,6 +432,6 @@ async def test_run_loop_survives_a_chat_reply_that_fails_to_send(caplog):
     tracker = EntityTracker()
 
     with caplog.at_level("ERROR"):
-        await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, SelfPositionTracker())
+        await run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, SelfPositionTracker(), _self_defense(bridge, tracker))
 
     assert any("failed to send chat reply" in record.message for record in caplog.records)

@@ -198,6 +198,24 @@ Events, mod -> Python:
   (name/position omitted on `remove`; name omitted on `move`, since it never
   changes)
 - `{"type":"health","health":..}`
+- `{"type":"damage","hostile":true|false,"cause":"mob_attack"|"fall"|..|null,"attacker":"name-or-null"}`
+  -- fires once per real health *drop* only (never on a rise -- eating/
+  regen has no DamageSource behind it to report), immediately alongside
+  that drop's own `health` event, carrying WHAT caused it -- something the
+  plain polled/diffed `health` float can't express on its own. Sourced
+  from `LivingEntity.getLastDamageSource()` (a public, no-mixin getter;
+  self-set by the vanilla `ClientboundDamageEventPacket` handler, self-
+  clearing itself again after 40 ticks/2s -- read the same tick the drop
+  is detected, well inside that window). `hostile` is true only for a
+  monster/player-attack-shaped `DamageTypes` key (`mob_attack`,
+  `mob_attack_no_aggro`, `player_attack`, `mob_projectile`, `arrow`,
+  `trident`, `sting`, `spear`, `mace_smash`, `thorns`) -- environmental
+  causes (`fall`, `in_fire`/`lava`, `drown`, `cactus`, `starve`, ...) and
+  a genuinely absent source (`cause`/`attacker` both null) report `false`
+  rather than guessing. `cause` is the raw `DamageType.msgId()` registry
+  key; `attacker` is the attacking entity's display name if the source
+  had one attributed, else null (e.g. a `mob_projectile` with no shooter
+  still resolvable).
 - `{"type":"death"}` -- fires exactly once when the bot dies (distinct
   from `health` hitting 0, which can be transient/edge-casey on its own);
   the mod auto-respawns immediately when this fires (see `RespawnHandler`

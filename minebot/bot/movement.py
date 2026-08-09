@@ -26,6 +26,7 @@ import logging
 
 from minebot.actions.registry import ActionRegistry
 from minebot.actions.types import Action, ActionParam, ActionResult
+from minebot.bot.player_intention import PlayerIntention, PlayerIntentionController
 from minebot.bridge.client import ModBridge
 from minebot.bridge.entities import EntityTracker
 
@@ -35,9 +36,10 @@ FOLLOW_STOP_DISTANCE = 2.0
 
 
 class MovementController:
-    def __init__(self, bridge: ModBridge, tracker: EntityTracker) -> None:
+    def __init__(self, bridge: ModBridge, tracker: EntityTracker, intention: PlayerIntentionController) -> None:
         self.bridge = bridge
         self.tracker = tracker
+        self.intention = intention
 
     async def follow(self, sender: str | None, player_name: str | None = None) -> ActionResult:
         target_name = player_name if player_name else sender
@@ -47,11 +49,13 @@ class MovementController:
                 "(e.g. triggered from console/system chat, not a player message)"
             )
 
+        self.intention.set_intention(PlayerIntention.FOLLOW)
         log.info("starting follow of %s", target_name)
         await self.bridge.send_follow(target_name, stop_distance=FOLLOW_STOP_DISTANCE)
         return ActionResult(message=f"ok, following {target_name}")
 
     async def stop(self, sender: str | None) -> ActionResult:
+        self.intention.set_intention(PlayerIntention.IDLE)
         await self.bridge.send_stop()
         return ActionResult(message="ok, stopped")
 
