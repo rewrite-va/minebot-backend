@@ -218,6 +218,16 @@ def _make_schematic_teardown(schematic_path: Path, anchor_x: float, anchor_y: fl
     behind for the next one -- per explicit direction, cleanup must always
     happen, even when the run leading up to it failed.
 
+    Sends !stop FIRST (reset_to_idle -- a fire-and-forget send, no
+    poll/wait attached, so this can't reintroduce the same hang risk
+    teleporting away did) -- per explicit direction, after a real live
+    report: a test's own func can still be mid-!goto right up until
+    run_test_case's own timeout fires it as a failure, and clearing the
+    schematic's blocks out from under a bot that's still actively trying
+    to walk through/around that exact region (still fighting toward its
+    last commanded target) is worth stopping first, even though it isn't
+    what makes cleanup itself reliable -- see below for that part.
+
     Deliberately does NOT teleport the bot away first, or wait/confirm
     anything about its position at all, before clearing -- an earlier
     version did (reset_to_idle + teleport(HOLDING) first, since a real
@@ -239,6 +249,7 @@ def _make_schematic_teardown(schematic_path: Path, anchor_x: float, anchor_y: fl
     the alternative of teardown sometimes doing nothing at all.
     """
     async def teardown(ctx: TestContext) -> None:
+        await actions.reset_to_idle(ctx)
         schematic = Schematic.from_file(schematic_path)
         await actions.clear_schematic(
             ctx, schematic, anchor_x=int(anchor_x), anchor_y=int(anchor_y), anchor_z=int(anchor_z),
