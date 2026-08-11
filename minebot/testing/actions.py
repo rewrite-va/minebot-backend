@@ -371,20 +371,28 @@ async def teleport(ctx: TestContext, x: float, y: float, z: float, timeout: floa
     session did.
 
     Waits for the position to actually change (not just sends and
-    returns) because `bridge.send_chat` only ENQUEUES the command (see
-    its own docstring -- rate-limited, doesn't wait for its actual turn
-    through the queue) -- a caller that immediately reads self_position.
-    current after calling this without waiting could still see the
-    bot's PREVIOUS position, race the real teleport, and start a test
-    from the wrong place with no error to explain why. Raises
-    `asyncio.TimeoutError` (same shape as goto()/wait_for_position()
-    above) if the position never actually updates within `timeout` --
-    e.g. a malformed command, or the bot not actually connected.
+    returns) -- a caller that immediately reads self_position.current
+    after calling this without waiting could still see the bot's
+    PREVIOUS position, race the real teleport, and start a test from the
+    wrong place with no error to explain why. Raises `asyncio.TimeoutError`
+    (same shape as goto()/wait_for_position() above) if the position never
+    actually updates within `timeout` -- e.g. a malformed command, or the
+    bot not actually connected.
+
+    Uses send_console_command (an unrated `_send`), not send_chat --
+    found live: a test-world `/tp` sitting behind other queued chat
+    (CHAT_RATE_PER_SECOND's own 1/sec throttle, meant for real
+    multiplayer spam risk that doesn't apply to the disposable/
+    single-player test world at all -- see send_console_command's own
+    docstring, already applied to place_schematic/clear_schematic) could
+    eat several real seconds of `timeout`'s own budget before the /tp
+    even reached the server, causing sporadic teleport timeouts that had
+    nothing to do with the teleport itself ever actually failing.
     """
     await _wait_for_initial_position(ctx)
 
     async def _wait_for_teleport() -> None:
-        await ctx.bridge.send_chat(f"/tp @s {x} {y} {z}")
+        await ctx.bridge.send_console_command(f"/tp @s {x} {y} {z}")
 
         while True:
             pos = ctx.self_position.current
