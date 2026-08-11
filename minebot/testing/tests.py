@@ -94,10 +94,23 @@ async def test_goto_moves_bot_to_target(ctx: TestContext) -> None:
 # any checkout, not just this machine's current schematics folder.
 SCHEMATIC_PATH = Path(__file__).resolve().parent.parent.parent / "tests" / "fixtures" / "schematics" / "simple_goto.litematic"
 
-# Placed a real distance from ORIGIN (not overlapping it) so setup's own
-# placement and the pre-existing origin/goto-target scenario above can
-# never collide regardless of test order.
-SCHEMATIC_ANCHOR_X = ORIGIN_X + 20.0
+# Anchored at ORIGIN's own (x, z) -- per explicit direction: every
+# schematic-driven test's own teardown (clear_schematic) always fully
+# clears its footprint before the NEXT test's setup ever places anything
+# (run_test_case's own sequencing, plus TestRunner running tests strictly
+# one at a time -- see its own docstring), so spreading each schematic out
+# to a different, far-off X offset bought nothing beyond keeping tests
+# out of each other's way, and cost real robustness on a non-void/
+# non-superflat world (e.g. a manual !runtest session against a real LAN
+# world, not just the disposable pytest-launched one): those far
+# coordinates can land in unloaded chunks or real terrain that doesn't
+# actually match a flat void floor, which is exactly the kind of thing
+# that caused a real live "No blocks were filled" + fell-out-of-world
+# failure. Every schematic-driven test now shares ORIGIN's own (x, z),
+# only Y offsets from the schematic's own local coordinates -- same
+# floor, same chunk, always confirmed loaded/reachable since ORIGIN
+# itself is where every test's OWN first teleport already lands safely.
+SCHEMATIC_ANCHOR_X = ORIGIN_X
 SCHEMATIC_ANCHOR_Y = ORIGIN_Y
 SCHEMATIC_ANCHOR_Z = ORIGIN_Z
 
@@ -226,7 +239,10 @@ async def test_goto_arrives_on_schematic_block(ctx: TestContext) -> None:
 # gap (must be walked/jumped over), forbidden marker in the gap itself at
 # foot height (falling in is a failure), end on the far side.
 JUMP_SCHEMATIC_PATH = Path(__file__).resolve().parent.parent.parent / "tests" / "fixtures" / "schematics" / "goto_jump_1.litematic"
-JUMP_SCHEMATIC_ANCHOR_X = ORIGIN_X + 40.0
+# Same ORIGIN (x, z) every schematic-driven test now shares -- see
+# SCHEMATIC_ANCHOR_X's own comment for why spreading these out to
+# different X offsets was dropped.
+JUMP_SCHEMATIC_ANCHOR_X = ORIGIN_X
 JUMP_SCHEMATIC_ANCHOR_Y = ORIGIN_Y
 JUMP_SCHEMATIC_ANCHOR_Z = ORIGIN_Z
 
@@ -271,7 +287,10 @@ async def test_goto_jumps_across_gap(ctx: TestContext) -> None:
 # role, not `forbidden` (this IS the !goto target, not just a column to
 # avoid on the way to a different real goal).
 IMPOSSIBLE_SCHEMATIC_PATH = Path(__file__).resolve().parent.parent.parent / "tests" / "fixtures" / "schematics" / "goto_impossible_1.litematic"
-IMPOSSIBLE_SCHEMATIC_ANCHOR_X = ORIGIN_X + 60.0
+# Same ORIGIN (x, z) every schematic-driven test now shares -- see
+# SCHEMATIC_ANCHOR_X's own comment for why spreading these out to
+# different X offsets was dropped.
+IMPOSSIBLE_SCHEMATIC_ANCHOR_X = ORIGIN_X
 IMPOSSIBLE_SCHEMATIC_ANCHOR_Y = ORIGIN_Y
 IMPOSSIBLE_SCHEMATIC_ANCHOR_Z = ORIGIN_Z
 
