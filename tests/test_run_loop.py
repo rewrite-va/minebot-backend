@@ -409,6 +409,100 @@ async def test_run_loop_lets_a_new_chat_command_interrupt_a_stuck_one():
     assert "ok, following Alex" in bridge.sent_chat
 
 
+class StuckThenSystemMessageBridge(FakeBridge):
+    """Same shape as StuckThenFollowBridge above, but the message that
+    arrives while the command is still running has no sender at all
+    (sender=None) -- what the mod actually broadcasts for a real server/
+    game message (e.g. a `/tp` teleport confirmation, ClientReceiveMessageEvents.
+    GAME in MinebotMod.onInitializeClient), not something any player typed.
+    Waits for the stuck handler to observably start (via `started`) before
+    yielding the system message, then sets `system_message_processed` once
+    the run loop has picked it back up off the queue -- giving the test a
+    clean point to check the stuck task's state from OUTSIDE run(), before
+    anything (including the test's own eventual cleanup) cancels it for an
+    unrelated reason.
+    """
+
+    def __init__(self, stuck_event: ModEvent, started: asyncio.Event, system_message_processed: asyncio.Event):
+        super().__init__([
+            ModEvent(type="entity", data={"action": "add", "id": 7, "name": "Alex", "x": 0.0, "y": 0.0, "z": 0.0}),
+            stuck_event,
+        ])
+        self._started = started
+        self._system_message_processed = system_message_processed
+
+    async def events(self):
+        async for event in super().events():
+            yield event
+        await self._started.wait()
+        yield ModEvent(type="chat", data={"text": "Teleported ritebot to 0.0, -60.0, 0.0"})
+        self._system_message_processed.set()
+        await asyncio.Event().wait()  # keep the generator open -- run() must not see a natural stream end here
+
+
+@pytest.mark.asyncio
+async def test_run_loop_ignores_system_chat_messages_while_a_command_is_running():
+    # Regression test: a real, live-reported bug where !runtest never got
+    # past its own first test. actions.teleport's own `/tp @s ...` (used
+    # by every in-game test's setup, see minebot/testing/tests.py) triggers
+    # a real server system message ("Teleported X to ...") that the mod
+    # broadcasts as a sender=None chat event -- before this fix, run_loop's
+    # _dispatch_chat_command treated ANY chat event as a brand-new command
+    # and cancelled whatever was currently running, so the teleport that
+    # !runtest's own setup step issued ended up cancelling the very
+    # !runtest task that issued it, every single time.
+    #
+    # Checked by racing "the stuck task finishes/gets cancelled" against
+    # "the system message has been processed" right after the event is
+    # yielded -- if the system message wrongly cancels the stuck task,
+    # current_command_task resolves (with a CancelledError) essentially
+    # immediately after `system_message_processed` fires; if it's
+    # correctly ignored, the stuck task is still running at that point
+    # (nothing else in the event stream would end it) and stays that way.
+    # The run() task itself is cancelled directly at the end purely for
+    # test cleanup, well after the actual assertion already happened.
+    started = asyncio.Event()
+    system_message_processed = asyncio.Event()
+    stuck_task_ref: list[asyncio.Task] = []
+
+    async def stuck_handler(sender):
+        stuck_task_ref.append(asyncio.current_task())
+        started.set()
+        await asyncio.Event().wait()  # never resolves on its own -- only cancellation ends this
+
+    bridge = StuckThenSystemMessageBridge(
+        ModEvent(type="chat", data={"sender": "Alex", "text": "!stuck"}), started, system_message_processed,
+    )
+    actions = ActionRegistry()
+    actions.register(Action(name="stuck", description="", handler=stuck_handler))
+    tracker = EntityTracker()
+    movement = _movement(bridge, tracker)
+    register_movement_actions(actions, movement)
+
+    run_task = asyncio.ensure_future(
+        run(bridge, actions, tracker, InventoryTracker(), _llm(bridge, actions), CONFIG, SelfPositionTracker(), _self_defense(bridge, tracker))
+    )
+    try:
+        await asyncio.wait_for(system_message_processed.wait(), timeout=2.0)
+        # Give the run loop's own event-processing coroutine a chance to
+        # actually act on the system message (dispatch/cancel or not) --
+        # asyncio.sleep(0) alone isn't enough since _dispatch_chat_command
+        # itself awaits before reaching the sender-is-None check.
+        await asyncio.sleep(0.05)
+
+        assert stuck_task_ref, "stuck handler never started"
+        assert not stuck_task_ref[0].done(), (
+            "the stuck command was cancelled by a system (sender=None) chat message -- "
+            "system messages must never be treated as a new command"
+        )
+    finally:
+        run_task.cancel()
+        try:
+            await run_task
+        except asyncio.CancelledError:
+            pass
+
+
 @pytest.mark.asyncio
 async def test_run_loop_survives_a_chat_reply_that_fails_to_send(caplog):
     # Regression test: a live report of "!follow gives no confirmation or

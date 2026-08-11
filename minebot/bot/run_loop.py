@@ -237,7 +237,25 @@ async def _dispatch_chat_command(
     text = event.data.get("text", "")
     log.info("<%s> %s", sender or "system", text)
 
-    if sender is not None and sender == self_position.own_name:
+    if sender is None:
+        # A real system/game message (server "Teleported X to ...", death
+        # messages, ...), not something any player typed -- the mod's own
+        # ClientReceiveMessageEvents.GAME handler always broadcasts these
+        # with sender=null (MinebotMod.onInitializeClient), distinct from
+        # ClientReceiveMessageEvents.CHAT's real sender.name() for actual
+        # player chat. Confirmed live as a real bug: actions.teleport's own
+        # `/tp @s ...` (used by every in-game test's setup, see
+        # minebot/testing/tests.py) triggers exactly this kind of system
+        # message, which -- before this guard -- got dispatched here as if
+        # it were a brand-new chat command and cancelled the CURRENTLY
+        # RUNNING !runtest task that had just issued the teleport in the
+        # first place, over and over, so !runtest never got past its own
+        # first test's setup step. System messages carry no command for a
+        # human to have typed, so there is nothing to dispatch here and
+        # nothing that should ever preempt a running command.
+        return current_command_task
+
+    if sender == self_position.own_name:
         # The mod hears its own chat messages the same as anyone else's
         # (they go through the normal server chat broadcast) -- without
         # this guard, a command's own error reply ("something went wrong
