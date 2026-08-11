@@ -245,6 +245,26 @@ class ModBridge:
         """
         await self._chat_queue.put(text)
 
+    async def send_console_command(self, text: str) -> None:
+        """Sends `text` (typically a `/`-command, e.g. `/fill ...`) the
+        same way `send_chat` ultimately does -- as a real `{"type":
+        "chat", "text": text}` wire message -- but goes straight to
+        `_send`, bypassing CHAT_RATE_PER_SECOND/`_chat_queue` entirely.
+
+        CHAT_RATE_PER_SECOND exists to keep the bot from getting kicked
+        for spamming a real MULTIPLAYER server's chat (see that constant's
+        own docstring) -- it does not apply here: this is specifically for
+        world-setup/teardown commands sent to the disposable, single-
+        player, integrated-server test world (see minebot-mod's
+        TESTING.md), which has no other players to spam and no spam-kick
+        risk at all. Per explicit direction: routing test-world `/fill`
+        commands through the throttled queue was wrong, forcing artificial
+        multi-second delays on every schematic placement for a risk that
+        doesn't exist in that world. Ordinary gameplay chat/commands
+        should still go through send_chat, not this.
+        """
+        await self._send({"type": "chat", "text": text})
+
     async def _drain_chat_queue(self) -> None:
         """Sends one queued chat message every 1/CHAT_RATE_PER_SECOND,
         forever, until cancelled (see close()'s own cleanup) -- a fixed-

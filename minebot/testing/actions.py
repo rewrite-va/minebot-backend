@@ -23,6 +23,7 @@ import asyncio
 import math
 
 from minebot.bridge.self_position import SelfPosition
+from minebot.testing.litematic import Schematic
 from minebot.testing.runner import TestContext
 
 POLL_INTERVAL_SECONDS = 0.5
@@ -156,3 +157,125 @@ async def teleport(ctx: TestContext, x: float, y: float, z: float, timeout: floa
             await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
     await asyncio.wait_for(_wait_for_teleport(), timeout=timeout)
+
+
+# Grace period after the LAST `/fill` command is sent, for its own real
+# round trip through the single-player integrated server to land -- there's
+# no mod-broadcast event confirming a `/fill` landed the way `position`
+# confirms a teleport (see teleport()'s own `/tp` handling above), so this
+# is a fixed pad rather than a real poll-until-confirmed wait. Commands
+# themselves go out back-to-back with no artificial spacing between them
+# (see send_console_command's own docstring for why CHAT_RATE_PER_SECOND
+# doesn't apply to the disposable test world at all -- it's single-player,
+# nothing else to spam).
+_FILL_LAND_GRACE_SECONDS = 1.0
+
+
+def _fill_runs(schematic: Schematic) -> list[tuple[int, int, int, int, int, int, str]]:
+    """Collapses a schematic's individual blocks into axis-aligned same-
+    block-type runs along x (within one (y, z) row), each replayable as one
+    `/fill` command instead of one `/setblock` per block -- keeps the real
+    command count (and therefore real round trips to the client) down for
+    a solid floor/wall, even though send_console_command has no rate limit
+    to work around here (see its own docstring -- that's specific to real
+    multiplayer chat, not the single-player test world). Only merges along x
+    (not a full 3D greedy merge) -- schematics built for THIS repo's own
+    test scenarios are expected to be small/simple (a handful of blocks
+    marking a goal position, a short wall), where row-merging already
+    collapses the common case (a flat floor/wall) to one run per row; a
+    full 3D box-merge isn't worth the complexity until a real scenario
+    actually needs it.
+
+    Returns (x1, y, z, x2, y, z, block) tuples, one per contiguous run,
+    in ascending (y, z, x) order -- deterministic, so tests calling this
+    directly get reproducible output.
+    """
+    by_row: dict[tuple[int, int], list[tuple[int, str]]] = {}
+    for b in schematic.blocks:
+        by_row.setdefault((b.y, b.z), []).append((b.x, b.block))
+
+    runs = []
+    for (y, z), cells in sorted(by_row.items()):
+        cells.sort()
+        run_start_x, run_block = cells[0]
+        prev_x = run_start_x
+        for x, block in cells[1:]:
+            if block == run_block and x == prev_x + 1:
+                prev_x = x
+                continue
+            runs.append((run_start_x, y, z, prev_x, y, z, run_block))
+            run_start_x, run_block = x, block
+            prev_x = x
+        runs.append((run_start_x, y, z, prev_x, y, z, run_block))
+    return runs
+
+
+async def place_schematic(ctx: TestContext, schematic: Schematic, anchor_x: int, anchor_y: int, anchor_z: int, timeout: float) -> None:
+    """Places `schematic` (see litematic.py -- read from a `.litematic`
+    file built in-game with Litematica, or constructed directly) into the
+    world via real `/fill` commands, offset so its own (0,0,0) corner lands
+    at (anchor_x, anchor_y, anchor_z). Per explicit direction, a test's own
+    setup should build its scenario this way rather than relying on
+    whatever the disposable test world happened to already contain, then
+    call clear_schematic (same anchor) in teardown to restore the world to
+    empty for the next test -- see clear_schematic's own docstring for why
+    that's a plain `/fill air` over the bounding box, not a snapshot/
+    restore of pre-existing blocks (the disposable test world always
+    starts as an empty void, see minebot-mod's TESTING.md -- there is
+    nothing to preserve underneath a freshly-placed test scenario).
+
+    Runs are collapsed via _fill_runs to keep the real command count
+    proportional to the schematic's own distinct same-block-type ROWS, not
+    its total block count -- sent back-to-back via send_console_command
+    (not send_chat -- see that method's own docstring for why the normal
+    chat rate limit doesn't apply to the disposable, single-player test
+    world at all).
+    """
+    runs = _fill_runs(schematic)
+
+    async def _place() -> None:
+        for x1, y1, z1, x2, y2, z2, block in runs:
+            command = (
+                f"/fill {anchor_x + x1} {anchor_y + y1} {anchor_z + z1} "
+                f"{anchor_x + x2} {anchor_y + y2} {anchor_z + z2} {block}"
+            )
+            await ctx.bridge.send_console_command(command)
+
+        # There's no mod-broadcast event confirming a /fill landed (see
+        # _FILL_LAND_GRACE_SECONDS's own docstring) -- a fixed pad after
+        # the last command before returning, so a caller that immediately
+        # starts asserting against placed blocks doesn't race the world's
+        # own real, if fast, round trip.
+        await asyncio.sleep(_FILL_LAND_GRACE_SECONDS)
+
+    await asyncio.wait_for(_place(), timeout=timeout)
+
+
+async def clear_schematic(ctx: TestContext, schematic: Schematic, anchor_x: int, anchor_y: int, anchor_z: int, timeout: float) -> None:
+    """Restores the region a matching place_schematic call occupied back to
+    air -- ONE `/fill ... air` over the schematic's own full bounding box
+    (anchor to anchor+size-1 on every axis), not a block-by-block undo or a
+    snapshot-restore of whatever was there before. Correct specifically
+    because the disposable test world always starts as an empty void (see
+    place_schematic's own docstring) -- there is no pre-existing state to
+    put back, only the test's own placed blocks to remove, so "fill with
+    air" and "restore the previous state" are the same operation here.
+
+    Deliberately takes the same (schematic, anchor_x, anchor_y, anchor_z)
+    shape place_schematic does rather than a raw bounding box, so a test's
+    teardown can't accidentally clear the wrong region by hand-computing
+    bounds that drift out of sync with what setup actually placed. Bounded
+    by `timeout` the same way place_schematic is -- a stuck teardown should
+    fail fast and visibly, not hang the whole test run (see run_test_case's
+    own docstring for why every test-adjacent await needs its own bound).
+    """
+    x2 = anchor_x + schematic.size_x - 1
+    y2 = anchor_y + schematic.size_y - 1
+    z2 = anchor_z + schematic.size_z - 1
+    command = f"/fill {anchor_x} {anchor_y} {anchor_z} {x2} {y2} {z2} air replace"
+
+    async def _clear() -> None:
+        await ctx.bridge.send_console_command(command)
+        await asyncio.sleep(_FILL_LAND_GRACE_SECONDS)
+
+    await asyncio.wait_for(_clear(), timeout=timeout)

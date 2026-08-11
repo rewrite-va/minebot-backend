@@ -72,6 +72,18 @@ class TestCase:
     # itself is reproducible regardless of run order or a previous test's
     # own end state. None means no setup needed (not every test has one).
     setup: TestFunc | None = None
+    # Optional -- runs after `func`, REGARDLESS of whether setup/func
+    # passed, failed, or timed out (see run_test_case's own try/finally),
+    # in its OWN separate `timeout_seconds`-sized budget rather than
+    # whatever's left of the main run's budget -- a test that already used
+    # its full timeout (e.g. it genuinely timed out) must not leave
+    # teardown with zero time to actually run, since a test that places
+    # real blocks (see actions.place_schematic) and then fails/times out
+    # would otherwise leave those blocks behind for the NEXT test to trip
+    # over. None means nothing to clean up (not every test places
+    # anything -- e.g. `!goto`'s own test only teleports, nothing to
+    # restore afterward).
+    teardown: TestFunc | None = None
 
 
 @dataclass
@@ -93,18 +105,42 @@ async def run_test_case(ctx: TestContext, test: TestCase) -> None:
     through TestRunner at all) use, so setup/teardown-around-a-fixed-
     origin behaves identically from either entry point (see minebot-mod's
     TESTING.md "Two entry points" section for why both exist and must
-    stay behaviorally identical). Raises whatever setup/func themselves
-    raise (typically asyncio.TimeoutError, from actions.py's own
-    self-timing-out primitives, or a plain AssertionError/RuntimeError)
-    -- TestRunner catches it (see _run_one below), a pytest test lets it
-    fail the test normally.
+    stay behaviorally identical).
+
+    `test.teardown` (if any) then ALWAYS runs afterward, in its own
+    separate `test.timeout_seconds`-sized budget -- regardless of whether
+    setup/func passed, failed, or timed out (see TestCase.teardown's own
+    docstring for why this must not share the main run's budget: a test
+    that already burned its whole timeout failing must not leave teardown
+    with nothing left to actually clean up placed blocks with). If BOTH
+    the main run and teardown raise, the main run's exception is what
+    propagates -- that's the one that actually describes what the test was
+    testing; a teardown-only failure is logged instead of hiding it,
+    though still surfaces on its own if the main run passed.
+
+    Raises whatever setup/func themselves raise (typically
+    asyncio.TimeoutError, from actions.py's own self-timing-out
+    primitives, or a plain AssertionError/RuntimeError) -- TestRunner
+    catches it (see _run_one below), a pytest test lets it fail the test
+    normally.
     """
     async def _run() -> None:
         if test.setup is not None:
             await test.setup(ctx)
         await test.func(ctx)
 
-    await asyncio.wait_for(_run(), timeout=test.timeout_seconds)
+    try:
+        await asyncio.wait_for(_run(), timeout=test.timeout_seconds)
+    except Exception:
+        if test.teardown is not None:
+            try:
+                await asyncio.wait_for(test.teardown(ctx), timeout=test.timeout_seconds)
+            except Exception:
+                log.exception("!runtest: teardown for %s also failed (original failure below takes precedence)", test.name)
+        raise
+    else:
+        if test.teardown is not None:
+            await asyncio.wait_for(test.teardown(ctx), timeout=test.timeout_seconds)
 
 
 class TestRegistry:
