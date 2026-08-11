@@ -220,3 +220,54 @@ async def test_goto_with_waypoints_removes_its_listener_after_returning():
     # No listener should still be registered -- a leftover one would keep
     # tagging hits for whatever the NEXT test's own walk does.
     assert self_position._listeners == []
+
+
+class _StaticGotoBridge:
+    """send_goto is a no-op -- self_position never moves, simulating a
+    genuinely blocked target the bot can never actually reach.
+    """
+
+    async def send_goto(self, x: float, y: float, z: float) -> None:
+        pass
+
+
+@pytest.mark.asyncio
+async def test_assert_goto_never_arrives_passes_when_bot_stays_away():
+    self_position = SelfPositionTracker()
+    self_position.handle_event(ModEvent(type="position", data={"x": 0.0, "y": 0.0, "z": 0.0, "yaw": 0.0, "pitch": 0.0}))
+    ctx = TestContext(bridge=_StaticGotoBridge(), self_position=self_position, tracker=None, query_result=None)
+
+    # Should return cleanly, no exception -- the bot (frozen at (0,0,0) by
+    # _StaticGotoBridge's own no-op send_goto) never comes within
+    # distance_tolerance of a target 100 blocks away.
+    await actions.assert_goto_never_arrives(
+        ctx, target_x=100.0, target_y=0.0, target_z=100.0, distance_tolerance=0.5, timeout=0.3,
+    )
+
+
+class _ArrivingGotoBridge:
+    """send_goto immediately jumps self_position to the target -- models
+    the failure case: the supposedly-unreachable target IS actually
+    reached.
+    """
+
+    def __init__(self, self_position: SelfPositionTracker) -> None:
+        self._self_position = self_position
+
+    async def send_goto(self, x: float, y: float, z: float) -> None:
+        self._self_position.handle_event(
+            ModEvent(type="position", data={"x": x, "y": y, "z": z, "yaw": 0.0, "pitch": 0.0})
+        )
+
+
+@pytest.mark.asyncio
+async def test_assert_goto_never_arrives_fails_when_bot_actually_arrives():
+    self_position = SelfPositionTracker()
+    self_position.handle_event(ModEvent(type="position", data={"x": 0.0, "y": 0.0, "z": 0.0, "yaw": 0.0, "pitch": 0.0}))
+    bridge = _ArrivingGotoBridge(self_position)
+    ctx = TestContext(bridge=bridge, self_position=self_position, tracker=None, query_result=None)
+
+    with pytest.raises(AssertionError, match="reached supposedly unreachable target"):
+        await actions.assert_goto_never_arrives(
+            ctx, target_x=5.0, target_y=0.0, target_z=5.0, distance_tolerance=0.5, timeout=1.0,
+        )

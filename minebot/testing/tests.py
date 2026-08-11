@@ -119,47 +119,61 @@ def _one(waypoints: list, role: str) -> object:
     return waypoints[0]
 
 
-async def setup_goto_onto_schematic(ctx: TestContext) -> None:
-    """Resets PlayerIntention to IDLE, teleports to the schematic's own
-    white-wool "start" marker (see litematic.WAYPOINT_BLOCK_ROLES), then
-    places the fixture schematic at SCHEMATIC_ANCHOR -- all inside this
-    TestCase's own combined timeout budget (see run_test_case's own
-    docstring). Teleporting to the marker itself (not a hardcoded
-    ORIGIN-relative offset) is the whole point of the wool-marker
-    convention: the test's own starting position is authored visually in
-    Litematica, not duplicated as separate coordinates here that could
-    silently drift out of sync with what the schematic actually shows.
-    """
-    await actions.reset_to_idle(ctx)
-    schematic = Schematic.from_file(SCHEMATIC_PATH)
-    start = _one(schematic.waypoints.start, "start")
-    await actions.teleport(
-        ctx,
-        SCHEMATIC_ANCHOR_X + start.x, SCHEMATIC_ANCHOR_Y + start.y, SCHEMATIC_ANCHOR_Z + start.z,
-        timeout=TELEPORT_TIMEOUT_SECONDS,
-    )
-    await actions.place_schematic(
-        ctx, schematic,
-        anchor_x=int(SCHEMATIC_ANCHOR_X), anchor_y=int(SCHEMATIC_ANCHOR_Y), anchor_z=int(SCHEMATIC_ANCHOR_Z),
-        timeout=SCHEMATIC_TIMEOUT_SECONDS,
-    )
+def _offset(anchor_x: float, anchor_y: float, anchor_z: float, waypoint: Waypoint) -> Waypoint:
+    return Waypoint(x=int(anchor_x) + waypoint.x, y=int(anchor_y) + waypoint.y, z=int(anchor_z) + waypoint.z)
 
 
-async def teardown_clear_schematic(ctx: TestContext) -> None:
-    """Restores the region setup_goto_onto_schematic placed back to air --
-    see clear_schematic's own docstring for why this is correct without a
-    snapshot/restore (the disposable test world always starts as an empty
-    void, so there's nothing under the placed blocks to preserve). Runs
-    regardless of whether the test itself passed or failed (see
-    TestCase.teardown/run_test_case's own docstrings) so a failed test
-    never leaves blocks behind for the next test to trip over.
+def _make_schematic_setup(schematic_path: Path, anchor_x: float, anchor_y: float, anchor_z: float):
+    """Builds a TestCase.setup for a schematic-driven scenario: reset to
+    IDLE, teleport to the schematic's own white-wool "start" marker (see
+    litematic.WAYPOINT_BLOCK_ROLES), then place the schematic at the given
+    anchor -- the shared shape every wool-marker scenario test in this
+    file uses (see setup_goto_onto_schematic's own original docstring, now
+    generalized here once a second/third schematic-driven test -- goto_jump/
+    goto_impossible -- made the copy-pasted version worth factoring out).
+    Teleporting to the marker itself (not a hardcoded ORIGIN-relative
+    offset) is the whole point of the wool-marker convention: a test's own
+    starting position is authored visually in Litematica, not duplicated
+    as separate coordinates here that could silently drift out of sync
+    with what the schematic actually shows.
     """
-    schematic = Schematic.from_file(SCHEMATIC_PATH)
-    await actions.clear_schematic(
-        ctx, schematic,
-        anchor_x=int(SCHEMATIC_ANCHOR_X), anchor_y=int(SCHEMATIC_ANCHOR_Y), anchor_z=int(SCHEMATIC_ANCHOR_Z),
-        timeout=SCHEMATIC_TIMEOUT_SECONDS,
-    )
+    async def setup(ctx: TestContext) -> None:
+        await actions.reset_to_idle(ctx)
+        schematic = Schematic.from_file(schematic_path)
+        start = _one(schematic.waypoints.start, "start")
+        await actions.teleport(
+            ctx, anchor_x + start.x, anchor_y + start.y, anchor_z + start.z,
+            timeout=TELEPORT_TIMEOUT_SECONDS,
+        )
+        await actions.place_schematic(
+            ctx, schematic, anchor_x=int(anchor_x), anchor_y=int(anchor_y), anchor_z=int(anchor_z),
+            timeout=SCHEMATIC_TIMEOUT_SECONDS,
+        )
+
+    return setup
+
+
+def _make_schematic_teardown(schematic_path: Path, anchor_x: float, anchor_y: float, anchor_z: float):
+    """Builds a TestCase.teardown clearing whatever _make_schematic_setup's
+    own place_schematic call placed -- see clear_schematic's own docstring
+    for why this is correct without a snapshot/restore (the disposable
+    test world always starts as an empty void). Runs regardless of
+    whether the test itself passed or failed (TestCase.teardown/
+    run_test_case's own docstrings) so a failed test never leaves blocks
+    behind for the next one.
+    """
+    async def teardown(ctx: TestContext) -> None:
+        schematic = Schematic.from_file(schematic_path)
+        await actions.clear_schematic(
+            ctx, schematic, anchor_x=int(anchor_x), anchor_y=int(anchor_y), anchor_z=int(anchor_z),
+            timeout=SCHEMATIC_TIMEOUT_SECONDS,
+        )
+
+    return teardown
+
+
+setup_goto_onto_schematic = _make_schematic_setup(SCHEMATIC_PATH, SCHEMATIC_ANCHOR_X, SCHEMATIC_ANCHOR_Y, SCHEMATIC_ANCHOR_Z)
+teardown_clear_schematic = _make_schematic_teardown(SCHEMATIC_PATH, SCHEMATIC_ANCHOR_X, SCHEMATIC_ANCHOR_Y, SCHEMATIC_ANCHOR_Z)
 
 
 async def test_goto_arrives_on_schematic_block(ctx: TestContext) -> None:
@@ -177,13 +191,6 @@ async def test_goto_arrives_on_schematic_block(ctx: TestContext) -> None:
     schematic = Schematic.from_file(SCHEMATIC_PATH)
     end = _one(schematic.waypoints.end, "end")
 
-    def _offset(waypoint):
-        return Waypoint(
-            x=int(SCHEMATIC_ANCHOR_X) + waypoint.x,
-            y=int(SCHEMATIC_ANCHOR_Y) + waypoint.y,
-            z=int(SCHEMATIC_ANCHOR_Z) + waypoint.z,
-        )
-
     result = await actions.goto_with_waypoints(
         ctx,
         target_x=SCHEMATIC_ANCHOR_X + end.x,
@@ -191,14 +198,100 @@ async def test_goto_arrives_on_schematic_block(ctx: TestContext) -> None:
         target_z=SCHEMATIC_ANCHOR_Z + end.z,
         distance_tolerance=GOTO_ARRIVAL_TOLERANCE,
         timeout=GOTO_TIMEOUT_SECONDS,
-        path=[_offset(w) for w in schematic.waypoints.path],
-        forbidden=[_offset(w) for w in schematic.waypoints.forbidden],
+        path=[_offset(SCHEMATIC_ANCHOR_X, SCHEMATIC_ANCHOR_Y, SCHEMATIC_ANCHOR_Z, w) for w in schematic.waypoints.path],
+        forbidden=[_offset(SCHEMATIC_ANCHOR_X, SCHEMATIC_ANCHOR_Y, SCHEMATIC_ANCHOR_Z, w) for w in schematic.waypoints.forbidden],
     )
 
     for i, hits in enumerate(result.path_hits):
         assert hits > 0, f"never walked through path waypoint {schematic.waypoints.path[i]}"
     for i, hits in enumerate(result.forbidden_hits):
         assert hits == 0, f"walked through forbidden waypoint {schematic.waypoints.forbidden[i]}"
+
+
+# A jump-across-a-gap scenario: start on one side, path marker above the
+# gap (must be walked/jumped over), forbidden marker in the gap itself at
+# foot height (falling in is a failure), end on the far side.
+JUMP_SCHEMATIC_PATH = Path(__file__).resolve().parent.parent.parent / "tests" / "fixtures" / "schematics" / "goto_jump_1.litematic"
+JUMP_SCHEMATIC_ANCHOR_X = ORIGIN_X + 40.0
+JUMP_SCHEMATIC_ANCHOR_Y = ORIGIN_Y
+JUMP_SCHEMATIC_ANCHOR_Z = ORIGIN_Z
+
+setup_goto_jump = _make_schematic_setup(JUMP_SCHEMATIC_PATH, JUMP_SCHEMATIC_ANCHOR_X, JUMP_SCHEMATIC_ANCHOR_Y, JUMP_SCHEMATIC_ANCHOR_Z)
+teardown_clear_goto_jump = _make_schematic_teardown(JUMP_SCHEMATIC_PATH, JUMP_SCHEMATIC_ANCHOR_X, JUMP_SCHEMATIC_ANCHOR_Y, JUMP_SCHEMATIC_ANCHOR_Z)
+
+
+async def test_goto_jumps_across_gap(ctx: TestContext) -> None:
+    """Sends !goto to goto_jump_1's own "end" marker across a one-block
+    gap and asserts the bot's real walked trail passed over the "path"
+    waypoint (above the gap) and never entered the "forbidden" one (the
+    gap itself, at foot height -- falling in would be a real pathfinding
+    regression, not just a slower route). Exercises real jump/pathfinding
+    logic (LegsNavigateNode's own A* port), unlike test_goto_moves_bot_to_target's
+    flat, obstacle-free walk.
+    """
+    schematic = Schematic.from_file(JUMP_SCHEMATIC_PATH)
+    end = _one(schematic.waypoints.end, "end")
+    anchor = (JUMP_SCHEMATIC_ANCHOR_X, JUMP_SCHEMATIC_ANCHOR_Y, JUMP_SCHEMATIC_ANCHOR_Z)
+
+    result = await actions.goto_with_waypoints(
+        ctx,
+        target_x=JUMP_SCHEMATIC_ANCHOR_X + end.x,
+        target_y=JUMP_SCHEMATIC_ANCHOR_Y + end.y,
+        target_z=JUMP_SCHEMATIC_ANCHOR_Z + end.z,
+        distance_tolerance=GOTO_ARRIVAL_TOLERANCE,
+        timeout=GOTO_TIMEOUT_SECONDS,
+        path=[_offset(*anchor, w) for w in schematic.waypoints.path],
+        forbidden=[_offset(*anchor, w) for w in schematic.waypoints.forbidden],
+    )
+
+    for i, hits in enumerate(result.path_hits):
+        assert hits > 0, f"never walked through path waypoint {schematic.waypoints.path[i]}"
+    for i, hits in enumerate(result.forbidden_hits):
+        assert hits == 0, f"fell into forbidden waypoint {schematic.waypoints.forbidden[i]}"
+
+
+# A genuinely blocked scenario: start on one side of a 2-tall, 1-wide
+# stone wall with no way around it in the schematic's own footprint, and a
+# magenta_wool "unreachable" marker on the far side -- see
+# litematic.Waypoints.unreachable's own docstring for why this is its own
+# role, not `forbidden` (this IS the !goto target, not just a column to
+# avoid on the way to a different real goal).
+IMPOSSIBLE_SCHEMATIC_PATH = Path(__file__).resolve().parent.parent.parent / "tests" / "fixtures" / "schematics" / "goto_impossible_1.litematic"
+IMPOSSIBLE_SCHEMATIC_ANCHOR_X = ORIGIN_X + 60.0
+IMPOSSIBLE_SCHEMATIC_ANCHOR_Y = ORIGIN_Y
+IMPOSSIBLE_SCHEMATIC_ANCHOR_Z = ORIGIN_Z
+
+# Genuinely blocked, so !goto never converges on its own the way a normal
+# test's own arrival does -- this only needs to be long enough to be
+# confident the mod actually gave up / kept failing to find a route, not
+# so long every full pytest run pays for it needlessly. Shorter than
+# GOTO_TIMEOUT_SECONDS on purpose: there's no arrival to wait out here,
+# just a fixed observation window.
+IMPOSSIBLE_GOTO_WINDOW_SECONDS = 10.0
+
+setup_goto_impossible = _make_schematic_setup(IMPOSSIBLE_SCHEMATIC_PATH, IMPOSSIBLE_SCHEMATIC_ANCHOR_X, IMPOSSIBLE_SCHEMATIC_ANCHOR_Y, IMPOSSIBLE_SCHEMATIC_ANCHOR_Z)
+teardown_clear_goto_impossible = _make_schematic_teardown(IMPOSSIBLE_SCHEMATIC_PATH, IMPOSSIBLE_SCHEMATIC_ANCHOR_X, IMPOSSIBLE_SCHEMATIC_ANCHOR_Y, IMPOSSIBLE_SCHEMATIC_ANCHOR_Z)
+
+
+async def test_goto_never_reaches_unreachable_target(ctx: TestContext) -> None:
+    """Sends !goto toward goto_impossible_1's own magenta "unreachable"
+    marker and asserts the bot never actually gets there (see
+    actions.assert_goto_never_arrives) -- per explicit direction: "the
+    test should fail if it reaches this point". Proves the mod doesn't
+    somehow clip/dig/glitch through a real blocking wall with no walkable
+    route around it in the schematic's own footprint.
+    """
+    schematic = Schematic.from_file(IMPOSSIBLE_SCHEMATIC_PATH)
+    unreachable = _one(schematic.waypoints.unreachable, "unreachable")
+
+    await actions.assert_goto_never_arrives(
+        ctx,
+        target_x=IMPOSSIBLE_SCHEMATIC_ANCHOR_X + unreachable.x,
+        target_y=IMPOSSIBLE_SCHEMATIC_ANCHOR_Y + unreachable.y,
+        target_z=IMPOSSIBLE_SCHEMATIC_ANCHOR_Z + unreachable.z,
+        distance_tolerance=GOTO_ARRIVAL_TOLERANCE,
+        timeout=IMPOSSIBLE_GOTO_WINDOW_SECONDS,
+    )
 
 
 def register_default_tests(registry: TestRegistry) -> None:
@@ -215,4 +308,20 @@ def register_default_tests(registry: TestRegistry) -> None:
         setup=setup_goto_onto_schematic,
         teardown=teardown_clear_schematic,
         timeout_seconds=SCHEMATIC_TIMEOUT_SECONDS + GOTO_TIMEOUT_SECONDS,
+    ))
+    registry.register(TestCase(
+        name="goto_jump",
+        description="Places a schematic with a one-block gap, sends !goto across it, and asserts the bot jumped over the gap without falling in.",
+        func=test_goto_jumps_across_gap,
+        setup=setup_goto_jump,
+        teardown=teardown_clear_goto_jump,
+        timeout_seconds=SCHEMATIC_TIMEOUT_SECONDS + GOTO_TIMEOUT_SECONDS,
+    ))
+    registry.register(TestCase(
+        name="goto_impossible",
+        description="Places a schematic with a genuinely blocked target, sends !goto toward it, and asserts the bot never actually reaches it.",
+        func=test_goto_never_reaches_unreachable_target,
+        setup=setup_goto_impossible,
+        teardown=teardown_clear_goto_impossible,
+        timeout_seconds=SCHEMATIC_TIMEOUT_SECONDS + IMPOSSIBLE_GOTO_WINDOW_SECONDS,
     ))

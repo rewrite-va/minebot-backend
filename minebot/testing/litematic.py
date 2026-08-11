@@ -170,20 +170,25 @@ class SchematicBlock:
 # Colored wool -> waypoint role, per explicit direction: build test
 # scenarios visually in Litematica using colored wool as markers instead
 # of a separate config file listing coordinates by hand. Deliberately a
-# fixed 4-color convention (not every wool color, not configurable) --
-# matches exactly the four things a !goto-shaped test needs to assert:
-# where to start, where it must pass through, where it must never go, and
-# where it must end. "end" accepts BOTH green_wool and lime_wool as
-# equivalent -- per explicit direction, since the two are visually easy to
-# tell apart from each other in Litematica's own block-picker (lime is the
-# brighter spring-green, green is the darker forest-green) but either
-# reads clearly as "the goal" against white/yellow/red.
+# fixed color convention (not every wool color, not configurable) --
+# matches exactly the things a !goto-shaped test needs to assert: where to
+# start, where it must pass through, where it must never go, where it must
+# end, and (magenta) a point a !goto TOWARD it should never actually
+# reach at all (a genuinely blocked/unreachable target -- see
+# goto_impossible_1.litematic, added per explicit direction: "the test
+# should fail if it reaches this point"). "end" accepts BOTH green_wool
+# and lime_wool as equivalent -- per explicit direction, since the two are
+# visually easy to tell apart from each other in Litematica's own
+# block-picker (lime is the brighter spring-green, green is the darker
+# forest-green) but either reads clearly as "the goal" against
+# white/yellow/red/magenta.
 WAYPOINT_BLOCK_ROLES: dict[str, str] = {
     "minecraft:white_wool": "start",
     "minecraft:yellow_wool": "path",
     "minecraft:red_wool": "forbidden",
     "minecraft:green_wool": "end",
     "minecraft:lime_wool": "end",
+    "minecraft:magenta_wool": "unreachable",
 }
 
 
@@ -212,6 +217,16 @@ class Waypoints:
     path: list[Waypoint] = field(default_factory=list)
     forbidden: list[Waypoint] = field(default_factory=list)
     end: list[Waypoint] = field(default_factory=list)
+    # magenta_wool -- a target a test sends !goto TOWARD (not one it walks
+    # over incidentally, unlike `forbidden`) specifically to assert the bot
+    # never actually gets there at all, e.g. a genuinely blocked/
+    # unreachable position with no real route (see goto_impossible_1's own
+    # scenario). Kept as its own role rather than reusing `forbidden`
+    # because the two mean different things to a test: `forbidden` says
+    # "you may walk elsewhere, just never through this column on the way
+    # to a DIFFERENT real goal"; `unreachable` says "this IS the !goto
+    # target, and reaching it is itself the failure".
+    unreachable: list[Waypoint] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -294,5 +309,6 @@ class Schematic:
             path=waypoints_by_role["path"],
             forbidden=waypoints_by_role["forbidden"],
             end=waypoints_by_role["end"],
+            unreachable=waypoints_by_role["unreachable"],
         )
         return Schematic(size_x=size_x, size_y=size_y, size_z=size_z, blocks=blocks, waypoints=waypoints)

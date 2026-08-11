@@ -194,6 +194,50 @@ async def goto_with_waypoints(
     return GotoWaypointResult(path_hits=path_hits, forbidden_hits=forbidden_hits)
 
 
+async def assert_goto_never_arrives(
+    ctx: TestContext, target_x: float, target_y: float, target_z: float, distance_tolerance: float, timeout: float,
+) -> None:
+    """Sends `!goto` toward a target the schematic marks as genuinely
+    unreachable (magenta_wool -- see litematic.WAYPOINT_BLOCK_ROLES/
+    Waypoints.unreachable's own docstrings, added per explicit direction:
+    "the test should fail if it reaches this point") and asserts the bot
+    NEVER comes within `distance_tolerance` of it during the full
+    `timeout` window -- the inverse of goto()'s own pass condition. Raises
+    `AssertionError` (not `asyncio.TimeoutError`, since here NOT timing
+    out -- i.e. actually arriving -- is the failure) if the bot ever gets
+    that close; returns normally (no exception) once `timeout` elapses
+    with arrival never observed, meaning the bot correctly never found (or
+    gave up looking for) a route to a target the scenario intends to be
+    blocked.
+
+    Deliberately does NOT reuse goto()'s own `asyncio.wait_for`-around-
+    `_wait_for_arrival` shape directly -- goto() treats reaching `timeout`
+    as the FAILURE (TimeoutError); this needs the opposite polarity (
+    reaching `timeout` cleanly is the PASS), so it polls the same way but
+    inverts what each outcome means.
+    """
+    await _wait_for_initial_position(ctx)
+    await ctx.bridge.send_goto(target_x, target_y, target_z)
+
+    async def _poll_for_unwanted_arrival() -> None:
+        while True:
+            pos = ctx.self_position.current
+            if pos is not None:
+                distance = math.dist((pos.x, pos.z), (target_x, target_z))
+                if distance <= distance_tolerance:
+                    return
+            await asyncio.sleep(POLL_INTERVAL_SECONDS)
+
+    try:
+        await asyncio.wait_for(_poll_for_unwanted_arrival(), timeout=timeout)
+    except asyncio.TimeoutError:
+        return  # never arrived within the window -- exactly what a genuinely unreachable target should do
+    raise AssertionError(
+        f"bot reached supposedly unreachable target ({target_x}, {target_y}, {target_z}) "
+        f"within {distance_tolerance} blocks -- expected it to never get there"
+    )
+
+
 async def reset_to_idle(ctx: TestContext) -> None:
     """Sends the same `{"type": "stop"}` wire command `!stop` sends --
     mod-side, MinebotMod.dispatchMessage's own "stop" case calls

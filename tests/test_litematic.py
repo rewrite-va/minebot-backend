@@ -201,6 +201,20 @@ def test_from_file_treats_lime_wool_as_equivalent_to_green_wool(tmp_path):
     assert schematic.waypoints.end == [Waypoint(x=0, y=0, z=0)]
 
 
+def test_from_file_extracts_magenta_wool_as_unreachable(tmp_path):
+    path = _build_minimal_litematic(
+        tmp_path,
+        size=(1, 1, 1),
+        palette=["minecraft:air", "minecraft:magenta_wool"],
+        indices=[1],
+    )
+
+    schematic = Schematic.from_file(path)
+
+    assert schematic.blocks == []
+    assert schematic.waypoints.unreachable == [Waypoint(x=0, y=0, z=0)]
+
+
 def test_from_file_rejects_multi_region_schematics(tmp_path):
     size_x, size_y, size_z = 1, 1, 1
     bits = _bits_per_entry(2)
