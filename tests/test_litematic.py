@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from minebot.testing.litematic import Schematic, SchematicBlock, _bits_per_entry, _unpack_block_states
+from minebot.testing.litematic import Schematic, SchematicBlock, Waypoint, Waypoints, _bits_per_entry, _unpack_block_states
 
 REAL_SCHEMATIC_PATH = Path(
     "/mnt/c/Users/colaila/AppData/Roaming/PrismLauncher/instances/26.1.2 - v1 riterite/"
@@ -119,14 +119,22 @@ def test_from_file_reads_real_simple_goto_schematic():
     schematic = Schematic.from_file(REAL_SCHEMATIC_PATH)
 
     assert schematic.size_x == 1
-    assert schematic.size_y == 2
+    assert schematic.size_y == 3
     assert schematic.size_z == 3
+    # 4 stone blocks -- the lime_wool "end" marker is pulled into
+    # waypoints, not counted as a placeable block (see
+    # WAYPOINT_BLOCK_ROLES/Waypoints' own docstrings).
     assert len(schematic.blocks) == 4
     assert all(b.block == "minecraft:stone" for b in schematic.blocks)
     for b in schematic.blocks:
         assert 0 <= b.x < schematic.size_x
         assert 0 <= b.y < schematic.size_y
         assert 0 <= b.z < schematic.size_z
+
+    assert schematic.waypoints.end == [Waypoint(x=0, y=2, z=0)]
+    assert schematic.waypoints.start == [Waypoint(x=0, y=1, z=2)]
+    assert schematic.waypoints.path == []
+    assert schematic.waypoints.forbidden == []
 
 
 def test_from_file_excludes_air_and_normalizes_coordinates(tmp_path):
@@ -150,6 +158,47 @@ def test_from_file_excludes_air_and_normalizes_coordinates(tmp_path):
         SchematicBlock(x=0, y=0, z=1, block="minecraft:dirt"),
         SchematicBlock(x=1, y=0, z=1, block="minecraft:stone"),
     }
+    assert schematic.waypoints == Waypoints(start=[], path=[], forbidden=[], end=[])
+
+
+def test_from_file_extracts_wool_waypoints_and_excludes_them_from_blocks(tmp_path):
+    # 4x1x1 row: white(start) yellow(path) red(forbidden) green(end) --
+    # covers all four roles plus confirms none of them leak into `blocks`.
+    path = _build_minimal_litematic(
+        tmp_path,
+        size=(4, 1, 1),
+        palette=[
+            "minecraft:air",
+            "minecraft:white_wool",
+            "minecraft:yellow_wool",
+            "minecraft:red_wool",
+            "minecraft:green_wool",
+        ],
+        indices=[1, 2, 3, 4],
+    )
+
+    schematic = Schematic.from_file(path)
+
+    assert schematic.blocks == []
+    assert schematic.waypoints == Waypoints(
+        start=[Waypoint(x=0, y=0, z=0)],
+        path=[Waypoint(x=1, y=0, z=0)],
+        forbidden=[Waypoint(x=2, y=0, z=0)],
+        end=[Waypoint(x=3, y=0, z=0)],
+    )
+
+
+def test_from_file_treats_lime_wool_as_equivalent_to_green_wool(tmp_path):
+    path = _build_minimal_litematic(
+        tmp_path,
+        size=(1, 1, 1),
+        palette=["minecraft:air", "minecraft:lime_wool"],
+        indices=[1],
+    )
+
+    schematic = Schematic.from_file(path)
+
+    assert schematic.waypoints.end == [Waypoint(x=0, y=0, z=0)]
 
 
 def test_from_file_rejects_multi_region_schematics(tmp_path):

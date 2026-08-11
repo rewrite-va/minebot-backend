@@ -31,3 +31,31 @@ def test_ignores_non_position_events():
     tracker = SelfPositionTracker()
     tracker.handle_event(ModEvent(type="chat", data={"text": "hi"}))
     assert tracker.current is None
+
+
+def test_listener_fires_on_every_position_event_not_just_the_latest():
+    tracker = SelfPositionTracker()
+    seen = []
+    tracker.add_listener(lambda pos: seen.append((pos.x, pos.y, pos.z)))
+
+    tracker.handle_event(ModEvent(type="position", data={"x": 1.0, "y": 0.0, "z": 0.0, "yaw": 0.0, "pitch": 0.0}))
+    tracker.handle_event(ModEvent(type="position", data={"x": 2.0, "y": 0.0, "z": 0.0, "yaw": 0.0, "pitch": 0.0}))
+    tracker.handle_event(ModEvent(type="chat", data={"text": "hi"}))
+    tracker.handle_event(ModEvent(type="position", data={"x": 3.0, "y": 0.0, "z": 0.0, "yaw": 0.0, "pitch": 0.0}))
+
+    assert seen == [(1.0, 0.0, 0.0), (2.0, 0.0, 0.0), (3.0, 0.0, 0.0)]
+
+
+def test_remove_listener_stops_further_notifications():
+    tracker = SelfPositionTracker()
+    seen = []
+
+    def listener(pos):
+        seen.append((pos.x, pos.y, pos.z))
+
+    tracker.add_listener(listener)
+    tracker.handle_event(ModEvent(type="position", data={"x": 1.0, "y": 0.0, "z": 0.0, "yaw": 0.0, "pitch": 0.0}))
+    tracker.remove_listener(listener)
+    tracker.handle_event(ModEvent(type="position", data={"x": 2.0, "y": 0.0, "z": 0.0, "yaw": 0.0, "pitch": 0.0}))
+
+    assert seen == [(1.0, 0.0, 0.0)]

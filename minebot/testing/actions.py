@@ -21,9 +21,10 @@ from __future__ import annotations
 
 import asyncio
 import math
+from dataclasses import dataclass
 
 from minebot.bridge.self_position import SelfPosition
-from minebot.testing.litematic import Schematic
+from minebot.testing.litematic import Schematic, Waypoint
 from minebot.testing.runner import TestContext
 
 POLL_INTERVAL_SECONDS = 0.5
@@ -110,6 +111,87 @@ async def goto(ctx: TestContext, target_x: float, target_y: float, target_z: flo
             await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
     await asyncio.wait_for(_wait_for_arrival(), timeout=timeout)
+
+
+@dataclass
+class GotoWaypointResult:
+    __test__ = False  # not a pytest test class -- matches TestContext's own opt-out (see runner.py)
+
+    # How many real `position` events (not polled samples -- every one the
+    # mod actually broadcast while walking) landed within WAYPOINT_RADIUS
+    # of each yellow "path" waypoint's own (x, z) column, keyed by index
+    # into the Waypoints.path list passed in -- a test asserts `> 0` for
+    # every index it expects the bot to have actually walked through (per
+    # explicit direction: "assert if it is gt 0", not an exact count,
+    # since how many ticks a real walk spends inside a given radius is
+    # incidental to movement speed/timing, not something a test should
+    # pin an exact number to).
+    path_hits: list[int]
+    # Same shape, for red "forbidden" waypoints -- a test asserts `== 0`
+    # for every index it expects the bot to have avoided entirely.
+    forbidden_hits: list[int]
+
+
+# How close (x, z) has to come to a waypoint's own column to count as
+# "the bot was at this waypoint" -- matches GOTO_ARRIVAL_TOLERANCE's own
+# reasoning (see tests.py) rather than requiring an exact block match,
+# since real per-tick movement won't land on an exact integer coordinate
+# most ticks.
+WAYPOINT_RADIUS = 0.75
+
+
+async def goto_with_waypoints(
+    ctx: TestContext,
+    target_x: float, target_y: float, target_z: float,
+    distance_tolerance: float,
+    timeout: float,
+    path: list[Waypoint] = (),
+    forbidden: list[Waypoint] = (),
+) -> GotoWaypointResult:
+    """Same send-!goto-and-wait-for-arrival shape as goto() above, but also
+    watches every real `position` event broadcast WHILE walking (not a
+    coarse poll -- see SelfPositionTracker.add_listener's own docstring
+    for why a listener callback is needed here instead of just reading
+    `.current` periodically) and tags each one against every waypoint in
+    `path`/`forbidden` (both `litematic.Waypoint` lists, already offset to
+    real world coordinates by the caller -- see tests.py's own call site
+    for the anchor-offset math) -- built specifically for the wool-marker
+    workflow (litematic.WAYPOINT_BLOCK_ROLES): a scenario built visually
+    in Litematica can now assert the bot's real walked trail actually
+    passed through every yellow block and never touched a red one, not
+    just that it eventually arrived at the green one.
+
+    Returns a GotoWaypointResult with per-waypoint hit counts rather than
+    asserting anything itself -- what counts as a passing test (`path_hits[i]
+    > 0`, `forbidden_hits[i] == 0`, or something looser) is a property of
+    what the CALLER is testing, same reasoning distance_tolerance is a
+    parameter on goto() rather than a hardcoded assumption here.
+    """
+    await _wait_for_initial_position(ctx)
+
+    path_hits = [0] * len(path)
+    forbidden_hits = [0] * len(forbidden)
+
+    def _on_position(pos: SelfPosition) -> None:
+        for i, waypoint in enumerate(path):
+            if math.dist((pos.x, pos.z), (waypoint.x, waypoint.z)) <= WAYPOINT_RADIUS:
+                path_hits[i] += 1
+        for i, waypoint in enumerate(forbidden):
+            if math.dist((pos.x, pos.z), (waypoint.x, waypoint.z)) <= WAYPOINT_RADIUS:
+                forbidden_hits[i] += 1
+
+    ctx.self_position.add_listener(_on_position)
+    try:
+        await goto(ctx, target_x, target_y, target_z, distance_tolerance, timeout)
+    finally:
+        # Removed unconditionally, success or failure/timeout -- a listener
+        # left registered past this call would keep tagging path_hits/
+        # forbidden_hits for whatever the NEXT test's own walk does,
+        # silently corrupting a result that has nothing to do with this
+        # call at all.
+        ctx.self_position.remove_listener(_on_position)
+
+    return GotoWaypointResult(path_hits=path_hits, forbidden_hits=forbidden_hits)
 
 
 async def reset_to_idle(ctx: TestContext) -> None:

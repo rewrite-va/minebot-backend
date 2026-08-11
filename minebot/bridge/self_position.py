@@ -10,6 +10,7 @@ the same as anyone else's.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 from minebot.bridge.client import ModEvent
 
@@ -32,6 +33,17 @@ class SelfPositionTracker:
         # rather than being bundled inside the dataclass that gets fully
         # replaced on every update.
         self._own_name: str | None = None
+        # Fired on EVERY real position event, in order, not just the
+        # latest -- `.current` alone only ever exposes the most recent
+        # sample, which is enough for goto()/teleport()'s own arrival
+        # polling but not for a caller that needs to see the FULL trail
+        # the bot walked (e.g. actions.goto_with_waypoints checking every
+        # tick's position against yellow/red marker columns, not just
+        # wherever the bot happened to be at whatever moment it last
+        # polled). Listeners are added/removed for the duration of a
+        # single walk (see goto_with_waypoints's own docstring), not
+        # meant to accumulate across a whole test run.
+        self._listeners: list[Callable[[SelfPosition], None]] = []
 
     def handle_event(self, event: ModEvent) -> None:
         if event.type != "position":
@@ -46,6 +58,8 @@ class SelfPositionTracker:
         name = event.data.get("name")
         if name is not None:
             self._own_name = name
+        for listener in list(self._listeners):
+            listener(self._position)
 
     @property
     def current(self) -> SelfPosition | None:
@@ -54,3 +68,9 @@ class SelfPositionTracker:
     @property
     def own_name(self) -> str | None:
         return self._own_name
+
+    def add_listener(self, listener: Callable[[SelfPosition], None]) -> None:
+        self._listeners.append(listener)
+
+    def remove_listener(self, listener: Callable[[SelfPosition], None]) -> None:
+        self._listeners.remove(listener)

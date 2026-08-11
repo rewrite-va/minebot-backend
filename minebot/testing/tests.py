@@ -21,7 +21,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from minebot.testing import actions
-from minebot.testing.litematic import Schematic
+from minebot.testing.litematic import Schematic, Waypoint
 from minebot.testing.runner import TestCase, TestContext, TestRegistry
 
 # A fixed point on the disposable test world's own flat/void floor (see
@@ -104,16 +104,40 @@ SCHEMATIC_ANCHOR_Z = ORIGIN_Z
 SCHEMATIC_TIMEOUT_SECONDS = 15.0
 
 
+def _one(waypoints: list, role: str) -> object:
+    """Validates a schematic's own wool-marker convention down to exactly
+    one waypoint for roles that only make sense singular (start/end) --
+    see litematic.Waypoints' own docstring for why extraction itself
+    stays permissive (a plain list, any count) while call sites that
+    genuinely need exactly one enforce that themselves: a schematic with
+    two white_wool blocks is a real authoring mistake in Litematica, and
+    should fail here with a clear message, not silently pick whichever one
+    the block-state array happened to read first.
+    """
+    if len(waypoints) != 1:
+        raise ValueError(f"expected exactly one {role!r} waypoint, found {len(waypoints)}")
+    return waypoints[0]
+
+
 async def setup_goto_onto_schematic(ctx: TestContext) -> None:
-    """Resets PlayerIntention to IDLE, teleports to ORIGIN (same as
-    setup_goto -- see its own docstring for why every test starts from a
-    known position/state), then places the fixture schematic at
-    SCHEMATIC_ANCHOR -- all inside this TestCase's own combined timeout
-    budget (see run_test_case's own docstring).
+    """Resets PlayerIntention to IDLE, teleports to the schematic's own
+    white-wool "start" marker (see litematic.WAYPOINT_BLOCK_ROLES), then
+    places the fixture schematic at SCHEMATIC_ANCHOR -- all inside this
+    TestCase's own combined timeout budget (see run_test_case's own
+    docstring). Teleporting to the marker itself (not a hardcoded
+    ORIGIN-relative offset) is the whole point of the wool-marker
+    convention: the test's own starting position is authored visually in
+    Litematica, not duplicated as separate coordinates here that could
+    silently drift out of sync with what the schematic actually shows.
     """
     await actions.reset_to_idle(ctx)
-    await actions.teleport(ctx, ORIGIN_X, ORIGIN_Y, ORIGIN_Z, timeout=TELEPORT_TIMEOUT_SECONDS)
     schematic = Schematic.from_file(SCHEMATIC_PATH)
+    start = _one(schematic.waypoints.start, "start")
+    await actions.teleport(
+        ctx,
+        SCHEMATIC_ANCHOR_X + start.x, SCHEMATIC_ANCHOR_Y + start.y, SCHEMATIC_ANCHOR_Z + start.z,
+        timeout=TELEPORT_TIMEOUT_SECONDS,
+    )
     await actions.place_schematic(
         ctx, schematic,
         anchor_x=int(SCHEMATIC_ANCHOR_X), anchor_y=int(SCHEMATIC_ANCHOR_Y), anchor_z=int(SCHEMATIC_ANCHOR_Z),
@@ -139,24 +163,42 @@ async def teardown_clear_schematic(ctx: TestContext) -> None:
 
 
 async def test_goto_arrives_on_schematic_block(ctx: TestContext) -> None:
-    """Sends !goto onto a real stone block placed from the fixture
-    schematic (rather than bare empty-void coordinates, the only kind of
-    target every other test here uses) and asserts arrival -- proves the
-    place-schematic/clear-schematic round trip actually leaves real,
-    standable blocks in the world, not just that the /fill commands were
-    sent without error.
+    """Sends !goto to the schematic's own green/lime-wool "end" marker
+    (rather than bare empty-void coordinates, the only kind of target
+    every other test here uses) and asserts arrival, plus that the walk
+    actually passed through every yellow "path" waypoint and never
+    touched a red "forbidden" one (see actions.goto_with_waypoints) --
+    proves the place-schematic/clear-schematic round trip actually leaves
+    real, standable blocks in the world (not just that the /fill commands
+    were sent without error) AND that the bot's real walked trail matches
+    the scenario as authored visually in Litematica, not just that it
+    eventually arrived somewhere close to the end marker.
     """
-    target_x = SCHEMATIC_ANCHOR_X
-    target_y = SCHEMATIC_ANCHOR_Y + 2.0  # stand on top of the placed column
-    target_z = SCHEMATIC_ANCHOR_Z
-    await actions.goto(
+    schematic = Schematic.from_file(SCHEMATIC_PATH)
+    end = _one(schematic.waypoints.end, "end")
+
+    def _offset(waypoint):
+        return Waypoint(
+            x=int(SCHEMATIC_ANCHOR_X) + waypoint.x,
+            y=int(SCHEMATIC_ANCHOR_Y) + waypoint.y,
+            z=int(SCHEMATIC_ANCHOR_Z) + waypoint.z,
+        )
+
+    result = await actions.goto_with_waypoints(
         ctx,
-        target_x=target_x,
-        target_y=target_y,
-        target_z=target_z,
+        target_x=SCHEMATIC_ANCHOR_X + end.x,
+        target_y=SCHEMATIC_ANCHOR_Y + end.y,
+        target_z=SCHEMATIC_ANCHOR_Z + end.z,
         distance_tolerance=GOTO_ARRIVAL_TOLERANCE,
         timeout=GOTO_TIMEOUT_SECONDS,
+        path=[_offset(w) for w in schematic.waypoints.path],
+        forbidden=[_offset(w) for w in schematic.waypoints.forbidden],
     )
+
+    for i, hits in enumerate(result.path_hits):
+        assert hits > 0, f"never walked through path waypoint {schematic.waypoints.path[i]}"
+    for i, hits in enumerate(result.forbidden_hits):
+        assert hits == 0, f"walked through forbidden waypoint {schematic.waypoints.forbidden[i]}"
 
 
 def register_default_tests(registry: TestRegistry) -> None:

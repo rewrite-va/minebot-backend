@@ -16,9 +16,10 @@ import pytest
 
 from minebot.bridge.client import ModEvent
 from minebot.bridge.query import QueryResultTracker
+from minebot.bridge.self_position import SelfPositionTracker
 from minebot.testing import actions
 from minebot.testing.actions import _fill_runs
-from minebot.testing.litematic import Schematic, SchematicBlock
+from minebot.testing.litematic import Schematic, SchematicBlock, Waypoint
 from minebot.testing.runner import TestContext
 
 
@@ -160,3 +161,62 @@ async def test_assert_state_fails_with_clear_message_when_result_differs():
 
     with pytest.raises(AssertionError, match=r"expected legs='GOTO', got 'IDLE'"):
         await actions.assert_state(ctx, "legs", "GOTO")
+
+
+class _GotoBridge:
+    """Drives self_position through a canned walk (a straight line from
+    (0,0,0) toward the target, one position event per step) as soon as
+    send_goto is called -- lets goto_with_waypoints' own position listener
+    see a real trail of samples to check against path/forbidden waypoints,
+    the same way it would consume real broadcast `position` events.
+    """
+
+    def __init__(self, self_position: SelfPositionTracker, steps: list[tuple[float, float, float]]):
+        self._self_position = self_position
+        self._steps = steps
+
+    async def send_goto(self, x: float, y: float, z: float) -> None:
+        for sx, sy, sz in self._steps:
+            self._self_position.handle_event(
+                ModEvent(type="position", data={"x": sx, "y": sy, "z": sz, "yaw": 0.0, "pitch": 0.0})
+            )
+
+
+@pytest.mark.asyncio
+async def test_goto_with_waypoints_counts_path_and_forbidden_hits():
+    self_position = SelfPositionTracker()
+    # Bot's own real broadcast position first (goto's own initial-position
+    # wait needs at least one before it'll send anything).
+    self_position.handle_event(ModEvent(type="position", data={"x": 0.0, "y": 0.0, "z": 0.0, "yaw": 0.0, "pitch": 0.0}))
+    # A straight walk along x: 0 -> 1 -> 2 -> 3 -> 4, passing directly
+    # through the path waypoint at x=2 and nowhere near the forbidden one
+    # at x=10, ending within tolerance of the target at x=4.
+    steps = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (2.0, 0.0, 0.0), (3.0, 0.0, 0.0), (4.0, 0.0, 0.0)]
+    bridge = _GotoBridge(self_position, steps)
+    ctx = TestContext(bridge=bridge, self_position=self_position, tracker=None, query_result=None)
+
+    result = await actions.goto_with_waypoints(
+        ctx, target_x=4.0, target_y=0.0, target_z=0.0, distance_tolerance=0.5, timeout=2.0,
+        path=[Waypoint(x=2, y=0, z=0)],
+        forbidden=[Waypoint(x=10, y=0, z=0)],
+    )
+
+    assert result.path_hits == [1]
+    assert result.forbidden_hits == [0]
+
+
+@pytest.mark.asyncio
+async def test_goto_with_waypoints_removes_its_listener_after_returning():
+    self_position = SelfPositionTracker()
+    self_position.handle_event(ModEvent(type="position", data={"x": 0.0, "y": 0.0, "z": 0.0, "yaw": 0.0, "pitch": 0.0}))
+    steps = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)]
+    bridge = _GotoBridge(self_position, steps)
+    ctx = TestContext(bridge=bridge, self_position=self_position, tracker=None, query_result=None)
+
+    await actions.goto_with_waypoints(
+        ctx, target_x=1.0, target_y=0.0, target_z=0.0, distance_tolerance=0.5, timeout=2.0,
+    )
+
+    # No listener should still be registered -- a leftover one would keep
+    # tagging hits for whatever the NEXT test's own walk does.
+    assert self_position._listeners == []

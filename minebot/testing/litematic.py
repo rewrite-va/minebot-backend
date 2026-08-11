@@ -19,13 +19,19 @@ never fewer than 2 bits even for a 2-entry palette).
 Only reads BlockStatePalette + BlockStates (the block grid) -- entities,
 tile-entity NBT (chest contents etc.), and pending ticks are ignored, since
 nothing in this repo's test scenarios needs them yet.
+
+Colored wool blocks are read as WAYPOINT markers, not ordinary placeable
+blocks -- see WAYPOINT_BLOCK_ROLES/Waypoints' own docstrings. Lets a
+scenario's start/expected-path/forbidden/expected-end positions be built
+visually in Litematica (place wool, no separate coordinates file to keep
+in sync by hand) instead of hardcoded in test source.
 """
 
 from __future__ import annotations
 
 import gzip
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 # NBT tag type IDs (Java edition NBT spec).
@@ -161,19 +167,68 @@ class SchematicBlock:
     block: str  # e.g. "minecraft:stone" -- palette Name, Properties dropped (unused so far)
 
 
+# Colored wool -> waypoint role, per explicit direction: build test
+# scenarios visually in Litematica using colored wool as markers instead
+# of a separate config file listing coordinates by hand. Deliberately a
+# fixed 4-color convention (not every wool color, not configurable) --
+# matches exactly the four things a !goto-shaped test needs to assert:
+# where to start, where it must pass through, where it must never go, and
+# where it must end. "end" accepts BOTH green_wool and lime_wool as
+# equivalent -- per explicit direction, since the two are visually easy to
+# tell apart from each other in Litematica's own block-picker (lime is the
+# brighter spring-green, green is the darker forest-green) but either
+# reads clearly as "the goal" against white/yellow/red.
+WAYPOINT_BLOCK_ROLES: dict[str, str] = {
+    "minecraft:white_wool": "start",
+    "minecraft:yellow_wool": "path",
+    "minecraft:red_wool": "forbidden",
+    "minecraft:green_wool": "end",
+    "minecraft:lime_wool": "end",
+}
+
+
+@dataclass(frozen=True)
+class Waypoint:
+    # Same coordinate space as SchematicBlock -- relative to the
+    # schematic's own (0,0,0) minimum corner, ready to add to any
+    # caller-chosen anchor position.
+    x: int
+    y: int
+    z: int
+
+
+@dataclass(frozen=True)
+class Waypoints:
+    """Wool-marker waypoints extracted from a schematic -- see
+    WAYPOINT_BLOCK_ROLES for the color convention. Every field is a plain
+    list (not just `start`/`end`, which are conceptually singular) because
+    a malformed schematic (e.g. two white wool blocks) should be a loud,
+    specific test-setup error at the call site that actually cares about
+    cardinality, not a silent "whichever one happened to be read last"
+    overwrite here -- see actions.goto_with_waypoints's own docstring for
+    where `start`/`end` are validated down to exactly one.
+    """
+    start: list[Waypoint] = field(default_factory=list)
+    path: list[Waypoint] = field(default_factory=list)
+    forbidden: list[Waypoint] = field(default_factory=list)
+    end: list[Waypoint] = field(default_factory=list)
+
+
 @dataclass(frozen=True)
 class Schematic:
     size_x: int
     size_y: int
     size_z: int
-    blocks: list[SchematicBlock]  # air excluded -- see from_file's own docstring
+    blocks: list[SchematicBlock]  # air AND wool markers excluded -- see from_file's own docstring
+    waypoints: Waypoints = field(default_factory=Waypoints)
 
     @staticmethod
     def from_file(path: str | Path) -> "Schematic":
         """Reads a `.litematic` file (gzip-compressed NBT) and returns its
-        single region's non-air blocks, normalized to a (0,0,0)-based
-        bounding box regardless of the file's own Position/Size sign
-        conventions.
+        single region's non-air blocks (colored wool markers pulled out
+        into `waypoints` instead -- see WAYPOINT_BLOCK_ROLES), normalized
+        to a (0,0,0)-based bounding box regardless of the file's own
+        Position/Size sign conventions.
 
         Litematica's own Position + (possibly negative-component) Size
         pair describes a box that can extend in ANY direction from
@@ -213,6 +268,7 @@ class Schematic:
 
         size_layer = size_x * size_z
         blocks = []
+        waypoints_by_role: dict[str, list[Waypoint]] = {role: [] for role in set(WAYPOINT_BLOCK_ROLES.values())}
         for cy in range(size_y):
             for cz in range(size_z):
                 for cx in range(size_x):
@@ -220,7 +276,23 @@ class Schematic:
                     # y*sizeLayer + z*sizeX + x.
                     index = cy * size_layer + cz * size_x + cx
                     name = palette[indices[index]]
-                    if name != "minecraft:air":
+                    if name == "minecraft:air":
+                        continue
+                    role = WAYPOINT_BLOCK_ROLES.get(name)
+                    if role is not None:
+                        # Wool markers are metadata, not placed in the
+                        # world -- see WAYPOINT_BLOCK_ROLES's own docstring
+                        # and Waypoints' own docstring for why; deliberately
+                        # excluded from `blocks` so place_schematic never
+                        # /fills them.
+                        waypoints_by_role[role].append(Waypoint(x=cx, y=cy, z=cz))
+                    else:
                         blocks.append(SchematicBlock(x=cx, y=cy, z=cz, block=name))
 
-        return Schematic(size_x=size_x, size_y=size_y, size_z=size_z, blocks=blocks)
+        waypoints = Waypoints(
+            start=waypoints_by_role["start"],
+            path=waypoints_by_role["path"],
+            forbidden=waypoints_by_role["forbidden"],
+            end=waypoints_by_role["end"],
+        )
+        return Schematic(size_x=size_x, size_y=size_y, size_z=size_z, blocks=blocks, waypoints=waypoints)
