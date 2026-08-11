@@ -215,33 +215,30 @@ def _make_schematic_teardown(schematic_path: Path, anchor_x: float, anchor_y: fl
     test world always starts as an empty void). Runs regardless of
     whether the test itself passed or failed (TestCase.teardown/
     run_test_case's own docstrings) so a failed test never leaves blocks
-    behind for the next one.
+    behind for the next one -- per explicit direction, cleanup must always
+    happen, even when the run leading up to it failed.
 
-    Resets PlayerIntention to IDLE FIRST, before teleporting to HOLDING --
-    found live: a test's own `func` (e.g. a !goto across a gap) can still
-    be mid-walk, LegsState still actively in GOTO, right up until
-    run_test_case's own timeout fires it as a failure; without a !stop
-    first, the mod keeps driving the bot toward its last commanded !goto
-    target every tick AFTER the raw /tp lands, immediately walking it back
-    away from HOLDING again -- the position never actually settles there,
-    so teleport()'s own arrival-polling loop timed out waiting for a
-    convergence that was being actively fought by the bot's own still-live
-    movement goal. Confirmed live as the real cause of a genuine, reported
-    leftover-blocks bug: teardown's own teleport timing out meant
-    clear_schematic was never reached at all, leaving placed blocks
-    behind in the world for every later test to run into.
-
-    THEN teleports to HOLDING before clearing -- the test's own `func`
-    typically ends with the bot standing at/near the schematic's "end"
-    marker, i.e. still inside the very region about to be cleared. Same
-    real bug _make_schematic_setup's own docstring describes for
-    place_schematic (vanilla `/fill` can't act on a cell a real entity is
-    physically occupying), just on the clearing side instead of the
-    placing side.
+    Deliberately does NOT teleport the bot away first, or wait/confirm
+    anything about its position at all, before clearing -- an earlier
+    version did (reset_to_idle + teleport(HOLDING) first, since a real
+    entity standing on a `/fill` target cell blocks that one cell from
+    being cleared -- see place_schematic's own docstring for the same
+    fact on the placing side), but that made cleanup itself depend on
+    teleport() succeeding, which is exactly the kind of thing that can
+    fail (a still-active !goto fighting the /tp, a slow/lost query reply,
+    ...) -- confirmed live, repeatedly: teardown's own teleport timing
+    out meant clear_schematic was NEVER EVEN ATTEMPTED, leaving placed
+    blocks in the world with no cleanup at all. Clearing unconditionally,
+    with nothing that can itself time out in front of it, is what
+    actually guarantees "even with failures it must clean the blocks" --
+    the one narrow cost is that if the bot happens to be standing on
+    exactly one specific cell within the schematic's own small footprint
+    at the exact moment /fill runs, real vanilla /fill still clears every
+    OTHER cell in the region and only skips that one occupied cell (not a
+    failure of the whole fill) -- an acceptable, narrow edge case against
+    the alternative of teardown sometimes doing nothing at all.
     """
     async def teardown(ctx: TestContext) -> None:
-        await actions.reset_to_idle(ctx)
-        await actions.teleport(ctx, HOLDING_X, HOLDING_Y, HOLDING_Z, timeout=TELEPORT_TIMEOUT_SECONDS)
         schematic = Schematic.from_file(schematic_path)
         await actions.clear_schematic(
             ctx, schematic, anchor_x=int(anchor_x), anchor_y=int(anchor_y), anchor_z=int(anchor_z),
