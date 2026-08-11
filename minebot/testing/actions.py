@@ -112,6 +112,32 @@ async def goto(ctx: TestContext, target_x: float, target_y: float, target_z: flo
     await asyncio.wait_for(_wait_for_arrival(), timeout=timeout)
 
 
+async def reset_to_idle(ctx: TestContext) -> None:
+    """Sends the same `{"type": "stop"}` wire command `!stop` sends --
+    mod-side, MinebotMod.dispatchMessage's own "stop" case calls
+    `playerIntention.stop()`, resetting PlayerIntentionState back to IDLE
+    (see that Java enum's own docstring for the FOLLOW/DEFEND/IDLE axis
+    this clears) -- so a leftover !follow/!defend from a previous manual
+    session or an earlier test doesn't leak into the next test. Per
+    explicit direction: test setup should start from a known, fully idle
+    state, not just a known position -- a test that only teleports (see
+    teleport() above) can still inherit an active FOLLOW/DEFEND goal from
+    whatever ran before it, which would fight the test's own !goto/combat
+    commands in ways that have nothing to do with what the test itself is
+    supposed to be exercising.
+
+    No wait/confirmation needed afterward (unlike teleport(), which polls
+    `self_position` until the /tp visibly lands) -- there's no broadcast
+    event that would confirm PlayerIntentionState changed, and none of
+    this repo's own tests currently assert against it directly; they rely
+    on it only insofar as leftover FOLLOW/DEFEND would otherwise interfere
+    with movement/combat commands the test DOES assert on. Uses
+    send_stop() (an unrated `_send`, like goto/follow/etc.), not
+    send_chat -- this is a real command, not chat text.
+    """
+    await ctx.bridge.send_stop()
+
+
 # `/tp` itself is exact (no pathfinding, no arrival tolerance the way
 # !goto has) -- this only needs to be loose enough to absorb float
 # formatting/rounding in the command string and one tick of position-

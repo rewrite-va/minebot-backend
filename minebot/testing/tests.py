@@ -58,8 +58,12 @@ GOTO_TARGET_Z = ORIGIN_Z + 5.0
 async def setup_goto(ctx: TestContext) -> None:
     """Teleports the bot to the fixed ORIGIN via a real `/tp` command --
     see this module's own docstring for why every test starts from a
-    known position rather than wherever it happened to already be.
+    known position rather than wherever it happened to already be. Also
+    resets PlayerIntention to IDLE (see actions.reset_to_idle's own
+    docstring) so a leftover !follow/!defend from a manual session or an
+    earlier test can't fight this test's own !goto command.
     """
+    await actions.reset_to_idle(ctx)
     await actions.teleport(ctx, ORIGIN_X, ORIGIN_Y, ORIGIN_Z, timeout=TELEPORT_TIMEOUT_SECONDS)
 
 
@@ -101,11 +105,13 @@ SCHEMATIC_TIMEOUT_SECONDS = 15.0
 
 
 async def setup_goto_onto_schematic(ctx: TestContext) -> None:
-    """Teleports to ORIGIN (same as setup_goto -- see its own docstring for
-    why every test starts from a known position) then places the fixture
-    schematic at SCHEMATIC_ANCHOR -- both inside this TestCase's own
-    combined timeout budget (see run_test_case's own docstring).
+    """Resets PlayerIntention to IDLE, teleports to ORIGIN (same as
+    setup_goto -- see its own docstring for why every test starts from a
+    known position/state), then places the fixture schematic at
+    SCHEMATIC_ANCHOR -- all inside this TestCase's own combined timeout
+    budget (see run_test_case's own docstring).
     """
+    await actions.reset_to_idle(ctx)
     await actions.teleport(ctx, ORIGIN_X, ORIGIN_Y, ORIGIN_Z, timeout=TELEPORT_TIMEOUT_SECONDS)
     schematic = Schematic.from_file(SCHEMATIC_PATH)
     await actions.place_schematic(
