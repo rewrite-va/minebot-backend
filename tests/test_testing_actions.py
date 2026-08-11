@@ -273,6 +273,43 @@ async def test_assert_goto_never_arrives_fails_when_bot_actually_arrives():
         )
 
 
+class _SameColumnDifferentHeightBridge:
+    """send_goto moves self_position to the SAME (x, z) column as the
+    target but leaves y untouched -- models a real live bug: an
+    "unreachable" target sitting atop a blocking wall shares its (x, z)
+    with the wall's own base, so a bot merely standing at the foot of the
+    wall (far below the real target) must NOT count as having reached it.
+    """
+
+    def __init__(self, self_position: SelfPositionTracker, stuck_y: float) -> None:
+        self._self_position = self_position
+        self._stuck_y = stuck_y
+
+    async def send_goto(self, x: float, y: float, z: float) -> None:
+        self._self_position.handle_event(
+            ModEvent(type="position", data={"x": x, "y": self._stuck_y, "z": z, "yaw": 0.0, "pitch": 0.0})
+        )
+
+
+@pytest.mark.asyncio
+async def test_assert_goto_never_arrives_uses_real_3d_distance_not_just_horizontal():
+    # Regression test: assert_goto_never_arrives used to check only
+    # (x, z), the same horizontal-only semantics goto() itself uses (see
+    # its own docstring) -- correct for "walk to this reachable spot",
+    # but wrong for "unreachable": a target 10 blocks straight up from
+    # where the bot is stuck must not register as reached.
+    self_position = SelfPositionTracker()
+    self_position.handle_event(ModEvent(type="position", data={"x": 0.0, "y": -60.0, "z": 0.0, "yaw": 0.0, "pitch": 0.0}))
+    bridge = _SameColumnDifferentHeightBridge(self_position, stuck_y=-60.0)
+    ctx = TestContext(bridge=bridge, self_position=self_position, tracker=None, query_result=None)
+
+    # Should return cleanly, no exception -- the bot lands on the exact
+    # same (x, z) column as the target but 10 blocks below it in y.
+    await actions.assert_goto_never_arrives(
+        ctx, target_x=0.0, target_y=-50.0, target_z=0.0, distance_tolerance=0.5, timeout=0.3,
+    )
+
+
 class _PositionQueryBridge:
     """Replies to send_query("position") with the real nested "position"
     object shape MinebotMod.handleQuery sends (not the plain "result"

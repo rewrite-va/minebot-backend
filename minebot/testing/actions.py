@@ -210,6 +210,19 @@ async def assert_goto_never_arrives(
     gave up looking for) a route to a target the scenario intends to be
     blocked.
 
+    Uses a real 3D (x, y, z) distance, unlike goto()'s own arrival check
+    (deliberately horizontal-only -- see its own docstring, matching real
+    player movement having no independent vertical stop condition) --
+    found live: an "unreachable" target sitting atop a blocking wall (see
+    goto_impossible_1.litematic) can have the SAME (x, z) column as
+    ground level at the wall's own base, so a horizontal-only check
+    falsely reported "arrived" the instant the bot merely stood at the
+    foot of the wall, nowhere near the target's real height. The whole
+    point of "unreachable" is that the bot never gets physically close to
+    that exact point, height included -- a target genuinely blocked by a
+    wall the bot can't climb should never register as reached just
+    because the bot is standing on the ground far below it.
+
     Deliberately does NOT reuse goto()'s own `asyncio.wait_for`-around-
     `_wait_for_arrival` shape directly -- goto() treats reaching `timeout`
     as the FAILURE (TimeoutError); this needs the opposite polarity (
@@ -223,7 +236,7 @@ async def assert_goto_never_arrives(
         while True:
             pos = ctx.self_position.current
             if pos is not None:
-                distance = math.dist((pos.x, pos.z), (target_x, target_z))
+                distance = math.dist((pos.x, pos.y, pos.z), (target_x, target_y, target_z))
                 if distance <= distance_tolerance:
                     return
             await asyncio.sleep(POLL_INTERVAL_SECONDS)
