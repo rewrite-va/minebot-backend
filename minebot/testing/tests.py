@@ -35,6 +35,25 @@ ORIGIN_Y = -60.0
 ORIGIN_Z = 0.0
 TELEPORT_TIMEOUT_SECONDS = 10.0
 
+# A holding spot well outside every schematic's own footprint (all
+# anchored at ORIGIN's own (x, z) -- see SCHEMATIC_ANCHOR_X's own comment)
+# -- used ONLY as a place to stand the bot out of the way WHILE `/fill`
+# commands run, never as a real test position. Per explicit direction,
+# confirmed live: the bot's own body standing inside/on a `/fill` target
+# column blocks that specific cell from actually being filled (vanilla
+# `/fill` can't place a block where a real entity is physically occupying
+# the space) -- with every schematic now anchored at ORIGIN itself, a
+# setup that teleported straight to ORIGIN before placing put the bot
+# standing right in the middle of the very region about to be filled,
+# which is exactly what caused a real "No blocks were filled" failure
+# for every /fill command in the run. (-7, -7) is comfortably outside
+# every schematic's own small footprint (all well under 24 blocks in
+# either direction) while still safely inside this world's own bounds
+# (spans to 24, 24 -- confirmed live, not guessed).
+HOLDING_X = -7.0
+HOLDING_Y = ORIGIN_Y
+HOLDING_Z = -7.0
+
 # Matches minebot-mod's own LegsGotoNode.ARRIVAL_DISTANCE -- !goto's own
 # real arrival precision, confirmed live via the mod's own broadcast
 # `position` events (the bot's reported (x, z) actually converges to
@@ -138,34 +157,39 @@ def _offset(anchor_x: float, anchor_y: float, anchor_z: float, waypoint: Waypoin
 
 def _make_schematic_setup(schematic_path: Path, anchor_x: float, anchor_y: float, anchor_z: float):
     """Builds a TestCase.setup for a schematic-driven scenario: reset to
-    IDLE, teleport to the safe, always-solid ORIGIN, place the schematic
-    at the given anchor, THEN teleport to the schematic's own white-wool
-    "start" marker (see litematic.WAYPOINT_BLOCK_ROLES) -- the shared
-    shape every wool-marker scenario test in this file uses (see
-    setup_goto_onto_schematic's own original docstring, now generalized
-    here once a second/third schematic-driven test -- goto_jump/
-    goto_impossible -- made the copy-pasted version worth factoring out).
+    IDLE, teleport to HOLDING (well outside every schematic's own
+    footprint), place the schematic at the given anchor, THEN teleport to
+    the schematic's own white-wool "start" marker (see
+    litematic.WAYPOINT_BLOCK_ROLES) -- the shared shape every wool-marker
+    scenario test in this file uses (see setup_goto_onto_schematic's own
+    original docstring, now generalized here once a second/third
+    schematic-driven test -- goto_jump/goto_impossible -- made the
+    copy-pasted version worth factoring out).
 
-    Teleporting STRAIGHT to `start` before anything is placed was the
-    original (buggy) order -- confirmed live: the disposable test world's
-    own void floor sits at a fixed ORIGIN_Y, so a `start` marker anchored
-    somewhere above where the schematic's OWN floor blocks will eventually
-    go has nothing solid under it yet at teleport time. The bot fell
-    straight through into the void, landed on the far-below void floor
-    instead of `start`'s own y, and actions.teleport's own arrival check
-    (a real 3D distance, not just x/z) then polled for the FULL
-    TELEPORT_TIMEOUT_SECONDS waiting for a y that was never going to
-    happen -- raising asyncio.TimeoutError before place_schematic ever
-    even ran, which is why NO /fill commands went out at all and only the
-    exception-path teardown's own single "clear" fill showed up in the
-    wire log. Landing at ORIGIN first (the void floor itself -- always
-    solid, real ground under real feet) sidesteps that entirely: by the
-    time this teleports to `start`, the schematic's own blocks already
-    exist to land on.
+    Two real, separately-confirmed-live bugs shaped this exact ordering:
+
+    1. Teleporting STRAIGHT to `start` before anything is placed left
+       nothing solid under it at teleport time (the schematic's own floor
+       didn't exist yet) -- the bot fell into the void, and
+       actions.teleport's own arrival check (a real 3D distance) polled
+       for the full TELEPORT_TIMEOUT_SECONDS waiting for a y that was
+       never going to happen, raising asyncio.TimeoutError before
+       place_schematic ever ran at all.
+    2. Once fixed to land at a safe spot FIRST, that spot was ORIGIN --
+       but every schematic is now anchored at ORIGIN's own (x, z) too
+       (see SCHEMATIC_ANCHOR_X's own comment), so the bot ended up
+       standing right in the middle of the very region about to be
+       filled. Confirmed live, per explicit direction: vanilla `/fill`
+       can't place a block where a real entity is physically occupying
+       that cell -- every `/fill` command failed with "No blocks were
+       filled" for exactly this reason, every single run, regardless of
+       the teleport-ordering fix above. HOLDING (well outside every
+       schematic's own footprint) is genuinely out of the way, not just
+       "a different fixed point."
     """
     async def setup(ctx: TestContext) -> None:
         await actions.reset_to_idle(ctx)
-        await actions.teleport(ctx, ORIGIN_X, ORIGIN_Y, ORIGIN_Z, timeout=TELEPORT_TIMEOUT_SECONDS)
+        await actions.teleport(ctx, HOLDING_X, HOLDING_Y, HOLDING_Z, timeout=TELEPORT_TIMEOUT_SECONDS)
         schematic = Schematic.from_file(schematic_path)
         await actions.place_schematic(
             ctx, schematic, anchor_x=int(anchor_x), anchor_y=int(anchor_y), anchor_z=int(anchor_z),
@@ -188,8 +212,17 @@ def _make_schematic_teardown(schematic_path: Path, anchor_x: float, anchor_y: fl
     whether the test itself passed or failed (TestCase.teardown/
     run_test_case's own docstrings) so a failed test never leaves blocks
     behind for the next one.
+
+    Teleports to HOLDING FIRST, before clearing -- the test's own `func`
+    typically ends with the bot standing at/near the schematic's "end"
+    marker, i.e. still inside the very region about to be cleared. Same
+    real bug _make_schematic_setup's own docstring describes for
+    place_schematic (vanilla `/fill` can't act on a cell a real entity is
+    physically occupying), just on the clearing side instead of the
+    placing side.
     """
     async def teardown(ctx: TestContext) -> None:
+        await actions.teleport(ctx, HOLDING_X, HOLDING_Y, HOLDING_Z, timeout=TELEPORT_TIMEOUT_SECONDS)
         schematic = Schematic.from_file(schematic_path)
         await actions.clear_schematic(
             ctx, schematic, anchor_x=int(anchor_x), anchor_y=int(anchor_y), anchor_z=int(anchor_z),
