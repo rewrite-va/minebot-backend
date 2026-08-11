@@ -4321,6 +4321,46 @@ before).
   untouched, so an explicit `!kill` can still path toward a
   heard-but-not-yet-seen mob same as before.
 
+## In-game test suite: schematic-based jump scenarios exposed a long chain of real movement/pathfinding bugs
+
+Built out the wool-waypoint/Litematica-schematic test scenarios described
+in minebot-mod's TESTING.md (`goto_jump_1`, `goto_jump_2`,
+`goto_impossible`, `goto_onto_schematic`) and, in the process of getting
+them to actually pass reliably, found and fixed a long chain of real,
+previously-undiagnosed bugs -- both in the test harness itself and in the
+mod's real movement/pathfinding logic. Full list and reasoning lives in
+minebot-mod's own TESTING.md ("Real bugs found building/tuning this
+suite"); summarized here since several of the fixes touched this repo's
+own `minebot/testing/actions.py`:
+
+- `goto_with_waypoints`' path/forbidden hit-detection was checking a
+  waypoint's raw minimum-corner integer coordinate instead of the
+  block's real center -- a physics-correct jump landing close to (but
+  not exactly on) a path waypoint's own corner could be well outside
+  `WAYPOINT_RADIUS` from the corner while being well inside it from the
+  block's real center, producing a false "never walked through path
+  waypoint" test failure on an otherwise-correct jump. Fixed by checking
+  against `(waypoint.x + 0.5, waypoint.y + 0.5, waypoint.z + 0.5)`.
+- On the mod side (not this repo, but load-bearing for these tests ever
+  passing): added `JumpPhysics`, a formula for jump run-up/sprint choice
+  derived directly from decompiled vanilla physics constants, replacing
+  a fixed magic-constant that had been tuned against exactly one jump
+  scenario and systematically overshot or undershot every other one;
+  fixed `PathTracker`'s replan-staleness check to catch a fall off a
+  jump target (previously kept re-offering the same now-impossible
+  jump back up forever); fixed jump input being asserted while airborne
+  (which vanilla read as a double-tap-space, accidentally toggling
+  creative flight mid-test); and fixed `LegsGotoNode`'s arrival check to
+  require both being on the ground AND near-zero residual velocity, not
+  just distance (a landing that's on-target but still sliding from jump
+  momentum was handing off to IDLE -- zero further steering -- and
+  sliding right off small landing platforms).
+- Confirmed each of these the same way throughout: read the mod client's
+  own `latest.log` (chat lines, mod `LOGGER` output, real per-tick
+  diagnostics added and removed as needed -- never guessed from Python-
+  side symptoms alone), since the actual physics/timing bugs were only
+  ever visible there, not in the Python backend's own log.
+
 ## Key external paths referenced (outside these two repos)
 
 - `/home/colaila/git/mindcraft` -- Node.js reference project (mineflayer-
