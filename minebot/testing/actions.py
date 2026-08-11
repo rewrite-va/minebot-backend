@@ -118,25 +118,36 @@ class GotoWaypointResult:
     __test__ = False  # not a pytest test class -- matches TestContext's own opt-out (see runner.py)
 
     # How many real `position` events (not polled samples -- every one the
-    # mod actually broadcast while walking) landed within WAYPOINT_RADIUS
-    # of each yellow "path" waypoint's own (x, z) column, keyed by index
-    # into the Waypoints.path list passed in -- a test asserts `> 0` for
-    # every index it expects the bot to have actually walked through (per
-    # explicit direction: "assert if it is gt 0", not an exact count,
-    # since how many ticks a real walk spends inside a given radius is
-    # incidental to movement speed/timing, not something a test should
-    # pin an exact number to).
+    # mod actually broadcast while walking) landed within a real 3D
+    # WAYPOINT_RADIUS of each yellow "path" waypoint's own (x, y, z)
+    # position, keyed by index into the Waypoints.path list passed in --
+    # a test asserts `> 0` for every index it expects the bot to have
+    # actually walked through (per explicit direction: "assert if it is
+    # gt 0", not an exact count, since how many ticks a real walk spends
+    # inside a given radius is incidental to movement speed/timing, not
+    # something a test should pin an exact number to).
     path_hits: list[int]
     # Same shape, for red "forbidden" waypoints -- a test asserts `== 0`
     # for every index it expects the bot to have avoided entirely.
     forbidden_hits: list[int]
 
 
-# How close (x, z) has to come to a waypoint's own column to count as
-# "the bot was at this waypoint" -- matches GOTO_ARRIVAL_TOLERANCE's own
-# reasoning (see tests.py) rather than requiring an exact block match,
-# since real per-tick movement won't land on an exact integer coordinate
-# most ticks.
+# How close a real 3D (x, y, z) position has to come to a waypoint's own
+# position to count as "the bot was at this waypoint" -- matches
+# GOTO_ARRIVAL_TOLERANCE's own reasoning (see tests.py) rather than
+# requiring an exact block match, since real per-tick movement won't land
+# on an exact integer coordinate most ticks. Deliberately a real 3D
+# distance, NOT horizontal-only (x, z) -- found live, per direct report: a
+# forbidden waypoint marking a gap's own foot-height column falsely
+# registered as "hit" while the bot correctly jumped OVER the gap at a
+# higher y, since an (x, z)-only check can't tell "walked through this
+# exact cell" from "passed directly above/below it on the way to a
+# genuinely different height". goto()'s own arrival check is still
+# deliberately horizontal-only (see its own docstring) -- that's a
+# different concept ("reached this x/z, whatever height it settles at",
+# matching real player movement having no independent vertical stop
+# condition), not "occupied this exact 3D cell", which is what a
+# path/forbidden waypoint actually means.
 WAYPOINT_RADIUS = 0.75
 
 
@@ -174,10 +185,10 @@ async def goto_with_waypoints(
 
     def _on_position(pos: SelfPosition) -> None:
         for i, waypoint in enumerate(path):
-            if math.dist((pos.x, pos.z), (waypoint.x, waypoint.z)) <= WAYPOINT_RADIUS:
+            if math.dist((pos.x, pos.y, pos.z), (waypoint.x, waypoint.y, waypoint.z)) <= WAYPOINT_RADIUS:
                 path_hits[i] += 1
         for i, waypoint in enumerate(forbidden):
-            if math.dist((pos.x, pos.z), (waypoint.x, waypoint.z)) <= WAYPOINT_RADIUS:
+            if math.dist((pos.x, pos.y, pos.z), (waypoint.x, waypoint.y, waypoint.z)) <= WAYPOINT_RADIUS:
                 forbidden_hits[i] += 1
 
     ctx.self_position.add_listener(_on_position)

@@ -206,6 +206,31 @@ async def test_goto_with_waypoints_counts_path_and_forbidden_hits():
 
 
 @pytest.mark.asyncio
+async def test_goto_with_waypoints_uses_real_3d_distance_for_forbidden_hits():
+    # Regression test, per direct live report: the bot correctly jumped
+    # OVER a gap (never actually entering the forbidden cell at the gap's
+    # own foot height), but the test still failed with "fell into
+    # forbidden waypoint" because the old hit-detection only checked
+    # (x, z), ignoring y entirely -- passing directly ABOVE a forbidden
+    # column at a different height falsely counted as a hit.
+    self_position = SelfPositionTracker()
+    self_position.handle_event(ModEvent(type="position", data={"x": 0.0, "y": 2.0, "z": 0.0, "yaw": 0.0, "pitch": 0.0}))
+    # Walk straight across z at a CONSTANT y=2 (a clean jump over the
+    # gap), passing directly over the forbidden waypoint's own (x, z)
+    # column at z=1 but never actually descending to its real y=1.
+    steps = [(0.0, 2.0, 0.0), (0.0, 2.0, 1.0), (0.0, 2.0, 2.0)]
+    bridge = _GotoBridge(self_position, steps)
+    ctx = TestContext(bridge=bridge, self_position=self_position, tracker=None, query_result=None)
+
+    result = await actions.goto_with_waypoints(
+        ctx, target_x=0.0, target_y=2.0, target_z=2.0, distance_tolerance=0.5, timeout=2.0,
+        forbidden=[Waypoint(x=0, y=1, z=1)],  # the gap itself, at foot height -- never actually entered
+    )
+
+    assert result.forbidden_hits == [0]
+
+
+@pytest.mark.asyncio
 async def test_goto_with_waypoints_removes_its_listener_after_returning():
     self_position = SelfPositionTracker()
     self_position.handle_event(ModEvent(type="position", data={"x": 0.0, "y": 0.0, "z": 0.0, "yaw": 0.0, "pitch": 0.0}))
