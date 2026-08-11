@@ -283,34 +283,60 @@ setup_goto_jump = _make_schematic_setup(JUMP_SCHEMATIC_PATH, JUMP_SCHEMATIC_ANCH
 teardown_clear_goto_jump = _make_schematic_teardown(JUMP_SCHEMATIC_PATH, JUMP_SCHEMATIC_ANCHOR_X, JUMP_SCHEMATIC_ANCHOR_Y, JUMP_SCHEMATIC_ANCHOR_Z)
 
 
-async def test_goto_jumps_across_gap(ctx: TestContext) -> None:
-    """Sends !goto to goto_jump_1's own "end" marker across a one-block
-    gap and asserts the bot's real walked trail passed over the "path"
-    waypoint (above the gap) and never entered the "forbidden" one (the
-    gap itself, at foot height -- falling in would be a real pathfinding
-    regression, not just a slower route). Exercises real jump/pathfinding
-    logic (LegsNavigateNode's own A* port), unlike test_goto_moves_bot_to_target's
-    flat, obstacle-free walk.
+def _make_waypoint_goto_test(schematic_path: Path, anchor_x: float, anchor_y: float, anchor_z: float):
+    """Builds a test function that sends !goto to a schematic's own "end"
+    marker and asserts the bot's real walked trail passed through every
+    "path" waypoint and never touched a "forbidden" one (see
+    actions.goto_with_waypoints) -- the shared shape both goto_jump and
+    goto_jump_2 use (gap-crossing scenarios differing only in gap width/
+    whether a "path" marker above the gap is even present -- see
+    goto_jump_2's own comment for why it has none). Factored out once a
+    second schematic needed the exact same assertion shape
+    test_goto_jumps_across_gap originally had, to avoid copy-pasting it a
+    second time (same reasoning _make_schematic_setup/_make_schematic_teardown
+    were factored out for their own shared shape).
     """
-    schematic = Schematic.from_file(JUMP_SCHEMATIC_PATH)
-    end = _one(schematic.waypoints.end, "end")
-    anchor = (JUMP_SCHEMATIC_ANCHOR_X, JUMP_SCHEMATIC_ANCHOR_Y, JUMP_SCHEMATIC_ANCHOR_Z)
+    async def test(ctx: TestContext) -> None:
+        schematic = Schematic.from_file(schematic_path)
+        end = _one(schematic.waypoints.end, "end")
+        anchor = (anchor_x, anchor_y, anchor_z)
 
-    result = await actions.goto_with_waypoints(
-        ctx,
-        target_x=JUMP_SCHEMATIC_ANCHOR_X + end.x,
-        target_y=JUMP_SCHEMATIC_ANCHOR_Y + end.y,
-        target_z=JUMP_SCHEMATIC_ANCHOR_Z + end.z,
-        distance_tolerance=GOTO_ARRIVAL_TOLERANCE,
-        timeout=GOTO_TIMEOUT_SECONDS,
-        path=[_offset(*anchor, w) for w in schematic.waypoints.path],
-        forbidden=[_offset(*anchor, w) for w in schematic.waypoints.forbidden],
-    )
+        result = await actions.goto_with_waypoints(
+            ctx,
+            target_x=anchor_x + end.x,
+            target_y=anchor_y + end.y,
+            target_z=anchor_z + end.z,
+            distance_tolerance=GOTO_ARRIVAL_TOLERANCE,
+            timeout=GOTO_TIMEOUT_SECONDS,
+            path=[_offset(*anchor, w) for w in schematic.waypoints.path],
+            forbidden=[_offset(*anchor, w) for w in schematic.waypoints.forbidden],
+        )
 
-    for i, hits in enumerate(result.path_hits):
-        assert hits > 0, f"never walked through path waypoint {schematic.waypoints.path[i]}"
-    for i, hits in enumerate(result.forbidden_hits):
-        assert hits == 0, f"fell into forbidden waypoint {schematic.waypoints.forbidden[i]}"
+        for i, hits in enumerate(result.path_hits):
+            assert hits > 0, f"never walked through path waypoint {schematic.waypoints.path[i]}"
+        for i, hits in enumerate(result.forbidden_hits):
+            assert hits == 0, f"fell into forbidden waypoint {schematic.waypoints.forbidden[i]}"
+
+    return test
+
+
+test_goto_jumps_across_gap = _make_waypoint_goto_test(JUMP_SCHEMATIC_PATH, JUMP_SCHEMATIC_ANCHOR_X, JUMP_SCHEMATIC_ANCHOR_Y, JUMP_SCHEMATIC_ANCHOR_Z)
+
+
+# A wider (2-block) gap-jump scenario -- same shape as goto_jump, no
+# "path" waypoint (per explicit direction: the gap is still within real
+# jump range, and unlike a 1-block gap there's no single point directly
+# "above" a 2-block gap that the bot is required to pass exactly through
+# -- both gap columns are only marked "forbidden", asserting the bot
+# never falls into either one on its way to "end").
+JUMP2_SCHEMATIC_PATH = Path(__file__).resolve().parent.parent.parent / "tests" / "fixtures" / "schematics" / "goto_jump_2.litematic"
+JUMP2_SCHEMATIC_ANCHOR_X = ORIGIN_X
+JUMP2_SCHEMATIC_ANCHOR_Y = ORIGIN_Y
+JUMP2_SCHEMATIC_ANCHOR_Z = ORIGIN_Z
+
+setup_goto_jump_2 = _make_schematic_setup(JUMP2_SCHEMATIC_PATH, JUMP2_SCHEMATIC_ANCHOR_X, JUMP2_SCHEMATIC_ANCHOR_Y, JUMP2_SCHEMATIC_ANCHOR_Z)
+teardown_clear_goto_jump_2 = _make_schematic_teardown(JUMP2_SCHEMATIC_PATH, JUMP2_SCHEMATIC_ANCHOR_X, JUMP2_SCHEMATIC_ANCHOR_Y, JUMP2_SCHEMATIC_ANCHOR_Z)
+test_goto_jumps_across_wider_gap = _make_waypoint_goto_test(JUMP2_SCHEMATIC_PATH, JUMP2_SCHEMATIC_ANCHOR_X, JUMP2_SCHEMATIC_ANCHOR_Y, JUMP2_SCHEMATIC_ANCHOR_Z)
 
 
 # A genuinely blocked scenario: start on one side of a 2-tall, 1-wide
@@ -376,11 +402,19 @@ def register_default_tests(registry: TestRegistry) -> None:
         timeout_seconds=TELEPORT_TIMEOUT_SECONDS + SCHEMATIC_TIMEOUT_SECONDS + GOTO_TIMEOUT_SECONDS,
     ))
     registry.register(TestCase(
-        name="goto_jump",
+        name="goto_jump_1",
         description="Places a schematic with a one-block gap, sends !goto across it, and asserts the bot jumped over the gap without falling in.",
         func=test_goto_jumps_across_gap,
         setup=setup_goto_jump,
         teardown=teardown_clear_goto_jump,
+        timeout_seconds=TELEPORT_TIMEOUT_SECONDS + SCHEMATIC_TIMEOUT_SECONDS + GOTO_TIMEOUT_SECONDS,
+    ))
+    registry.register(TestCase(
+        name="goto_jump_2",
+        description="Places a schematic with a two-block gap, sends !goto across it, and asserts the bot jumped over the gap without falling into either forbidden column.",
+        func=test_goto_jumps_across_wider_gap,
+        setup=setup_goto_jump_2,
+        teardown=teardown_clear_goto_jump_2,
         timeout_seconds=TELEPORT_TIMEOUT_SECONDS + SCHEMATIC_TIMEOUT_SECONDS + GOTO_TIMEOUT_SECONDS,
     ))
     registry.register(TestCase(
