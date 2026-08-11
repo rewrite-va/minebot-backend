@@ -203,6 +203,12 @@ async def _process_event(event: ModEvent, config: BotConfig, bridge: ModBridge, 
         log.info("respawned")
         return
 
+    if event.type == "item_broken":
+        name = event.data.get("item", "something").removeprefix("minecraft:")
+        log.info("item broke: %s (slot=%s)", name, event.data.get("slot"))
+        await _send_chat_reply(bridge, f"my {name} broke!")
+        return
+
 
 async def _dispatch_chat_command(
     event: ModEvent,
