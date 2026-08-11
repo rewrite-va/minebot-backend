@@ -24,6 +24,24 @@ from minebot.testing import actions
 from minebot.testing.litematic import Schematic, Waypoint
 from minebot.testing.runner import TestCase, TestContext, TestRegistry
 
+
+def _block_center(x: float, y: float, z: float) -> tuple[float, float, float]:
+    """Offsets a block's own integer (x, y, z) coordinate to its real
+    HORIZONTAL center for `/tp` -- a block occupies x in [x, x+1) and z in
+    [z, z+1) (Minecraft's own convention: the integer coordinate is the
+    block's minimum corner, not its center), so `/tp @s x y z` with a bare
+    integer x/z lands the bot's feet at that corner/EDGE of the block, not
+    its middle. Found live, per direct report: every teleport target in
+    this file (ORIGIN, HOLDING, GOTO_TARGET, a schematic's own "start"
+    waypoint, ...) was a plain integer x/z, so every teleport was landing
+    at a block's edge rather than its center. Y is deliberately left
+    UNCHANGED -- standing "on top of" a block at its own real Y (the
+    block's top surface) is already correct with no offset needed;
+    only X/Z (horizontal position within the block's own footprint) were
+    ever wrong.
+    """
+    return (x + 0.5, y, z + 0.5)
+
 # A fixed point on the disposable test world's own flat/void floor (see
 # minebot-mod's TESTING.md "The disposable test world" -- superflat, the
 # void preset) -- every test's own setup teleports here first. y=-60 is
@@ -87,7 +105,7 @@ async def setup_goto(ctx: TestContext) -> None:
     earlier test can't fight this test's own !goto command.
     """
     await actions.reset_to_idle(ctx)
-    await actions.teleport(ctx, ORIGIN_X, ORIGIN_Y, ORIGIN_Z, timeout=TELEPORT_TIMEOUT_SECONDS)
+    await actions.teleport(ctx, *_block_center(ORIGIN_X, ORIGIN_Y, ORIGIN_Z), timeout=TELEPORT_TIMEOUT_SECONDS)
 
 
 async def test_goto_moves_bot_to_target(ctx: TestContext) -> None:
@@ -193,7 +211,7 @@ def _make_schematic_setup(schematic_path: Path, anchor_x: float, anchor_y: float
     """
     async def setup(ctx: TestContext) -> None:
         await actions.reset_to_idle(ctx)
-        await actions.teleport(ctx, HOLDING_X, HOLDING_Y, HOLDING_Z, timeout=TELEPORT_TIMEOUT_SECONDS)
+        await actions.teleport(ctx, *_block_center(HOLDING_X, HOLDING_Y, HOLDING_Z), timeout=TELEPORT_TIMEOUT_SECONDS)
         schematic = Schematic.from_file(schematic_path)
         await actions.place_schematic(
             ctx, schematic, anchor_x=int(anchor_x), anchor_y=int(anchor_y), anchor_z=int(anchor_z),
@@ -201,7 +219,7 @@ def _make_schematic_setup(schematic_path: Path, anchor_x: float, anchor_y: float
         )
         start = _one(schematic.waypoints.start, "start")
         await actions.teleport(
-            ctx, anchor_x + start.x, anchor_y + start.y, anchor_z + start.z,
+            ctx, *_block_center(anchor_x + start.x, anchor_y + start.y, anchor_z + start.z),
             timeout=TELEPORT_TIMEOUT_SECONDS,
         )
 
@@ -255,6 +273,21 @@ def _make_schematic_teardown(schematic_path: Path, anchor_x: float, anchor_y: fl
             ctx, schematic, anchor_x=int(anchor_x), anchor_y=int(anchor_y), anchor_z=int(anchor_z),
             timeout=SCHEMATIC_TIMEOUT_SECONDS,
         )
+        # Fire-and-forget /tp to HOLDING, sent LAST (after clearing, not
+        # before it) and never awaited/confirmed -- per explicit
+        # direction: a failed test should still leave the bot at HOLDING
+        # rather than wherever it ended up, so it doesn't sit in/near the
+        # NEXT test's own setup area (still mid-!goto, standing on the
+        # next schematic's own anchor, ...). Deliberately NOT
+        # actions.teleport() (which polls !query position until arrival
+        # or times out) -- that's exactly the blocking-on-confirmation
+        # shape that made the OLD teardown's own teleport-before-clearing
+        # step unreliable (see this function's own docstring above). This
+        # is a pure best-effort nudge: send the command, don't wait to
+        # see whether it landed, so it can never be the reason teardown
+        # itself fails or blocks.
+        holding_x, holding_y, holding_z = _block_center(HOLDING_X, HOLDING_Y, HOLDING_Z)
+        await ctx.bridge.send_console_command(f"/tp @s {holding_x} {holding_y} {holding_z}")
 
     return teardown
 
