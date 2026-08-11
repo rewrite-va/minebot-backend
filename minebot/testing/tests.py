@@ -125,29 +125,43 @@ def _offset(anchor_x: float, anchor_y: float, anchor_z: float, waypoint: Waypoin
 
 def _make_schematic_setup(schematic_path: Path, anchor_x: float, anchor_y: float, anchor_z: float):
     """Builds a TestCase.setup for a schematic-driven scenario: reset to
-    IDLE, teleport to the schematic's own white-wool "start" marker (see
-    litematic.WAYPOINT_BLOCK_ROLES), then place the schematic at the given
-    anchor -- the shared shape every wool-marker scenario test in this
-    file uses (see setup_goto_onto_schematic's own original docstring, now
-    generalized here once a second/third schematic-driven test -- goto_jump/
+    IDLE, teleport to the safe, always-solid ORIGIN, place the schematic
+    at the given anchor, THEN teleport to the schematic's own white-wool
+    "start" marker (see litematic.WAYPOINT_BLOCK_ROLES) -- the shared
+    shape every wool-marker scenario test in this file uses (see
+    setup_goto_onto_schematic's own original docstring, now generalized
+    here once a second/third schematic-driven test -- goto_jump/
     goto_impossible -- made the copy-pasted version worth factoring out).
-    Teleporting to the marker itself (not a hardcoded ORIGIN-relative
-    offset) is the whole point of the wool-marker convention: a test's own
-    starting position is authored visually in Litematica, not duplicated
-    as separate coordinates here that could silently drift out of sync
-    with what the schematic actually shows.
+
+    Teleporting STRAIGHT to `start` before anything is placed was the
+    original (buggy) order -- confirmed live: the disposable test world's
+    own void floor sits at a fixed ORIGIN_Y, so a `start` marker anchored
+    somewhere above where the schematic's OWN floor blocks will eventually
+    go has nothing solid under it yet at teleport time. The bot fell
+    straight through into the void, landed on the far-below void floor
+    instead of `start`'s own y, and actions.teleport's own arrival check
+    (a real 3D distance, not just x/z) then polled for the FULL
+    TELEPORT_TIMEOUT_SECONDS waiting for a y that was never going to
+    happen -- raising asyncio.TimeoutError before place_schematic ever
+    even ran, which is why NO /fill commands went out at all and only the
+    exception-path teardown's own single "clear" fill showed up in the
+    wire log. Landing at ORIGIN first (the void floor itself -- always
+    solid, real ground under real feet) sidesteps that entirely: by the
+    time this teleports to `start`, the schematic's own blocks already
+    exist to land on.
     """
     async def setup(ctx: TestContext) -> None:
         await actions.reset_to_idle(ctx)
+        await actions.teleport(ctx, ORIGIN_X, ORIGIN_Y, ORIGIN_Z, timeout=TELEPORT_TIMEOUT_SECONDS)
         schematic = Schematic.from_file(schematic_path)
+        await actions.place_schematic(
+            ctx, schematic, anchor_x=int(anchor_x), anchor_y=int(anchor_y), anchor_z=int(anchor_z),
+            timeout=SCHEMATIC_TIMEOUT_SECONDS,
+        )
         start = _one(schematic.waypoints.start, "start")
         await actions.teleport(
             ctx, anchor_x + start.x, anchor_y + start.y, anchor_z + start.z,
             timeout=TELEPORT_TIMEOUT_SECONDS,
-        )
-        await actions.place_schematic(
-            ctx, schematic, anchor_x=int(anchor_x), anchor_y=int(anchor_y), anchor_z=int(anchor_z),
-            timeout=SCHEMATIC_TIMEOUT_SECONDS,
         )
 
     return setup
@@ -307,7 +321,7 @@ def register_default_tests(registry: TestRegistry) -> None:
         func=test_goto_arrives_on_schematic_block,
         setup=setup_goto_onto_schematic,
         teardown=teardown_clear_schematic,
-        timeout_seconds=SCHEMATIC_TIMEOUT_SECONDS + GOTO_TIMEOUT_SECONDS,
+        timeout_seconds=TELEPORT_TIMEOUT_SECONDS + SCHEMATIC_TIMEOUT_SECONDS + GOTO_TIMEOUT_SECONDS,
     ))
     registry.register(TestCase(
         name="goto_jump",
@@ -315,7 +329,7 @@ def register_default_tests(registry: TestRegistry) -> None:
         func=test_goto_jumps_across_gap,
         setup=setup_goto_jump,
         teardown=teardown_clear_goto_jump,
-        timeout_seconds=SCHEMATIC_TIMEOUT_SECONDS + GOTO_TIMEOUT_SECONDS,
+        timeout_seconds=TELEPORT_TIMEOUT_SECONDS + SCHEMATIC_TIMEOUT_SECONDS + GOTO_TIMEOUT_SECONDS,
     ))
     registry.register(TestCase(
         name="goto_impossible",
@@ -323,5 +337,5 @@ def register_default_tests(registry: TestRegistry) -> None:
         func=test_goto_never_reaches_unreachable_target,
         setup=setup_goto_impossible,
         teardown=teardown_clear_goto_impossible,
-        timeout_seconds=SCHEMATIC_TIMEOUT_SECONDS + IMPOSSIBLE_GOTO_WINDOW_SECONDS,
+        timeout_seconds=TELEPORT_TIMEOUT_SECONDS + SCHEMATIC_TIMEOUT_SECONDS + IMPOSSIBLE_GOTO_WINDOW_SECONDS,
     ))
