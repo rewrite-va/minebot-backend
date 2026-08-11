@@ -271,3 +271,50 @@ async def test_assert_goto_never_arrives_fails_when_bot_actually_arrives():
         await actions.assert_goto_never_arrives(
             ctx, target_x=5.0, target_y=0.0, target_z=5.0, distance_tolerance=0.5, timeout=1.0,
         )
+
+
+class _PositionQueryBridge:
+    """Replies to send_query("position") with the real nested "position"
+    object shape MinebotMod.handleQuery sends (not the plain "result"
+    string shape every other query arg uses) -- see actions.query_position's
+    own docstring for why position needs its own reply shape.
+    """
+
+    def __init__(self, query_result: QueryResultTracker, position: dict | None = None, error: str | None = None) -> None:
+        self._query_result = query_result
+        self._position = position
+        self._error = error
+
+    async def send_query(self, arg: str) -> None:
+        data = {"arg": arg}
+        if self._error is not None:
+            data["error"] = self._error
+        else:
+            data["position"] = self._position
+        asyncio.get_event_loop().call_soon(
+            self._query_result.handle_event, ModEvent(type="query_result", data=data),
+        )
+
+
+@pytest.mark.asyncio
+async def test_query_position_returns_real_live_position():
+    query_result = QueryResultTracker()
+    bridge = _PositionQueryBridge(
+        query_result, position={"x": 1.5, "y": -60.0, "z": 2.5, "yaw": 90.0, "pitch": -10.0},
+    )
+    ctx = TestContext(bridge=bridge, self_position=None, tracker=None, query_result=query_result)
+
+    position = await actions.query_position(ctx)
+
+    assert (position.x, position.y, position.z) == (1.5, -60.0, 2.5)
+    assert (position.yaw, position.pitch) == (90.0, -10.0)
+
+
+@pytest.mark.asyncio
+async def test_query_position_raises_on_error_reply():
+    query_result = QueryResultTracker()
+    bridge = _PositionQueryBridge(query_result, error="no local player yet")
+    ctx = TestContext(bridge=bridge, self_position=None, tracker=None, query_result=query_result)
+
+    with pytest.raises(RuntimeError, match="no local player yet"):
+        await actions.query_position(ctx)

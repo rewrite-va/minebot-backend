@@ -309,6 +309,34 @@ async def assert_state(ctx: TestContext, arg: str, expected: str, timeout: float
     assert actual == expected, f"expected {arg}={expected!r}, got {actual!r}"
 
 
+async def query_position(ctx: TestContext, timeout: float = QUERY_TIMEOUT_SECONDS) -> SelfPosition:
+    """Sends `!query position` and returns the bot's real live position,
+    read fresh on demand -- unlike `ctx.self_position.current` (only ever
+    updated by broadcast `position` events, which the mod dedups
+    exact-match: see MinebotMod.maybeBroadcastPositionEvent's own
+    docstring), this always gets a genuine answer even if the bot has gone
+    completely motionless and stopped broadcasting new position events
+    entirely. Confirmed live as a real, previously-undiagnosable failure
+    mode: a bot stuck fighting a genuinely unreachable !goto target
+    (LegsGotoNode/PathTracker re-planning A* every tick with NO_PATH, no
+    backoff) went fully motionless, position broadcasts stopped, and
+    every subsequent goto()/teleport() call in the same session hung for
+    its own full timeout waiting on a `position` event that was never
+    coming again -- indistinguishable from a dead connection from
+    Python's own side, even though the client was alive and ticking
+    normally the whole time. Does NOT update ctx.self_position itself
+    (that tracker is fed only by real broadcast events, by design -- see
+    its own docstring) -- this is a one-shot read for diagnosis/assertion,
+    not a way to force a stale tracker fresh.
+    """
+    await ctx.bridge.send_query("position")
+    event = await ctx.query_result.wait_for_next(timeout=timeout)
+    if "error" in event.data:
+        raise RuntimeError(f"query 'position' failed: {event.data['error']}")
+    data = event.data["position"]
+    return SelfPosition(x=data["x"], y=data["y"], z=data["z"], yaw=data["yaw"], pitch=data["pitch"])
+
+
 # `/tp` itself is exact (no pathfinding, no arrival tolerance the way
 # !goto has) -- this only needs to be loose enough to absorb float
 # formatting/rounding in the command string and one tick of position-

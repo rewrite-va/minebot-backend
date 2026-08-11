@@ -114,3 +114,32 @@ async def test_query_command_reports_mod_side_errors():
         pass
 
     assert bridge.sent_chat == ["query error: unknown query arg: bogus"]
+
+
+@pytest.mark.asyncio
+async def test_query_position_reports_the_nested_position_object():
+    position = {"x": 1.0, "y": -60.0, "z": 2.0, "yaw": 0.0, "pitch": 0.0}
+    bridge = FakeBridge(
+        initial_events=[ModEvent(type="chat", data={"sender": "Alex", "text": "!query position"})],
+        query_replies={"position": ModEvent(type="query_result", data={"arg": "position", "position": position})},
+    )
+    actions = ActionRegistry()
+    query_result = QueryResultTracker()
+    register_query_action(actions, bridge, query_result)
+    tracker = EntityTracker()
+    combat = CombatController(bridge, tracker, PlayerIntentionController())
+    self_defense = SelfDefenseTrigger(combat, combat.intention)
+
+    run_task = asyncio.ensure_future(run(
+        bridge, actions, tracker, InventoryTracker(), LLMController(bridge, actions), CONFIG,
+        SelfPositionTracker(), self_defense, query_result,
+    ))
+    await asyncio.sleep(0.1)
+    run_task.cancel()
+    try:
+        await run_task
+    except asyncio.CancelledError:
+        pass
+
+    assert bridge.sent_queries == ["position"]
+    assert bridge.sent_chat == [f"position = {position}"]
