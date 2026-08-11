@@ -350,6 +350,26 @@ async def query_position(ctx: TestContext, timeout: float = QUERY_TIMEOUT_SECOND
     return SelfPosition(x=data["x"], y=data["y"], z=data["z"], yaw=data["yaw"], pitch=data["pitch"])
 
 
+async def query_block(ctx: TestContext, x: int, y: int, z: int, timeout: float = QUERY_TIMEOUT_SECONDS) -> str:
+    """Sends `!query block <x> <y> <z>` and returns the real block ID at
+    that world position (e.g. "minecraft:air", "minecraft:stone"), read
+    straight off the mod's own loaded chunk data -- the same data
+    pathfinding itself reads (see Movements' own getNeighbors/
+    safeOrBreak). Added to debug a real live report: NO_PATH reported on
+    ground a human operator confirmed was flat/void -- this lets a test
+    (or a human via !query block) directly confirm what block the mod
+    itself actually sees at an exact coordinate, ruling out (or
+    confirming) a real discrepancy between the confirmed-flat terrain and
+    what pathfinding's own reads see. Raises `RuntimeError` if the mod
+    replies with an `"error"` (e.g. the chunk genuinely isn't loaded).
+    """
+    await ctx.bridge.send_query("block", x=x, y=y, z=z)
+    event = await ctx.query_result.wait_for_next(timeout=timeout)
+    if "error" in event.data:
+        raise RuntimeError(f"query 'block' at ({x}, {y}, {z}) failed: {event.data['error']}")
+    return event.data["block"]
+
+
 # `/tp` itself is exact (no pathfinding, no arrival tolerance the way
 # !goto has) -- this only needs to be loose enough to absorb float
 # formatting/rounding in the command string and one tick of position-

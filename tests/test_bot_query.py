@@ -56,7 +56,7 @@ class FakeBridge:
     async def send_chat(self, text: str) -> None:
         self.sent_chat.append(text)
 
-    async def send_query(self, arg: str) -> None:
+    async def send_query(self, arg: str, x: int | None = None, y: int | None = None, z: int | None = None) -> None:
         self.sent_queries.append(arg)
         await self._queue.put(self._query_replies[arg])
 
@@ -143,3 +143,31 @@ async def test_query_position_reports_the_nested_position_object():
 
     assert bridge.sent_queries == ["position"]
     assert bridge.sent_chat == [f"position = {position}"]
+
+
+@pytest.mark.asyncio
+async def test_query_block_reports_the_real_block_id():
+    bridge = FakeBridge(
+        initial_events=[ModEvent(type="chat", data={"sender": "Alex", "text": "!query block 0 -60 0"})],
+        query_replies={"block": ModEvent(type="query_result", data={"arg": "block", "block": "minecraft:stone", "loaded": True})},
+    )
+    actions = ActionRegistry()
+    query_result = QueryResultTracker()
+    register_query_action(actions, bridge, query_result)
+    tracker = EntityTracker()
+    combat = CombatController(bridge, tracker, PlayerIntentionController())
+    self_defense = SelfDefenseTrigger(combat, combat.intention)
+
+    run_task = asyncio.ensure_future(run(
+        bridge, actions, tracker, InventoryTracker(), LLMController(bridge, actions), CONFIG,
+        SelfPositionTracker(), self_defense, query_result,
+    ))
+    await asyncio.sleep(0.1)
+    run_task.cancel()
+    try:
+        await run_task
+    except asyncio.CancelledError:
+        pass
+
+    assert bridge.sent_queries == ["block"]
+    assert bridge.sent_chat == ["block at (0, -60, 0) = minecraft:stone (loaded=True)"]

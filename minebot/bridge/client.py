@@ -221,15 +221,29 @@ class ModBridge:
     async def send_goto(self, x: float, y: float, z: float) -> None:
         await self._send({"type": "goto", "x": x, "y": y, "z": z})
 
-    async def send_query(self, arg: str) -> None:
-        """Sends `{"type": "query", "arg": arg}` -- MinebotMod.handleQuery
-        replies with a `query_result` event (see QueryResultTracker's own
-        docstring for how a caller actually waits for that reply). A
-        read-only introspection request, not a real command with a
-        game-world effect -- sent through the same unrated `_send` path
-        as goto/follow/etc., never send_chat.
+    async def send_query(
+        self, arg: str, x: int | None = None, y: int | None = None, z: int | None = None,
+    ) -> None:
+        """Sends `{"type": "query", "arg": arg, ...}` -- MinebotMod.
+        handleQuery replies with a `query_result` event (see
+        QueryResultTracker's own docstring for how a caller actually waits
+        for that reply). A read-only introspection request, not a real
+        command with a game-world effect -- sent through the same unrated
+        `_send` path as goto/follow/etc., never send_chat.
+
+        `x`/`y`/`z` are optional extra fields, needed only by `arg="block"`
+        (see MinebotMod.handleQuery's own docstring) -- every other `arg`
+        value ignores them mod-side, so callers that don't need them
+        simply omit all three.
         """
-        await self._send({"type": "query", "arg": arg})
+        payload: dict[str, object] = {"type": "query", "arg": arg}
+        if x is not None:
+            payload["x"] = x
+        if y is not None:
+            payload["y"] = y
+        if z is not None:
+            payload["z"] = z
+        await self._send(payload)
 
     async def send_give(self, recipient_entity_id: int | None, item: str | None, quantity: int) -> None:
         """`recipient_entity_id`/`item` None and `quantity` 0 match

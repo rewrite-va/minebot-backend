@@ -355,3 +355,51 @@ async def test_query_position_raises_on_error_reply():
 
     with pytest.raises(RuntimeError, match="no local player yet"):
         await actions.query_position(ctx)
+
+
+class _BlockQueryBridge:
+    """Replies to send_query("block", x, y, z) with the real "block"/
+    "loaded" reply shape MinebotMod.handleQuery sends -- see
+    actions.query_block's own docstring.
+    """
+
+    def __init__(self, query_result: QueryResultTracker, block: str | None = None, loaded: bool = True, error: str | None = None) -> None:
+        self._query_result = query_result
+        self._block = block
+        self._loaded = loaded
+        self._error = error
+        self.sent: list[tuple[str, int, int, int]] = []
+
+    async def send_query(self, arg: str, x: int | None = None, y: int | None = None, z: int | None = None) -> None:
+        self.sent.append((arg, x, y, z))
+        data = {"arg": arg}
+        if self._error is not None:
+            data["error"] = self._error
+        else:
+            data["block"] = self._block
+            data["loaded"] = self._loaded
+        asyncio.get_event_loop().call_soon(
+            self._query_result.handle_event, ModEvent(type="query_result", data=data),
+        )
+
+
+@pytest.mark.asyncio
+async def test_query_block_returns_real_block_id():
+    query_result = QueryResultTracker()
+    bridge = _BlockQueryBridge(query_result, block="minecraft:stone", loaded=True)
+    ctx = TestContext(bridge=bridge, self_position=None, tracker=None, query_result=query_result)
+
+    block = await actions.query_block(ctx, 0, -60, 0)
+
+    assert block == "minecraft:stone"
+    assert bridge.sent == [("block", 0, -60, 0)]
+
+
+@pytest.mark.asyncio
+async def test_query_block_raises_on_error_reply():
+    query_result = QueryResultTracker()
+    bridge = _BlockQueryBridge(query_result, error="block query requires x/y/z and a loaded level")
+    ctx = TestContext(bridge=bridge, self_position=None, tracker=None, query_result=query_result)
+
+    with pytest.raises(RuntimeError, match="block query requires"):
+        await actions.query_block(ctx, 0, -60, 0)

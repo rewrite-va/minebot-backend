@@ -20,6 +20,14 @@ waits for "the next broadcast position event" (actions.wait_for_position/
 goto/teleport, all in minebot/testing/) hangs forever in that state with
 nothing to explain why. `!query position` reads the bot's real live
 position fresh, on demand, sidestepping the dedup entirely.
+
+`!query block <x> <y> <z>` reads the real block ID at a given world
+position, straight off the client's own loaded chunk data -- added to
+debug a real live report: NO_PATH on ground a human operator confirmed
+was flat/void. Lets a human (or Python) directly confirm what block the
+mod itself actually sees at an exact coordinate, ruling out (or
+confirming) a real discrepancy between what a human sees in the client
+and what pathfinding's own block reads see.
 """
 
 from __future__ import annotations
@@ -38,23 +46,28 @@ QUERY_TIMEOUT_SECONDS = 5.0
 
 
 def register_query_action(registry: ActionRegistry, bridge: ModBridge, query_result: QueryResultTracker) -> None:
-    async def handler(sender: str | None, arg: str) -> ActionResult:
-        await bridge.send_query(arg)
+    async def handler(sender: str | None, arg: str, x: int | None = None, y: int | None = None, z: int | None = None) -> ActionResult:
+        await bridge.send_query(arg, x=x, y=y, z=z)
         event = await query_result.wait_for_next(timeout=QUERY_TIMEOUT_SECONDS)
         if "error" in event.data:
             return ActionResult(message=f"query error: {event.data['error']}")
-        # "position" carries its own nested object (x/y/z/yaw/pitch), not
-        # a plain "result" string like every other queryable fact -- see
+        # "position"/"block" each carry their own reply shape, not a plain
+        # "result" string like every other queryable fact -- see
         # MinebotMod.handleQuery's own docstring for why.
         if arg == "position":
             return ActionResult(message=f"position = {event.data.get('position')}")
+        if arg == "block":
+            return ActionResult(message=f"block at ({x}, {y}, {z}) = {event.data.get('block')} (loaded={event.data.get('loaded')})")
         return ActionResult(message=f"{arg} = {event.data.get('result')}")
 
     registry.register(Action(
         name="query",
-        description="Ask the mod for its own current live state (e.g. !query player_intention, !query legs, !query hands, !query head, !query position).",
+        description="Ask the mod for its own current live state (e.g. !query player_intention, !query legs, !query hands, !query head, !query position, !query block <x> <y> <z>).",
         handler=handler,
         params=[
-            ActionParam("arg", "string", "What to query: player_intention, legs, hands, head, or position.", required=True),
+            ActionParam("arg", "string", "What to query: player_intention, legs, hands, head, position, or block.", required=True),
+            ActionParam("x", "int", "Block x coordinate (only for 'block').", required=False),
+            ActionParam("y", "int", "Block y coordinate (only for 'block').", required=False),
+            ActionParam("z", "int", "Block z coordinate (only for 'block').", required=False),
         ],
     ))
