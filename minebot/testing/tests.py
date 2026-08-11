@@ -33,7 +33,11 @@ from minebot.testing.runner import TestCase, TestContext, TestRegistry
 ORIGIN_X = 0.0
 ORIGIN_Y = -60.0
 ORIGIN_Z = 0.0
-TELEPORT_TIMEOUT_SECONDS = 10.0
+# Kept short (5s) per explicit direction -- a teleport/goto/schematic
+# placement/blocked-target observation that's actually working correctly
+# should converge well under this; anything genuinely stuck should fail
+# fast and visibly rather than burning a much longer budget first.
+TELEPORT_TIMEOUT_SECONDS = 5.0
 
 # A holding spot well outside every schematic's own footprint (all
 # anchored at ORIGIN's own (x, z) -- see SCHEMATIC_ANCHOR_X's own comment)
@@ -68,7 +72,7 @@ HOLDING_Z = -7.0
 # coincidentally-reused default that was never meant for "go to this
 # exact spot" in the first place.
 GOTO_ARRIVAL_TOLERANCE = 0.5
-GOTO_TIMEOUT_SECONDS = 15.0
+GOTO_TIMEOUT_SECONDS = 5.0
 GOTO_TARGET_X = ORIGIN_X
 GOTO_TARGET_Y = ORIGIN_Y
 GOTO_TARGET_Z = ORIGIN_Z + 5.0
@@ -133,7 +137,7 @@ SCHEMATIC_ANCHOR_X = ORIGIN_X
 SCHEMATIC_ANCHOR_Y = ORIGIN_Y
 SCHEMATIC_ANCHOR_Z = ORIGIN_Z
 
-SCHEMATIC_TIMEOUT_SECONDS = 15.0
+SCHEMATIC_TIMEOUT_SECONDS = 5.0
 
 
 def _one(waypoints: list, role: str) -> object:
@@ -371,10 +375,13 @@ IMPOSSIBLE_SCHEMATIC_ANCHOR_Z = ORIGIN_Z
 # Genuinely blocked, so !goto never converges on its own the way a normal
 # test's own arrival does -- this only needs to be long enough to be
 # confident the mod actually gave up / kept failing to find a route, not
-# so long every full pytest run pays for it needlessly. Shorter than
-# GOTO_TIMEOUT_SECONDS on purpose: there's no arrival to wait out here,
+# so long every full pytest run pays for it needlessly. Kept at 5s per
+# explicit direction (every goto-related timeout in this file -> 5s) --
+# LegsGotoNode now gives up on a confirmed NO_PATH within a tick or two
+# (see its own isFinished() fix), so 5s is still generous for "confirm it
+# never arrived" even though there's no real arrival to wait out here,
 # just a fixed observation window.
-IMPOSSIBLE_GOTO_WINDOW_SECONDS = 10.0
+IMPOSSIBLE_GOTO_WINDOW_SECONDS = 5.0
 
 setup_goto_impossible = _make_schematic_setup(IMPOSSIBLE_SCHEMATIC_PATH, IMPOSSIBLE_SCHEMATIC_ANCHOR_X, IMPOSSIBLE_SCHEMATIC_ANCHOR_Y, IMPOSSIBLE_SCHEMATIC_ANCHOR_Z)
 teardown_clear_goto_impossible = _make_schematic_teardown(IMPOSSIBLE_SCHEMATIC_PATH, IMPOSSIBLE_SCHEMATIC_ANCHOR_X, IMPOSSIBLE_SCHEMATIC_ANCHOR_Y, IMPOSSIBLE_SCHEMATIC_ANCHOR_Z)
@@ -407,6 +414,7 @@ def register_default_tests(registry: TestRegistry) -> None:
         description="Sends the bot 5 blocks away via !goto and asserts it actually arrives.",
         func=test_goto_moves_bot_to_target,
         setup=setup_goto,
+        timeout_seconds=TELEPORT_TIMEOUT_SECONDS + GOTO_TIMEOUT_SECONDS,
     ))
     registry.register(TestCase(
         name="goto_onto_schematic",

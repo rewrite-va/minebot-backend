@@ -381,23 +381,34 @@ async def teleport(ctx: TestContext, x: float, y: float, z: float, timeout: floa
     """Teleports the bot to a fixed position via a real `/tp @s x y z`
     chat/console command (see MinebotMod's own "chat" dispatch case --
     the same real vanilla command-send path a human typing in chat uses,
-    not a separate debug-only teleport), then waits for `self_position`
-    to actually reflect the new position before returning. Exists so
-    tests can start from a known, fixed origin instead of "wherever the
-    bot happened to be left standing by the previous test" -- per
-    explicit direction, this is what a test's own setup() should call
-    (see TestCase.setup/runner.py) so every test starts from the same
-    place regardless of run order or what an earlier test in the same
-    session did.
+    not a separate debug-only teleport), then confirms arrival via
+    `!query position` (see query_position's own docstring) before
+    returning. Exists so tests can start from a known, fixed origin
+    instead of "wherever the bot happened to be left standing by the
+    previous test" -- per explicit direction, this is what a test's own
+    setup() should call (see TestCase.setup/runner.py) so every test
+    starts from the same place regardless of run order or what an earlier
+    test in the same session did.
 
-    Waits for the position to actually change (not just sends and
-    returns) -- a caller that immediately reads self_position.current
-    after calling this without waiting could still see the bot's
-    PREVIOUS position, race the real teleport, and start a test from the
-    wrong place with no error to explain why. Raises `asyncio.TimeoutError`
-    (same shape as goto()/wait_for_position() above) if the position never
-    actually updates within `timeout` -- e.g. a malformed command, or the
-    bot not actually connected.
+    Deliberately polls via ACTIVE `!query position` requests, not the
+    passive broadcast `position` event `ctx.self_position.current` only
+    ever reflects -- per explicit direction ("use query position not as a
+    fallback but as the main way for teleport"), after a real live bug:
+    the broadcast is exact-dedup'd (see MinebotMod.
+    maybeBroadcastPositionEvent's own docstring), and a teleport TO a
+    position the bot happens to already be standing at/near (e.g. every
+    test's own teardown teleporting to the same fixed HOLDING spot in a
+    row) can leave nothing NEW to broadcast even though the /tp itself
+    genuinely executed -- confirmed live via the mod's own chat log
+    showing a real "Teleported ritebot to ..." reply while Python's own
+    passive-broadcast-based poll kept waiting, timed out, and retried the
+    exact same /tp a second time moments later. Querying fresh each poll
+    sidesteps the dedup entirely: it always gets a genuine, current answer
+    regardless of whether anything actually changed since the last one.
+
+    Raises `asyncio.TimeoutError` (same shape as goto()/wait_for_position()
+    above) if the position never actually converges within `timeout` --
+    e.g. a malformed command, or the bot not actually connected.
 
     Uses send_console_command (an unrated `_send`), not send_chat --
     found live: a test-world `/tp` sitting behind other queued chat
@@ -409,17 +420,14 @@ async def teleport(ctx: TestContext, x: float, y: float, z: float, timeout: floa
     even reached the server, causing sporadic teleport timeouts that had
     nothing to do with the teleport itself ever actually failing.
     """
-    await _wait_for_initial_position(ctx)
-
     async def _wait_for_teleport() -> None:
         await ctx.bridge.send_console_command(f"/tp @s {x} {y} {z}")
 
         while True:
-            pos = ctx.self_position.current
-            if pos is not None:
-                distance = math.dist((pos.x, pos.y, pos.z), (x, y, z))
-                if distance <= TELEPORT_TOLERANCE:
-                    return
+            pos = await query_position(ctx, timeout=QUERY_TIMEOUT_SECONDS)
+            distance = math.dist((pos.x, pos.y, pos.z), (x, y, z))
+            if distance <= TELEPORT_TOLERANCE:
+                return
             await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
     await asyncio.wait_for(_wait_for_teleport(), timeout=timeout)
