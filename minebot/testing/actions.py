@@ -150,6 +150,18 @@ class GotoWaypointResult:
 # path/forbidden waypoint actually means.
 WAYPOINT_RADIUS = 0.75
 
+# Checked against each waypoint's BLOCK CENTER (x+0.5, y+0.5, z+0.5), not
+# its raw minimum-corner (x, y, z) -- confirmed live as a real bug: a
+# physics-correct, close-but-not-exact jump landed at real distance ~1.16
+# blocks from a path waypoint's own raw corner coordinate but only ~0.43
+# blocks from that same block's real center, well inside WAYPOINT_RADIUS.
+# litematic.Waypoint intentionally stores the same minimum-corner integer
+# coordinates as SchematicBlock (see its own docstring) since that's the
+# natural representation for offsetting by an anchor -- but "was the bot
+# at this waypoint" is a real-world proximity question, and a block's
+# real center is what a bot actually walking through/near it will get
+# close to, not its arbitrary corner.
+
 
 async def goto_with_waypoints(
     ctx: TestContext,
@@ -185,10 +197,12 @@ async def goto_with_waypoints(
 
     def _on_position(pos: SelfPosition) -> None:
         for i, waypoint in enumerate(path):
-            if math.dist((pos.x, pos.y, pos.z), (waypoint.x, waypoint.y, waypoint.z)) <= WAYPOINT_RADIUS:
+            center = (waypoint.x + 0.5, waypoint.y + 0.5, waypoint.z + 0.5)
+            if math.dist((pos.x, pos.y, pos.z), center) <= WAYPOINT_RADIUS:
                 path_hits[i] += 1
         for i, waypoint in enumerate(forbidden):
-            if math.dist((pos.x, pos.y, pos.z), (waypoint.x, waypoint.y, waypoint.z)) <= WAYPOINT_RADIUS:
+            center = (waypoint.x + 0.5, waypoint.y + 0.5, waypoint.z + 0.5)
+            if math.dist((pos.x, pos.y, pos.z), center) <= WAYPOINT_RADIUS:
                 forbidden_hits[i] += 1
 
     ctx.self_position.add_listener(_on_position)

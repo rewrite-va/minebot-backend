@@ -189,9 +189,12 @@ async def test_goto_with_waypoints_counts_path_and_forbidden_hits():
     # wait needs at least one before it'll send anything).
     self_position.handle_event(ModEvent(type="position", data={"x": 0.0, "y": 0.0, "z": 0.0, "yaw": 0.0, "pitch": 0.0}))
     # A straight walk along x: 0 -> 1 -> 2 -> 3 -> 4, passing directly
-    # through the path waypoint at x=2 and nowhere near the forbidden one
-    # at x=10, ending within tolerance of the target at x=4.
-    steps = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (2.0, 0.0, 0.0), (3.0, 0.0, 0.0), (4.0, 0.0, 0.0)]
+    # through the path waypoint block's own CENTER (x=2.5, see
+    # goto_with_waypoints' own WAYPOINT_RADIUS docstring for why hits are
+    # checked against a waypoint's real block center, not its raw
+    # minimum-corner integer coordinate) and nowhere near the forbidden
+    # one at x=10, ending within tolerance of the target at x=4.
+    steps = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (2.5, 0.0, 0.0), (3.0, 0.0, 0.0), (4.0, 0.0, 0.0)]
     bridge = _GotoBridge(self_position, steps)
     ctx = TestContext(bridge=bridge, self_position=self_position, tracker=None, query_result=None)
 
