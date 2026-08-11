@@ -168,13 +168,30 @@ class TestRunner:
         self._registry = registry
         self._ctx = ctx
 
-    async def run(self, name: str | None) -> list[TestOutcome]:
+    async def run(self, name: str | None, stop_on_first_failure: bool = True) -> list[TestOutcome]:
         """Runs one named test, or every registered test (in registration
         order) if `name` is None -- matching !runtest's own no-argument
         "run all" contract. Tests run sequentially, not concurrently: they
         all drive the SAME single bot/connection (there's only one), so
         two tests running at once would just fight over its goals the same
         way two humans typing conflicting chat commands would.
+
+        `stop_on_first_failure` (default True, per explicit direction)
+        only applies to the "run all" path -- a single named test has
+        nothing after it to stop before anyway. Once a test fails, every
+        later test in registration order shares the SAME bot/world state
+        the failed one left behind (a stuck LegsState, leftover placed
+        blocks if its own teardown also failed, ...), so letting the
+        whole suite barrel on typically just produces a cascade of
+        unrelated-looking failures that all trace back to the first real
+        one -- confirmed live, repeatedly, during this test harness's own
+        development (a single genuinely stuck test derailing 3-4 later
+        ones in the same run, each looking like its own separate bug
+        until the FIRST one's own root cause was found). Stopping there
+        surfaces the one failure that actually matters immediately,
+        instead of burning the rest of the run's own time on downstream
+        noise. Pass False to run the full suite regardless (e.g. to see
+        the total pass/fail count across everything in one pass).
         """
         if name is not None:
             test = self._registry.get(name)
@@ -182,7 +199,13 @@ class TestRunner:
                 return [TestOutcome(name=name, passed=False, detail=f"no such test: {name}", duration_seconds=0.0)]
             return [await self._run_one(test)]
 
-        return [await self._run_one(test) for test in self._registry.list_tests()]
+        outcomes: list[TestOutcome] = []
+        for test in self._registry.list_tests():
+            outcome = await self._run_one(test)
+            outcomes.append(outcome)
+            if not outcome.passed and stop_on_first_failure:
+                break
+        return outcomes
 
     async def _run_one(self, test: TestCase) -> TestOutcome:
         log.info("!runtest: starting %s", test.name)
