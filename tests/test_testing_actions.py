@@ -403,3 +403,54 @@ async def test_query_block_raises_on_error_reply():
 
     with pytest.raises(RuntimeError, match="block query requires"):
         await actions.query_block(ctx, 0, -60, 0)
+
+
+class _TeleportBridge:
+    """send_console_command sends a real /tp; send_query("position")
+    replies with the real target position but only after `slow_replies`
+    query attempts are silently dropped first (never resolved) -- models a
+    single slow/lost query round trip without failing the whole call, the
+    exact regression this covers (see actions.POLL_QUERY_TIMEOUT_SECONDS's
+    own docstring): a caller polling in a loop must retry a single missed
+    reply, not treat it as a hard failure of the whole operation.
+    """
+
+    def __init__(self, query_result: QueryResultTracker, target: tuple[float, float, float], slow_replies: int) -> None:
+        self._query_result = query_result
+        self._target = target
+        self._slow_replies = slow_replies
+        self._query_count = 0
+        self.sent_commands: list[str] = []
+
+    async def send_console_command(self, text: str) -> None:
+        self.sent_commands.append(text)
+
+    async def send_query(self, arg: str, x: int | None = None, y: int | None = None, z: int | None = None) -> None:
+        self._query_count += 1
+        if self._query_count <= self._slow_replies:
+            return  # dropped -- simulates a reply that never arrives in time for this attempt
+        x_, y_, z_ = self._target
+        position = {"x": x_, "y": y_, "z": z_, "yaw": 0.0, "pitch": 0.0}
+        asyncio.get_event_loop().call_soon(
+            self._query_result.handle_event,
+            ModEvent(type="query_result", data={"arg": arg, "position": position}),
+        )
+
+
+@pytest.mark.asyncio
+async def test_teleport_retries_a_single_slow_query_reply_instead_of_failing():
+    # Regression test: teleport()'s own polling loop used to pass the
+    # SAME timeout to each individual query_position() call as the whole
+    # teleport() call's own outer timeout -- a single slow/lost reply
+    # could eat the entire outer budget before a second poll attempt ever
+    # ran. Here the first query attempt is dropped (simulating that slow
+    # reply); teleport() must retry and still succeed well within its own
+    # timeout, not raise on the first missed attempt.
+    query_result = QueryResultTracker()
+    bridge = _TeleportBridge(query_result, target=(1.0, 2.0, 3.0), slow_replies=1)
+    ctx = TestContext(bridge=bridge, self_position=None, tracker=None, query_result=query_result)
+
+    await actions.teleport(ctx, 1.0, 2.0, 3.0, timeout=5.0)
+
+    assert bridge.sent_commands == ["/tp @s 1.0 2.0 3.0"]
+    assert bridge._query_count >= 2

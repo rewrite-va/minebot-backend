@@ -279,8 +279,33 @@ async def reset_to_idle(ctx: TestContext) -> None:
 # Real network round trip (send query, mod replies) but no game-world
 # action involved at all -- should resolve in well under a second in
 # practice; kept short so a query that never gets a reply fails fast and
-# visibly rather than silently stalling a test's own budget.
+# visibly rather than silently stalling a test's own budget. This is the
+# ONE-SHOT default for a single !query call -- callers polling with
+# repeated queries in a loop (e.g. teleport() below) should use the much
+# tighter POLL_QUERY_TIMEOUT_SECONDS instead, see its own docstring for
+# the real budget-structure bug this distinction fixes.
 QUERY_TIMEOUT_SECONDS = 5.0
+
+# Per-attempt timeout for a query used INSIDE a polling loop, not a
+# single one-shot call -- deliberately much shorter than
+# QUERY_TIMEOUT_SECONDS. Found live: teleport()'s own polling loop passed
+# QUERY_TIMEOUT_SECONDS (5.0) as EACH individual query_position() call's
+# own timeout, while the loop itself was wrapped in an outer
+# asyncio.wait_for using the SAME 5.0s figure (TELEPORT_TIMEOUT_SECONDS,
+# a coincidentally equal but independently-set constant) -- if the first
+# query attempt took anywhere close to its own full 5s allowance (real
+# round-trip latency, nothing actually wrong), the OUTER wait_for could
+# expire before that single query even finished, let alone before a
+# second poll attempt ever got a chance to run. Confirmed live: the mod's
+# own chat log showed a real "Teleported ritebot to ..." reply landing
+# successfully, yet teleport() still raised TimeoutError roughly 4
+# seconds later with no second query attempt logged at all. A real query
+# round trip takes well under a second in practice (see
+# QUERY_TIMEOUT_SECONDS's own docstring) -- this keeps a single slow/lost
+# reply from silently eating most of the CALLER's own overall budget,
+# leaving room for several real poll attempts within it instead of at
+# most one.
+POLL_QUERY_TIMEOUT_SECONDS = 1.0
 
 
 async def query(ctx: TestContext, arg: str, timeout: float = QUERY_TIMEOUT_SECONDS) -> str:
@@ -424,7 +449,18 @@ async def teleport(ctx: TestContext, x: float, y: float, z: float, timeout: floa
         await ctx.bridge.send_console_command(f"/tp @s {x} {y} {z}")
 
         while True:
-            pos = await query_position(ctx, timeout=QUERY_TIMEOUT_SECONDS)
+            # POLL_QUERY_TIMEOUT_SECONDS, not QUERY_TIMEOUT_SECONDS -- see
+            # its own docstring for the real budget-structure bug this
+            # fixes: a single slow/lost query reply must not be able to
+            # eat this whole call's own `timeout` budget on its own. A
+            # single missed/slow reply here is retried (see except below),
+            # not treated as a hard failure -- only running out of the
+            # OUTER `timeout` (this whole function is wrapped in
+            # asyncio.wait_for below) actually fails the teleport.
+            try:
+                pos = await query_position(ctx, timeout=POLL_QUERY_TIMEOUT_SECONDS)
+            except asyncio.TimeoutError:
+                continue
             distance = math.dist((pos.x, pos.y, pos.z), (x, y, z))
             if distance <= TELEPORT_TOLERANCE:
                 return
