@@ -13,6 +13,7 @@ from minebot.bot.movement import MovementController, register_movement_actions
 from minebot.bot.player_intention import PlayerIntentionController
 from minebot.bot.run_loop import run
 from minebot.bot.self_defense import SelfDefenseTrigger
+from minebot.bot.testing import register_testing_actions
 from minebot.bridge.client import ModBridge
 from minebot.bridge.entities import EntityTracker
 from minebot.bridge.inventory import InventoryTracker
@@ -21,6 +22,8 @@ from minebot.bridge.self_position import SelfPositionTracker
 from minebot.config import BotConfig
 from minebot.llm.controller import LLMController
 from minebot.logging_setup import configure_logging
+from minebot.testing.runner import TestContext, TestRegistry, TestRunner
+from minebot.testing.tests import register_default_tests
 
 log_path = configure_logging(os.environ.get("MINEBOT_LOG_LEVEL", "INFO"))
 log = logging.getLogger("minebot")
@@ -50,6 +53,11 @@ async def run_bot(config: BotConfig) -> None:
     register_inventory_actions(actions, inventory_controller)
     InventoryAnnouncer(bridge, inventory)  # registers itself as an inventory-change listener; not otherwise referenced
     register_help_action(actions)
+
+    test_registry = TestRegistry()
+    register_default_tests(test_registry)
+    test_runner = TestRunner(test_registry, TestContext(bridge=bridge, self_position=self_position, tracker=tracker))
+    register_testing_actions(actions, test_runner)
 
     llm = LLMController(bridge, actions)  # no provider configured yet -- see llm/controller.py
 

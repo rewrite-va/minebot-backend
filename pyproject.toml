@@ -20,3 +20,27 @@ include = ["minebot*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Excludes tests/integration/ from a plain `uv run pytest` -- that suite
+# launches a real Minecraft client (real GPU, ~15-20s startup, needs
+# DISPLAY set) and must be run explicitly:
+#   uv run pytest tests/integration/
+# See tests/integration/conftest.py's own docstring for the full story.
+testpaths = ["tests"]
+norecursedirs = ["tests/integration"]
+# tests/integration/conftest.py's `ingame_session` fixture is
+# session-scoped (one real client launch shared by every test in the
+# session, see its own docstring for why), but pytest-asyncio's default
+# fixture loop scope is "function" -- a session-scoped async fixture
+# under a function-scoped event loop is unsupported and silently breaks:
+# asyncio.Task objects created inside the fixture (the reader_task in
+# this case) get bound to whichever loop was active when the fixture
+# first ran, then the test itself runs on a DIFFERENT loop, so events
+# the reader task received were never actually visible to the test's own
+# await calls -- confirmed live: send_goto was never reached at all
+# despite self_position clearly updating in the mod's own log, with the
+# whole test just hanging until timeout. Setting both scopes to
+# "session" keeps the fixture and every test in tests/integration/ on
+# the SAME loop for the whole run, matching the single-shared-client
+# design.
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"

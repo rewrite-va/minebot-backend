@@ -218,6 +218,9 @@ class ModBridge:
     async def send_sleep(self) -> None:
         await self._send({"type": "sleep"})
 
+    async def send_goto(self, x: float, y: float, z: float) -> None:
+        await self._send({"type": "goto", "x": x, "y": y, "z": z})
+
     async def send_give(self, recipient_entity_id: int | None, item: str | None, quantity: int) -> None:
         """`recipient_entity_id`/`item` None and `quantity` 0 match
         minebot-mod's own Command.Give "give to the caller"/"the last item
