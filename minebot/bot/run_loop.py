@@ -21,6 +21,7 @@ from minebot.bot.self_defense import SelfDefenseTrigger
 from minebot.bridge.client import ModBridge, ModEvent
 from minebot.bridge.entities import EntityTracker
 from minebot.bridge.inventory import InventoryTracker
+from minebot.bridge.query import QueryResultTracker
 from minebot.bridge.self_position import SelfPositionTracker
 from minebot.config import BotConfig
 from minebot.llm.controller import LLMController
@@ -40,6 +41,7 @@ async def run(
     config: BotConfig,
     self_position: SelfPositionTracker,
     self_defense: SelfDefenseTrigger,
+    query_result: QueryResultTracker,
 ) -> None:
     """Splits reading the mod's events from processing them into two
     concurrent tasks joined by a queue -- found live (back when !find
@@ -82,7 +84,7 @@ async def run(
     commands themselves finish executing in.
     """
     queue: asyncio.Queue[ModEvent] = asyncio.Queue()
-    reader = asyncio.ensure_future(_read_events(bridge, tracker, inventory, self_position, queue))
+    reader = asyncio.ensure_future(_read_events(bridge, tracker, inventory, self_position, query_result, queue))
     current_command_task: asyncio.Task | None = None
 
     try:
@@ -132,6 +134,7 @@ async def _read_events(
     tracker: EntityTracker,
     inventory: InventoryTracker,
     self_position: SelfPositionTracker,
+    query_result: QueryResultTracker,
     queue: asyncio.Queue[ModEvent],
 ) -> None:
     """Continuously drains bridge.events() -- this is the only coroutine
@@ -142,12 +145,16 @@ async def _read_events(
     Fast-paths state-tracking events synchronously (no suspension point
     beyond the occasional `await` that only ever *sends*, never waits for
     a reply): entity/inventory/position update their trackers
-    immediately -- fast-pathing these here, not through the queue, is
-    what makes chat-command dispatch safe to run as independent
-    concurrent tasks (see run()'s own docstring): every tracker read a
-    command handler ever does is guaranteed current as of every event
-    received so far, regardless of which order concurrently-running
-    command tasks happen to finish in.
+    immediately, and query_result resolves whichever `wait_for_next` call
+    is currently pending (see QueryResultTracker's own docstring for why
+    THIS needs the same fast-pathing as the trackers -- a caller actively
+    awaiting a query reply must never have it sit behind whatever chat
+    command happens to be running) -- fast-pathing these here, not through
+    the queue, is what makes chat-command dispatch safe to run as
+    independent concurrent tasks (see run()'s own docstring): every
+    tracker read a command handler ever does is guaranteed current as of
+    every event received so far, regardless of which order concurrently-
+    running command tasks happen to finish in.
     """
     async for event in bridge.events():
         log_timing(log, "read @ %.3f: type=%s", now(), event.type)
@@ -164,6 +171,9 @@ async def _read_events(
                 event.data.get("yaw", 0.0), event.data.get("on_ground"),
             )
             self_position.handle_event(event)
+        elif event.type == "query_result":
+            log.debug("query_result: %s", event.data)
+            query_result.handle_event(event)
         else:
             await queue.put(event)
 

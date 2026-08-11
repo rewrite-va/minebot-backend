@@ -128,14 +128,59 @@ async def reset_to_idle(ctx: TestContext) -> None:
 
     No wait/confirmation needed afterward (unlike teleport(), which polls
     `self_position` until the /tp visibly lands) -- there's no broadcast
-    event that would confirm PlayerIntentionState changed, and none of
-    this repo's own tests currently assert against it directly; they rely
-    on it only insofar as leftover FOLLOW/DEFEND would otherwise interfere
-    with movement/combat commands the test DOES assert on. Uses
-    send_stop() (an unrated `_send`, like goto/follow/etc.), not
-    send_chat -- this is a real command, not chat text.
+    event confirming PlayerIntentionState changed the way `position`
+    confirms a teleport; a caller that needs to confirm the reset actually
+    landed should follow this with `assert_state(ctx, "player_intention",
+    "IDLE", ...)`. Uses send_stop() (an unrated `_send`, like goto/follow/
+    etc.), not send_chat -- this is a real command, not chat text.
     """
     await ctx.bridge.send_stop()
+
+
+# Real network round trip (send query, mod replies) but no game-world
+# action involved at all -- should resolve in well under a second in
+# practice; kept short so a query that never gets a reply fails fast and
+# visibly rather than silently stalling a test's own budget.
+QUERY_TIMEOUT_SECONDS = 5.0
+
+
+async def query(ctx: TestContext, arg: str, timeout: float = QUERY_TIMEOUT_SECONDS) -> str:
+    """Sends `{"type": "query", "arg": arg}` and returns the mod's own
+    `result` string from its `query_result` reply (see minebot-mod's
+    MinebotMod.handleQuery for the full list of supported `arg` values --
+    "player_intention"/"legs"/"hands"/"head" as of this writing). Raises
+    `RuntimeError` if the mod replies with an `"error"` instead (e.g. an
+    unrecognized `arg`), and `asyncio.TimeoutError` (same shape as every
+    other primitive here) if no reply arrives within `timeout` at all.
+
+    Built specifically so tests can assert against the mod's own REAL
+    final state machine state, not just position/timing-based proxies for
+    it -- see assert_state's own docstring for the shared teardown
+    assertion this is the plumbing for, and LegsStateMachine's own recent
+    isStopCommand fix for the real bug (LegsState staying in GOTO after
+    !stop) that went unnoticed for as long as it did specifically because
+    nothing could assert against real final state before this existed.
+    """
+    await ctx.bridge.send_query(arg)
+    event = await ctx.query_result.wait_for_next(timeout=timeout)
+    if "error" in event.data:
+        raise RuntimeError(f"query {arg!r} failed: {event.data['error']}")
+    return event.data.get("result")
+
+
+async def assert_state(ctx: TestContext, arg: str, expected: str, timeout: float = QUERY_TIMEOUT_SECONDS) -> None:
+    """Queries `arg` (see query() above) and asserts the result equals
+    `expected` -- the shared "did every state machine actually end up
+    where it should" check meant to run from a test's own teardown/
+    fixture, e.g. `assert_state(ctx, "legs", "IDLE")` after a !goto test
+    to catch exactly the class of bug LegsStateMachine's own isStopCommand
+    fix addressed (an axis silently left in a non-idle state that nothing
+    was checking). A plain `assert query(...) == expected` inline would
+    work just as well; this exists so every call site gets the same clear
+    failure message shape instead of each writing its own.
+    """
+    actual = await query(ctx, arg, timeout=timeout)
+    assert actual == expected, f"expected {arg}={expected!r}, got {actual!r}"
 
 
 # `/tp` itself is exact (no pathfinding, no arrival tolerance the way

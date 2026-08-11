@@ -11,6 +11,7 @@ from minebot.bot.inventory import InventoryController, register_inventory_action
 from minebot.bot.inventory_announcer import InventoryAnnouncer
 from minebot.bot.movement import MovementController, register_movement_actions
 from minebot.bot.player_intention import PlayerIntentionController
+from minebot.bot.query import register_query_action
 from minebot.bot.run_loop import run
 from minebot.bot.self_defense import SelfDefenseTrigger
 from minebot.bot.testing import register_testing_actions
@@ -18,6 +19,7 @@ from minebot.bridge.client import ModBridge
 from minebot.bridge.entities import EntityTracker
 from minebot.bridge.inventory import InventoryTracker
 from minebot.bridge.observer import ObserverServer
+from minebot.bridge.query import QueryResultTracker
 from minebot.bridge.self_position import SelfPositionTracker
 from minebot.config import BotConfig
 from minebot.llm.controller import LLMController
@@ -42,6 +44,7 @@ async def run_bot(config: BotConfig) -> None:
     tracker = EntityTracker()
     inventory = InventoryTracker()
     self_position = SelfPositionTracker()
+    query_result = QueryResultTracker()
 
     intention = PlayerIntentionController()
     combat = CombatController(bridge, tracker, intention)
@@ -53,16 +56,17 @@ async def run_bot(config: BotConfig) -> None:
     register_inventory_actions(actions, inventory_controller)
     InventoryAnnouncer(bridge, inventory)  # registers itself as an inventory-change listener; not otherwise referenced
     register_help_action(actions)
+    register_query_action(actions, bridge, query_result)
 
     test_registry = TestRegistry()
     register_default_tests(test_registry)
-    test_runner = TestRunner(test_registry, TestContext(bridge=bridge, self_position=self_position, tracker=tracker))
+    test_runner = TestRunner(test_registry, TestContext(bridge=bridge, self_position=self_position, tracker=tracker, query_result=query_result))
     register_testing_actions(actions, test_runner)
 
     llm = LLMController(bridge, actions)  # no provider configured yet -- see llm/controller.py
 
     try:
-        await run(bridge, actions, tracker, inventory, llm, config, self_position, self_defense)
+        await run(bridge, actions, tracker, inventory, llm, config, self_position, self_defense, query_result)
     finally:
         await bridge.close()
         await observer.close()

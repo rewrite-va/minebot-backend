@@ -26,6 +26,7 @@ from typing import Awaitable, Callable
 
 from minebot.bridge.client import ModBridge
 from minebot.bridge.entities import EntityTracker
+from minebot.bridge.query import QueryResultTracker
 from minebot.bridge.self_position import SelfPositionTracker
 
 log = logging.getLogger("minebot.testing")
@@ -42,6 +43,7 @@ class TestContext:
     bridge: ModBridge
     self_position: SelfPositionTracker
     tracker: EntityTracker
+    query_result: QueryResultTracker
 
 
 TestFunc = Callable[[TestContext], Awaitable[None]]

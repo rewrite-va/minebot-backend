@@ -60,7 +60,9 @@ import pytest_asyncio
 
 from minebot.bridge.client import ModBridge, ModEvent
 from minebot.bridge.entities import EntityTracker
+from minebot.bridge.query import QueryResultTracker
 from minebot.bridge.self_position import SelfPositionTracker
+from minebot.testing import actions
 from minebot.testing.runner import TestContext
 
 log = logging.getLogger("minebot.tests.integration")
@@ -140,7 +142,9 @@ def _terminate_client(process: subprocess.Popen) -> None:
         process.wait(timeout=CLIENT_SHUTDOWN_TIMEOUT_SECONDS)
 
 
-async def _read_events_forever(events: AsyncIterator[ModEvent], tracker: EntityTracker, self_position: SelfPositionTracker) -> None:
+async def _read_events_forever(
+    events: AsyncIterator[ModEvent], tracker: EntityTracker, self_position: SelfPositionTracker, query_result: QueryResultTracker,
+) -> None:
     """Minimal version of run_loop.py's own _read_events -- this suite has
     no chat-command dispatch to feed (nothing here is driven by chat, see
     this module's own docstring), so there's no queue/consumer split
@@ -168,6 +172,8 @@ async def _read_events_forever(events: AsyncIterator[ModEvent], tracker: EntityT
             self_position.handle_event(event)
         elif event.type in ("entity", "death", "respawn"):
             tracker.handle_event(event)
+        elif event.type == "query_result":
+            query_result.handle_event(event)
 
 
 @pytest_asyncio.fixture(scope="session")
@@ -233,13 +239,14 @@ async def ingame_session():
 
     tracker = EntityTracker()
     self_position = SelfPositionTracker()
+    query_result = QueryResultTracker()
     # Reuses the SAME `events` generator the `hello` check just consumed
     # from -- see _read_events_forever's own docstring for why a second,
     # independent bridge.events() call here would silently race it for
     # the same underlying connection instead.
-    reader_task = asyncio.ensure_future(_read_events_forever(events, tracker, self_position))
+    reader_task = asyncio.ensure_future(_read_events_forever(events, tracker, self_position, query_result))
 
-    ctx = TestContext(bridge=bridge, self_position=self_position, tracker=tracker)
+    ctx = TestContext(bridge=bridge, self_position=self_position, tracker=tracker, query_result=query_result)
     session = IngameSession(bridge=bridge, ctx=ctx, client_process=client_process, reader_task=reader_task)
 
     try:
@@ -249,10 +256,43 @@ async def ingame_session():
 
 
 @pytest_asyncio.fixture
-async def ctx(ingame_session: IngameSession) -> TestContext:
+async def ctx(ingame_session: IngameSession) -> AsyncIterator[TestContext]:
     """Per-test alias for the shared session's TestContext -- exists so
     individual test files can depend on `ctx` directly (matching
     !runtest's own test-function signature, `func(ctx: TestContext)`)
     without every test needing to know about IngameSession itself.
+
+    A `yield` fixture (not a plain `return`) specifically so code AFTER
+    the yield runs as teardown, once per test, regardless of whether the
+    test passed or failed -- the standard pytest idiom for "assert clean
+    end-state" (see FINDINGS.md/this repo's own CLAUDE.md for other uses
+    of the same shape). Asserts every peer state machine (player_intention/
+    legs/hands/head) has actually settled back to IDLE after each test --
+    the shared check every test in this directory gets for free just by
+    depending on `ctx`, rather than each test writing its own copy.
+    Deliberately NOT each test's own registered TestCase.teardown (see
+    minebot/testing/runner.py's own docstring for that hook) -- teardown
+    there is about restoring WORLD state a test itself changed (clearing
+    placed blocks, see actions.clear_schematic), a per-test concern only
+    the test itself knows the shape of; this is a single, repo-wide
+    invariant every test should hold on exit, independent of whatever
+    state it individually needed to set up.
+
+    Exists specifically because this class of bug (a state machine
+    silently left in a non-idle state after a command that should have
+    ended it) went unnoticed for as long as it did -- see
+    LegsStateMachine's own isStopCommand fix -- purely because nothing
+    could assert against real final state before minebot/testing/query.py
+    existed. If a future test genuinely needs to end in a non-IDLE state
+    (e.g. asserting DEFEND stays active across a respawn -- see
+    PlayerIntentionState's own docstring), it should NOT depend on this
+    fixture for that assertion; a different, test-specific check is more
+    honest than special-casing an exception into a supposedly-universal
+    invariant.
     """
-    return ingame_session.ctx
+    yield ingame_session.ctx
+
+    await actions.assert_state(ingame_session.ctx, "player_intention", "IDLE")
+    await actions.assert_state(ingame_session.ctx, "legs", "IDLE")
+    await actions.assert_state(ingame_session.ctx, "hands", "IDLE")
+    await actions.assert_state(ingame_session.ctx, "head", "IDLE")
