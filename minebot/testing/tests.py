@@ -213,7 +213,21 @@ def _make_schematic_teardown(schematic_path: Path, anchor_x: float, anchor_y: fl
     run_test_case's own docstrings) so a failed test never leaves blocks
     behind for the next one.
 
-    Teleports to HOLDING FIRST, before clearing -- the test's own `func`
+    Resets PlayerIntention to IDLE FIRST, before teleporting to HOLDING --
+    found live: a test's own `func` (e.g. a !goto across a gap) can still
+    be mid-walk, LegsState still actively in GOTO, right up until
+    run_test_case's own timeout fires it as a failure; without a !stop
+    first, the mod keeps driving the bot toward its last commanded !goto
+    target every tick AFTER the raw /tp lands, immediately walking it back
+    away from HOLDING again -- the position never actually settles there,
+    so teleport()'s own arrival-polling loop timed out waiting for a
+    convergence that was being actively fought by the bot's own still-live
+    movement goal. Confirmed live as the real cause of a genuine, reported
+    leftover-blocks bug: teardown's own teleport timing out meant
+    clear_schematic was never reached at all, leaving placed blocks
+    behind in the world for every later test to run into.
+
+    THEN teleports to HOLDING before clearing -- the test's own `func`
     typically ends with the bot standing at/near the schematic's "end"
     marker, i.e. still inside the very region about to be cleared. Same
     real bug _make_schematic_setup's own docstring describes for
@@ -222,6 +236,7 @@ def _make_schematic_teardown(schematic_path: Path, anchor_x: float, anchor_y: fl
     placing side.
     """
     async def teardown(ctx: TestContext) -> None:
+        await actions.reset_to_idle(ctx)
         await actions.teleport(ctx, HOLDING_X, HOLDING_Y, HOLDING_Z, timeout=TELEPORT_TIMEOUT_SECONDS)
         schematic = Schematic.from_file(schematic_path)
         await actions.clear_schematic(
