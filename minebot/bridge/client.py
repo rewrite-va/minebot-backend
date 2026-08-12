@@ -289,6 +289,21 @@ class ModBridge:
         """
         await self._send({"type": "chat", "text": text})
 
+    async def send_teleport(self, x: float, y: float, z: float) -> None:
+        """Sends a structured `{"type": "teleport", ...}` wire message --
+        NOT `send_console_command(f"/tp @s {x} {y} {z}")` -- so the mod can
+        also zero the player's own residual velocity/fall distance right
+        after the real `/tp` lands (see MinebotMod's own "teleport" case
+        docstring for the real bug this fixes: a plain `/tp` only
+        overwrites position, never delta-movement, so fall velocity left
+        over from whatever the bot was doing right before a teleport used
+        to silently carry into and skew the very next jump's own
+        trajectory). Bypasses CHAT_RATE_PER_SECOND the same way
+        send_console_command does -- same "disposable single-player test
+        world, no spam-kick risk" reasoning applies here too.
+        """
+        await self._send({"type": "teleport", "x": x, "y": y, "z": z})
+
     async def _drain_chat_queue(self) -> None:
         """Sends one queued chat message every 1/CHAT_RATE_PER_SECOND,
         forever, until cancelled (see close()'s own cleanup) -- a fixed-

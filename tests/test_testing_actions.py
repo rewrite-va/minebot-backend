@@ -204,7 +204,11 @@ async def test_goto_with_waypoints_counts_path_and_forbidden_hits():
         forbidden=[Waypoint(x=10, y=0, z=0)],
     )
 
-    assert result.path_hits == [1]
+    # Per GotoWaypointResult's own docstring, a test only ever asserts
+    # `> 0`/`== 0` -- how many segments land inside the radius is
+    # incidental to sampling/interpolation, not something to pin an exact
+    # count to.
+    assert result.path_hits[0] > 0
     assert result.forbidden_hits == [0]
 
 
@@ -216,17 +220,28 @@ async def test_goto_with_waypoints_uses_real_3d_distance_for_forbidden_hits():
     # forbidden waypoint" because the old hit-detection only checked
     # (x, z), ignoring y entirely -- passing directly ABOVE a forbidden
     # column at a different height falsely counted as a hit.
+    #
+    # Flies at y=3 over a forbidden cell centered at y=1.5 -- 1.5 blocks of
+    # vertical clearance, deliberately well outside WAYPOINT_RADIUS (0.75)
+    # even measured against the straight-line CHORD between consecutive
+    # samples (not just the samples themselves -- see
+    # goto_with_waypoints' own _segment_hits_sphere docstring for why hits
+    # are checked against the segment between ticks, not just each landed-
+    # on point: a real jump's y=2/y=1.5 clearance from the older version of
+    # this test was too marginal to tell "flew over" from "a segment
+    # between two samples swept transiently closer to the cell than either
+    # endpoint did", which is real/correct geometry, not a bug).
     self_position = SelfPositionTracker()
-    self_position.handle_event(ModEvent(type="position", data={"x": 0.0, "y": 2.0, "z": 0.0, "yaw": 0.0, "pitch": 0.0}))
-    # Walk straight across z at a CONSTANT y=2 (a clean jump over the
+    self_position.handle_event(ModEvent(type="position", data={"x": 0.0, "y": 3.0, "z": 0.0, "yaw": 0.0, "pitch": 0.0}))
+    # Walk straight across z at a CONSTANT y=3 (a clean jump over the
     # gap), passing directly over the forbidden waypoint's own (x, z)
     # column at z=1 but never actually descending to its real y=1.
-    steps = [(0.0, 2.0, 0.0), (0.0, 2.0, 1.0), (0.0, 2.0, 2.0)]
+    steps = [(0.0, 3.0, 0.0), (0.0, 3.0, 1.0), (0.0, 3.0, 2.0)]
     bridge = _GotoBridge(self_position, steps)
     ctx = TestContext(bridge=bridge, self_position=self_position, tracker=None, query_result=None)
 
     result = await actions.goto_with_waypoints(
-        ctx, target_x=0.0, target_y=2.0, target_z=2.0, distance_tolerance=0.5, timeout=2.0,
+        ctx, target_x=0.0, target_y=3.0, target_z=2.0, distance_tolerance=0.5, timeout=2.0,
         forbidden=[Waypoint(x=0, y=1, z=1)],  # the gap itself, at foot height -- never actually entered
     )
 
@@ -452,6 +467,9 @@ class _TeleportBridge:
 
     async def send_console_command(self, text: str) -> None:
         self.sent_commands.append(text)
+
+    async def send_teleport(self, x: float, y: float, z: float) -> None:
+        self.sent_commands.append(f"/tp @s {x} {y} {z}")
 
     async def send_query(self, arg: str, x: int | None = None, y: int | None = None, z: int | None = None) -> None:
         self._query_count += 1

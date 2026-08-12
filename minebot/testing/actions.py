@@ -150,6 +150,28 @@ class GotoWaypointResult:
 # path/forbidden waypoint actually means.
 WAYPOINT_RADIUS = 0.75
 
+
+def _segment_hits_sphere(
+    start: tuple[float, float, float], end: tuple[float, float, float], center: tuple[float, float, float], radius: float,
+) -> bool:
+    """True if the line segment start->end passes within `radius` of
+    `center` at any point along it, not just at its two endpoints --
+    standard point-to-segment closest-distance check (clamp the
+    projection of `center` onto the segment to [0, 1], measure from
+    there). `start == end` degrades to a plain point check, which is what
+    the very first `position` broadcast of a walk (no previous sample to
+    form a segment from) naturally produces.
+    """
+    seg = tuple(e - s for s, e in zip(start, end))
+    seg_len_sq = sum(c * c for c in seg)
+    if seg_len_sq == 0:
+        return math.dist(start, center) <= radius
+    to_center = tuple(c - s for s, c in zip(start, center))
+    t = max(0.0, min(1.0, sum(a * b for a, b in zip(to_center, seg)) / seg_len_sq))
+    closest = tuple(s + t * d for s, d in zip(start, seg))
+    return math.dist(closest, center) <= radius
+
+
 # Checked against each waypoint's BLOCK CENTER (x+0.5, y+0.5, z+0.5), not
 # its raw minimum-corner (x, y, z) -- confirmed live as a real bug: a
 # physics-correct, close-but-not-exact jump landed at real distance ~1.16
@@ -194,16 +216,31 @@ async def goto_with_waypoints(
 
     path_hits = [0] * len(path)
     forbidden_hits = [0] * len(forbidden)
+    # Tracks the previous sampled position so each new broadcast can be
+    # checked as a SEGMENT (prev -> current), not just a point -- see
+    # _segment_hits_sphere's own docstring for why a fast jump's own real
+    # arc can step clean past a waypoint's WAYPOINT_RADIUS sphere between
+    # two consecutive `position` broadcasts (confirmed live: goto_jump_1
+    # flaked with "never walked through path waypoint" on a jump that
+    # landed correctly, because the two ticks straddling the waypoint's
+    # own (x, z) column happened to both fall just outside the point-radius
+    # check even though the straight-line arc between them passed through
+    # it).
+    prev_pos: SelfPosition | None = None
 
     def _on_position(pos: SelfPosition) -> None:
+        nonlocal prev_pos
+        start = (prev_pos.x, prev_pos.y, prev_pos.z) if prev_pos is not None else (pos.x, pos.y, pos.z)
+        end = (pos.x, pos.y, pos.z)
         for i, waypoint in enumerate(path):
             center = (waypoint.x + 0.5, waypoint.y + 0.5, waypoint.z + 0.5)
-            if math.dist((pos.x, pos.y, pos.z), center) <= WAYPOINT_RADIUS:
+            if _segment_hits_sphere(start, end, center, WAYPOINT_RADIUS):
                 path_hits[i] += 1
         for i, waypoint in enumerate(forbidden):
             center = (waypoint.x + 0.5, waypoint.y + 0.5, waypoint.z + 0.5)
-            if math.dist((pos.x, pos.y, pos.z), center) <= WAYPOINT_RADIUS:
+            if _segment_hits_sphere(start, end, center, WAYPOINT_RADIUS):
                 forbidden_hits[i] += 1
+        prev_pos = pos
 
     ctx.self_position.add_listener(_on_position)
     try:
@@ -428,12 +465,14 @@ TELEPORT_TOLERANCE = 0.1
 
 
 async def teleport(ctx: TestContext, x: float, y: float, z: float, timeout: float) -> None:
-    """Teleports the bot to a fixed position via a real `/tp @s x y z`
-    chat/console command (see MinebotMod's own "chat" dispatch case --
-    the same real vanilla command-send path a human typing in chat uses,
-    not a separate debug-only teleport), then confirms arrival via
-    `!query position` (see query_position's own docstring) before
-    returning. Exists so tests can start from a known, fixed origin
+    """Teleports the bot to a fixed position via a structured `teleport`
+    wire command (see ModBridge.send_teleport's own docstring, and
+    MinebotMod's own "teleport" dispatch case -- sends the same real
+    vanilla `/tp @s x y z` a human typing in chat uses, but ALSO zeros the
+    player's own residual velocity/fall distance right after, unlike a
+    plain `/tp` sent as raw chat text), then confirms arrival via `!query
+    position` (see query_position's own docstring) before returning.
+    Exists so tests can start from a known, fixed origin
     instead of "wherever the bot happened to be left standing by the
     previous test" -- per explicit direction, this is what a test's own
     setup() should call (see TestCase.setup/runner.py) so every test
@@ -460,9 +499,9 @@ async def teleport(ctx: TestContext, x: float, y: float, z: float, timeout: floa
     above) if the position never actually converges within `timeout` --
     e.g. a malformed command, or the bot not actually connected.
 
-    Uses send_console_command (an unrated `_send`), not send_chat --
-    found live: a test-world `/tp` sitting behind other queued chat
-    (CHAT_RATE_PER_SECOND's own 1/sec throttle, meant for real
+    Uses send_teleport (an unrated `_send`, same as send_console_command),
+    not send_chat -- found live: a test-world `/tp` sitting behind other
+    queued chat (CHAT_RATE_PER_SECOND's own 1/sec throttle, meant for real
     multiplayer spam risk that doesn't apply to the disposable/
     single-player test world at all -- see send_console_command's own
     docstring, already applied to place_schematic/clear_schematic) could
@@ -471,7 +510,7 @@ async def teleport(ctx: TestContext, x: float, y: float, z: float, timeout: floa
     nothing to do with the teleport itself ever actually failing.
     """
     async def _wait_for_teleport() -> None:
-        await ctx.bridge.send_console_command(f"/tp @s {x} {y} {z}")
+        await ctx.bridge.send_teleport(x, y, z)
 
         while True:
             # POLL_QUERY_TIMEOUT_SECONDS, not QUERY_TIMEOUT_SECONDS -- see

@@ -249,6 +249,48 @@ async def ingame_session():
     ctx = TestContext(bridge=bridge, self_position=self_position, tracker=tracker, query_result=query_result)
     session = IngameSession(bridge=bridge, ctx=ctx, client_process=client_process, reader_task=reader_task)
 
+    # `hello` only proves the control channel connected and the mod class
+    # initialized (MinebotMod.onControlChannelConnected fires it unconditionally,
+    # independent of world/player state) -- it fires well before
+    # client.player actually exists, since world creation/join is still in
+    # flight at that point. Querying `position` before the local player
+    # exists fails with "no local player yet" (see MinebotMod's onTick
+    # early-return), so poll until a real position comes back instead of
+    # handing control to the first test immediately after `hello`.
+    #
+    # A successful query is not enough on its own, though -- confirmed
+    # live: MinebotMod's "position" query only null-checks
+    # Minecraft.getInstance().player, and a freshly-constructed LocalPlayer
+    # (non-null, but not yet handed a real spawn packet from the
+    # integrated server) reads back a default (0, 0, 0), which is not a
+    # real in-world position at all. The very first test's own /tp landed
+    # fine, but by the time its own position broadcast arrived the real
+    # spawn packet had already overwritten it back to the bootstrap
+    # world's actual spawn point (8.5, -60, 2.5), i.e. the /tp fired
+    # before the player was actually stably in the world, and got clobbered
+    # by spawn finishing a moment later. Requiring the SAME real
+    # (non-origin-default) position on two consecutive polls confirms the
+    # player has actually settled into the world, not just that the query
+    # stopped erroring.
+    log.info("integration session: waiting for local player to spawn")
+    deadline = asyncio.get_event_loop().time() + CLIENT_STARTUP_TIMEOUT_SECONDS
+    last_position: tuple[float, float, float] | None = None
+    while True:
+        try:
+            pos = await actions.query_position(ctx, timeout=5.0)
+        except (RuntimeError, asyncio.TimeoutError):
+            last_position = None
+        else:
+            current = (pos.x, pos.y, pos.z)
+            if current != (0.0, 0.0, 0.0) and current == last_position:
+                break
+            last_position = current
+        if asyncio.get_event_loop().time() >= deadline:
+            _terminate_client(client_process)
+            pytest.fail(f"local player never spawned within {CLIENT_STARTUP_TIMEOUT_SECONDS:.0f}s")
+        await asyncio.sleep(0.5)
+    log.info("integration session: local player spawned, starting tests")
+
     try:
         yield session
     finally:

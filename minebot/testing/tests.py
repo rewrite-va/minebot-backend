@@ -285,9 +285,16 @@ def _make_schematic_teardown(schematic_path: Path, anchor_x: float, anchor_y: fl
         # step unreliable (see this function's own docstring above). This
         # is a pure best-effort nudge: send the command, don't wait to
         # see whether it landed, so it can never be the reason teardown
-        # itself fails or blocks.
+        # itself fails or blocks. send_teleport, not send_console_command
+        # -- still fire-and-forget (see ModBridge.send_teleport's own
+        # docstring: it's the same unrated, unconfirmed `_send` shape),
+        # but ALSO zeros residual velocity/fall distance the instant it
+        # lands, unlike a raw `/tp` sent as chat text (see actions.
+        # teleport's own docstring for the real bug this avoids: leftover
+        # fall velocity from THIS test's own still-active goto surviving a
+        # plain /tp and silently skewing the NEXT test's own jump).
         holding_x, holding_y, holding_z = _block_center(HOLDING_X, HOLDING_Y, HOLDING_Z)
-        await ctx.bridge.send_console_command(f"/tp @s {holding_x} {holding_y} {holding_z}")
+        await ctx.bridge.send_teleport(holding_x, holding_y, holding_z)
 
     return teardown
 
