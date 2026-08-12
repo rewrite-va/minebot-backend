@@ -6,9 +6,43 @@ directly before.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
+from minebot.bridge.client import ModEvent
+from minebot.bridge.query import QueryResultTracker
 from minebot.testing.runner import TestCase, TestContext, TestRegistry, TestRunner
+
+
+class _GamemodeBridge:
+    """Fakes just enough of ModBridge for TestRunner.run's own gamemode
+    save/switch/restore (see its own docstring) -- every send_query/
+    send_gamemode call immediately queues a matching "survival"
+    query_result event, so wait_for_gamemode's own poll loop resolves on
+    its first attempt without a real client ever being involved.
+    """
+
+    def __init__(self, query_result: QueryResultTracker) -> None:
+        self._query_result = query_result
+
+    async def send_query(self, arg: str, x: int | None = None, y: int | None = None, z: int | None = None) -> None:
+        asyncio.get_event_loop().call_soon(
+            self._query_result.handle_event,
+            ModEvent(type="query_result", data={"arg": arg, "result": "survival"}),
+        )
+
+    async def send_gamemode(self, mode: str) -> None:
+        asyncio.get_event_loop().call_soon(
+            self._query_result.handle_event,
+            ModEvent(type="query_result", data={"arg": "gamemode", "result": mode}),
+        )
+
+
+def _make_context() -> TestContext:
+    query_result = QueryResultTracker()
+    bridge = _GamemodeBridge(query_result)
+    return TestContext(bridge=bridge, self_position=None, tracker=None, query_result=query_result)
 
 
 def _make_registry(names_and_outcomes: list[tuple[str, bool]]) -> TestRegistry:
@@ -27,7 +61,7 @@ def _make_registry(names_and_outcomes: list[tuple[str, bool]]) -> TestRegistry:
 @pytest.mark.asyncio
 async def test_run_all_stops_at_first_failure_by_default():
     registry = _make_registry([("a", True), ("b", False), ("c", True)])
-    runner = TestRunner(registry, TestContext(bridge=None, self_position=None, tracker=None, query_result=None))
+    runner = TestRunner(registry, _make_context())
 
     outcomes = await runner.run(None)
 
@@ -38,7 +72,7 @@ async def test_run_all_stops_at_first_failure_by_default():
 @pytest.mark.asyncio
 async def test_run_all_continues_past_failures_when_disabled():
     registry = _make_registry([("a", True), ("b", False), ("c", True)])
-    runner = TestRunner(registry, TestContext(bridge=None, self_position=None, tracker=None, query_result=None))
+    runner = TestRunner(registry, _make_context())
 
     outcomes = await runner.run(None, stop_on_first_failure=False)
 
@@ -49,7 +83,7 @@ async def test_run_all_continues_past_failures_when_disabled():
 @pytest.mark.asyncio
 async def test_run_all_runs_every_test_when_all_pass():
     registry = _make_registry([("a", True), ("b", True)])
-    runner = TestRunner(registry, TestContext(bridge=None, self_position=None, tracker=None, query_result=None))
+    runner = TestRunner(registry, _make_context())
 
     outcomes = await runner.run(None)
 
@@ -60,7 +94,7 @@ async def test_run_all_runs_every_test_when_all_pass():
 @pytest.mark.asyncio
 async def test_run_single_named_test_ignores_stop_on_first_failure():
     registry = _make_registry([("a", False)])
-    runner = TestRunner(registry, TestContext(bridge=None, self_position=None, tracker=None, query_result=None))
+    runner = TestRunner(registry, _make_context())
 
     outcomes = await runner.run("a")
 

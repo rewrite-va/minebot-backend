@@ -193,19 +193,46 @@ class TestRunner:
         noise. Pass False to run the full suite regardless (e.g. to see
         the total pass/fail count across everything in one pass).
         """
-        if name is not None:
-            test = self._registry.get(name)
-            if test is None:
-                return [TestOutcome(name=name, passed=False, detail=f"no such test: {name}", duration_seconds=0.0)]
-            return [await self._run_one(test)]
+        # Local import -- minebot.testing.actions itself imports TestContext
+        # from this module, so importing it at module scope here would be a
+        # real circular import.
+        from minebot.testing import actions
 
-        outcomes: list[TestOutcome] = []
-        for test in self._registry.list_tests():
-            outcome = await self._run_one(test)
-            outcomes.append(outcome)
-            if not outcome.passed and stop_on_first_failure:
-                break
-        return outcomes
+        # Save/switch/restore gamemode around the WHOLE run (one named test
+        # or the full suite), not per-test -- matches
+        # tests/integration/conftest.py's own session-scoped fixture
+        # exactly, just on the !runtest entry point instead of pytest's.
+        # See MinebotMod's own "gamemode" case docstring for the real bug
+        # this fixes: a creative world lets vanilla's own double-tap-
+        # space-toggles-flying detection turn a real jump-retry into
+        # permanent, ungoverned flight -- structurally impossible in
+        # survival. Best-effort restore (swallow any failure) so a dead
+        # control channel or a real command failure can't mask whichever
+        # real test outcome this call was actually asked for.
+        original_gamemode = await actions.query(self._ctx, "gamemode", timeout=actions.QUERY_TIMEOUT_SECONDS)
+        log.info("!runtest: switching to survival (was %s)", original_gamemode)
+        await actions.wait_for_gamemode(self._ctx, "survival", timeout=actions.QUERY_TIMEOUT_SECONDS)
+
+        try:
+            if name is not None:
+                test = self._registry.get(name)
+                if test is None:
+                    return [TestOutcome(name=name, passed=False, detail=f"no such test: {name}", duration_seconds=0.0)]
+                return [await self._run_one(test)]
+
+            outcomes: list[TestOutcome] = []
+            for test in self._registry.list_tests():
+                outcome = await self._run_one(test)
+                outcomes.append(outcome)
+                if not outcome.passed and stop_on_first_failure:
+                    break
+            return outcomes
+        finally:
+            try:
+                log.info("!runtest: restoring gamemode to %s", original_gamemode)
+                await actions.wait_for_gamemode(self._ctx, original_gamemode, timeout=actions.QUERY_TIMEOUT_SECONDS)
+            except Exception:
+                log.exception("!runtest: failed to restore gamemode to %s", original_gamemode)
 
     async def _run_one(self, test: TestCase) -> TestOutcome:
         log.info("!runtest: starting %s", test.name)
