@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import math
 from dataclasses import dataclass
+from typing import Awaitable
 
 from minebot.bridge.self_position import SelfPosition
 from minebot.testing.litematic import Schematic, Waypoint
@@ -313,6 +314,66 @@ async def assert_goto_never_arrives(
     )
 
 
+async def count_jumps(ctx: TestContext, during: Awaitable[None]) -> int:
+    """Runs `during` to completion while counting real jumps -- a full
+    on_ground=true -> on_ground=false -> on_ground=true cycle in the
+    bot's own broadcast `position` events -- and returns the count.
+    Deliberately counts a physical liftoff/land cycle, not e.g. a rise in
+    y alone: walking up stairs/slabs also raises y without the legs state
+    machine ever entering a real jump, so a y-only check would false-
+    positive there (see LegsNavigateNode's own jump-vs-step distinction).
+
+    A single, reusable primitive rather than baking a jump-count
+    assertion into any one caller -- built specifically so scenarios like
+    goto_leaves_1 (a target genuinely blocked only by HEAD clearance, not
+    a horizontal wall the way goto_impossible_1 is) can assert the A*
+    planner correctly recognized NO_PATH and never attempted to jump its
+    way through, on top of (not instead of) the existing "never arrives"
+    check -- see assert_never_jumps/assert_jumps_done below for the
+    actual assertions built on top of this.
+
+    `during` is awaited by the CALLER's own timeout/cancellation shape
+    (this function adds none of its own) -- typically
+    assert_goto_never_arrives(...) or a bare goto(...) call, so a caller
+    that wants both "never arrives" and "never jumps" gets exactly one
+    real `!goto` run watched for both properties at once, not two
+    separate runs that could each behave differently run to run.
+    """
+    jumps = 0
+    was_on_ground = True
+
+    def _on_position(pos: SelfPosition) -> None:
+        nonlocal jumps, was_on_ground
+        if was_on_ground and not pos.on_ground:
+            jumps += 1
+        was_on_ground = pos.on_ground
+
+    ctx.self_position.add_listener(_on_position)
+    try:
+        await during
+    finally:
+        ctx.self_position.remove_listener(_on_position)
+
+    return jumps
+
+
+async def assert_jumps_done(ctx: TestContext, during: Awaitable[None], count: int) -> None:
+    """Asserts the bot performs exactly `count` real jumps (see
+    count_jumps' own docstring for what counts as one) while `during`
+    runs. `count=0` is `assert_never_jumps`'s own shape -- see that
+    function, a thin wrapper over this one.
+    """
+    jumps = await count_jumps(ctx, during)
+    assert jumps == count, f"expected {count} jump(s), observed {jumps}"
+
+
+async def assert_never_jumps(ctx: TestContext, during: Awaitable[None]) -> None:
+    """Asserts the bot performs NO real jumps while `during` runs -- see
+    assert_jumps_done (count=0) and count_jumps' own docstrings.
+    """
+    await assert_jumps_done(ctx, during, count=0)
+
+
 async def reset_to_idle(ctx: TestContext) -> None:
     """Sends the same `{"type": "stop"}` wire command `!stop` sends --
     mod-side, MinebotMod.dispatchMessage's own "stop" case calls
@@ -434,7 +495,7 @@ async def query_position(ctx: TestContext, timeout: float = QUERY_TIMEOUT_SECOND
     if "error" in event.data:
         raise RuntimeError(f"query 'position' failed: {event.data['error']}")
     data = event.data["position"]
-    return SelfPosition(x=data["x"], y=data["y"], z=data["z"], yaw=data["yaw"], pitch=data["pitch"])
+    return SelfPosition(x=data["x"], y=data["y"], z=data["z"], yaw=data["yaw"], pitch=data["pitch"], on_ground=data.get("on_ground", True))
 
 
 async def query_block(ctx: TestContext, x: int, y: int, z: int, timeout: float = QUERY_TIMEOUT_SECONDS) -> str:

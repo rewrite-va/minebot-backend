@@ -471,6 +471,103 @@ async def test_goto_never_reaches_unreachable_target(ctx: TestContext) -> None:
     )
 
 
+# A target genuinely blocked only by HEAD clearance -- oak_leaves float at
+# schematic y=2 directly above a walkable y=0/y=1 floor, so unlike
+# goto_impossible_1's horizontal wall, there's no obstacle at foot height
+# at all; the player's own 2-block-tall hitbox is what makes the space
+# under the leaves unenterable. Marked "unreachable" for the same
+# assert_goto_never_arrives reasoning goto_impossible_1 uses -- but the
+# real thing this scenario exists to catch is different: a pathfinder
+# that only checks the DESTINATION cell's headroom (not the full path
+# leading to it) could wrongly treat this as "just needs a jump" and
+# attempt one anyway, so this test also asserts zero real jumps occurred
+# (see actions.assert_never_jumps), not just that arrival never happened.
+LEAVES_SCHEMATIC_PATH = Path(__file__).resolve().parent.parent.parent / "tests" / "fixtures" / "schematics" / "goto_leaves_1.litematic"
+LEAVES_SCHEMATIC_ANCHOR_X = ORIGIN_X
+LEAVES_SCHEMATIC_ANCHOR_Y = ORIGIN_Y
+LEAVES_SCHEMATIC_ANCHOR_Z = ORIGIN_Z
+
+setup_goto_leaves_1 = _make_schematic_setup(LEAVES_SCHEMATIC_PATH, LEAVES_SCHEMATIC_ANCHOR_X, LEAVES_SCHEMATIC_ANCHOR_Y, LEAVES_SCHEMATIC_ANCHOR_Z)
+teardown_clear_goto_leaves_1 = _make_schematic_teardown(LEAVES_SCHEMATIC_PATH, LEAVES_SCHEMATIC_ANCHOR_X, LEAVES_SCHEMATIC_ANCHOR_Y, LEAVES_SCHEMATIC_ANCHOR_Z)
+
+
+async def test_goto_never_jumps_at_leaves(ctx: TestContext) -> None:
+    """Sends !goto toward goto_leaves_1's own magenta "unreachable" marker
+    (blocked by head clearance under floating leaves, not a horizontal
+    wall) and asserts BOTH that the bot never arrives AND that it never
+    attempts a real jump trying to force its way there -- see this
+    schematic's own comment above for why a jump attempt specifically
+    (not just eventual arrival) is what a head-clearance-only obstacle
+    scenario needs to rule out.
+    """
+    schematic = Schematic.from_file(LEAVES_SCHEMATIC_PATH)
+    unreachable = _one(schematic.waypoints.unreachable, "unreachable")
+
+    await actions.assert_never_jumps(
+        ctx,
+        during=actions.assert_goto_never_arrives(
+            ctx,
+            target_x=LEAVES_SCHEMATIC_ANCHOR_X + unreachable.x,
+            target_y=LEAVES_SCHEMATIC_ANCHOR_Y + unreachable.y,
+            target_z=LEAVES_SCHEMATIC_ANCHOR_Z + unreachable.z,
+            distance_tolerance=GOTO_ARRIVAL_TOLERANCE,
+            timeout=IMPOSSIBLE_GOTO_WINDOW_SECONDS,
+        ),
+    )
+
+
+# A reachable room with the same floating-leaves fixture as goto_leaves_1,
+# but here the leaves don't block the route to "end" -- the bot must walk
+# through the required "path" checkpoint, avoid every "forbidden" wall
+# cell, and jump exactly once along the way (per explicit direction).
+LEAVES2_SCHEMATIC_PATH = Path(__file__).resolve().parent.parent.parent / "tests" / "fixtures" / "schematics" / "goto_leaves_2.litematic"
+LEAVES2_SCHEMATIC_ANCHOR_X = ORIGIN_X
+LEAVES2_SCHEMATIC_ANCHOR_Y = ORIGIN_Y
+LEAVES2_SCHEMATIC_ANCHOR_Z = ORIGIN_Z
+
+setup_goto_leaves_2 = _make_schematic_setup(LEAVES2_SCHEMATIC_PATH, LEAVES2_SCHEMATIC_ANCHOR_X, LEAVES2_SCHEMATIC_ANCHOR_Y, LEAVES2_SCHEMATIC_ANCHOR_Z)
+teardown_clear_goto_leaves_2 = _make_schematic_teardown(LEAVES2_SCHEMATIC_PATH, LEAVES2_SCHEMATIC_ANCHOR_X, LEAVES2_SCHEMATIC_ANCHOR_Y, LEAVES2_SCHEMATIC_ANCHOR_Z)
+
+# Longer than the standard GOTO_TIMEOUT_SECONDS (5s) -- start sits in an
+# open pit at the room's center (no floor block under it at all in the
+# schematic itself), so the real route out involves more real ticks of
+# fall/recovery/replan than a normal flat-ground or single-gap-jump
+# course before ever reaching "end" (confirmed live: 5s wasn't enough
+# even after fixing the real requiresJump bug this schematic exposed --
+# see getMoveDiagonal's own comment in minebot-mod's Movements.java).
+LEAVES2_GOTO_TIMEOUT_SECONDS = 15.0
+
+
+async def test_goto_leaves_2_reaches_goal_with_one_jump(ctx: TestContext) -> None:
+    """Sends !goto toward goto_leaves_2's own "end" marker and asserts the
+    bot's real walked trail passed through the required "path" waypoint,
+    never touched a "forbidden" wall cell, AND jumped exactly once along
+    the way (see actions.assert_jumps_done) -- per explicit direction.
+    """
+    schematic = Schematic.from_file(LEAVES2_SCHEMATIC_PATH)
+    end = _one(schematic.waypoints.end, "end")
+    anchor = (LEAVES2_SCHEMATIC_ANCHOR_X, LEAVES2_SCHEMATIC_ANCHOR_Y, LEAVES2_SCHEMATIC_ANCHOR_Z)
+
+    async def _run() -> None:
+        result = await actions.goto_with_waypoints(
+            ctx,
+            target_x=LEAVES2_SCHEMATIC_ANCHOR_X + end.x,
+            target_y=LEAVES2_SCHEMATIC_ANCHOR_Y + end.y,
+            target_z=LEAVES2_SCHEMATIC_ANCHOR_Z + end.z,
+            distance_tolerance=GOTO_ARRIVAL_TOLERANCE,
+            timeout=LEAVES2_GOTO_TIMEOUT_SECONDS,
+            path=[_offset(*anchor, w) for w in schematic.waypoints.path],
+            forbidden=[_offset(*anchor, w) for w in schematic.waypoints.forbidden],
+        )
+
+        for i, hits in enumerate(result.path_hits):
+            assert hits > 0, f"never walked through path waypoint {schematic.waypoints.path[i]}"
+        for i, hits in enumerate(result.forbidden_hits):
+            assert hits == 0, f"walked through forbidden waypoint {schematic.waypoints.forbidden[i]}"
+
+    await actions.assert_jumps_done(ctx, during=_run(), count=1)
+
+
 def register_default_tests(registry: TestRegistry) -> None:
     registry.register(TestCase(
         name="goto",
@@ -518,4 +615,20 @@ def register_default_tests(registry: TestRegistry) -> None:
         setup=setup_goto_impossible,
         teardown=teardown_clear_goto_impossible,
         timeout_seconds=TELEPORT_TIMEOUT_SECONDS + SCHEMATIC_TIMEOUT_SECONDS + IMPOSSIBLE_GOTO_WINDOW_SECONDS,
+    ))
+    registry.register(TestCase(
+        name="goto_leaves_1",
+        description="Places a schematic with a target blocked only by head clearance under floating leaves, sends !goto toward it, and asserts the bot never reaches it AND never attempts a jump.",
+        func=test_goto_never_jumps_at_leaves,
+        setup=setup_goto_leaves_1,
+        teardown=teardown_clear_goto_leaves_1,
+        timeout_seconds=TELEPORT_TIMEOUT_SECONDS + SCHEMATIC_TIMEOUT_SECONDS + IMPOSSIBLE_GOTO_WINDOW_SECONDS,
+    ))
+    registry.register(TestCase(
+        name="goto_leaves_2",
+        description="Places a reachable room with the same floating-leaves fixture, sends !goto to the goal, and asserts the bot walked the required checkpoint, avoided every forbidden wall cell, and jumped exactly once.",
+        func=test_goto_leaves_2_reaches_goal_with_one_jump,
+        setup=setup_goto_leaves_2,
+        teardown=teardown_clear_goto_leaves_2,
+        timeout_seconds=TELEPORT_TIMEOUT_SECONDS + SCHEMATIC_TIMEOUT_SECONDS + LEAVES2_GOTO_TIMEOUT_SECONDS,
     ))

@@ -22,6 +22,7 @@ class SelfPosition:
     z: float
     yaw: float
     pitch: float
+    on_ground: bool
 
 
 class SelfPositionTracker:
@@ -54,6 +55,7 @@ class SelfPositionTracker:
             z=event.data.get("z", 0.0),
             yaw=event.data.get("yaw", 0.0),
             pitch=event.data.get("pitch", 0.0),
+            on_ground=event.data.get("on_ground", True),
         )
         name = event.data.get("name")
         if name is not None:
