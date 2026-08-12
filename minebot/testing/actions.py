@@ -149,7 +149,22 @@ class GotoWaypointResult:
 # matching real player movement having no independent vertical stop
 # condition), not "occupied this exact 3D cell", which is what a
 # path/forbidden waypoint actually means.
-WAYPOINT_RADIUS = 0.75
+#
+# 0.5, not larger -- this is a RADIUS applied to a block's own CENTER, so
+# center +/- radius must stay within that block's own [0, 1] extent on
+# each axis (0.5 +/- 0.5 == exactly the block's own faces) or the sphere
+# bleeds into neighboring cells the bot never actually occupied. Found
+# live at 0.75: goto_leaves_2's forbidden floor waypoints sit one full
+# block below the room's own walkable floor (waypoint y, walkable surface
+# y+1) -- a bot legitimately standing on the floor one cell over, y+1 at
+# its feet, is only 0.5 blocks from the forbidden waypoint's own center
+# (y+0.5) vertically, well inside a 0.75 sphere despite never entering the
+# forbidden cell at all. 0.5 still comfortably survives the segment-
+# interpolation case _segment_hits_sphere exists for (a fast jump's own
+# real clearance from a forbidden waypoint is on the order of a full
+# block or more -- see test_goto_with_waypoints_uses_real_3d_distance_for_
+# forbidden_hits' own 1.5-block clearance case in tests/test_testing_actions.py).
+WAYPOINT_RADIUS = 0.5
 
 
 def _segment_hits_sphere(
@@ -314,14 +329,38 @@ async def assert_goto_never_arrives(
     )
 
 
+# Minimum real height gain (blocks) above the y where the bot last left
+# the ground before an airborne excursion counts as a real jump, rather
+# than vanilla ground-contact flicker. Needed because MinebotMod's own
+# `position` broadcast dedup (`PositionSnapshot`, x/y/z/yaw/pitch only)
+# deliberately excludes `on_ground` -- its own docstring says so
+# explicitly, on the (now outdated) assumption that no Python code read
+# on_ground at all. Since real movement changes x/y/z almost every tick
+# anyway, on_ground still rides along on nearly every broadcast, and
+# vanilla's own onGround() is known to flicker true/false/true across a
+# couple of ticks at a block edge or on landing with ZERO real y change
+# -- confirmed live: goto_leaves_2 (one real jump, confirmed by the mod's
+# own navigate[diag] log showing jump=true exactly once) reported 3
+# on_ground toggles from the raw broadcast stream. A liftoff that never
+# actually rises real height above where it left the ground is that
+# flicker, not a jump; BASE_JUMP_POWER (0.42, see JumpPhysics) makes even
+# the smallest real jump clear this by a wide margin well within one
+# tick.
+JUMP_MIN_HEIGHT_GAIN = 0.1
+
+
 async def count_jumps(ctx: TestContext, during: Awaitable[None]) -> int:
     """Runs `during` to completion while counting real jumps -- a full
     on_ground=true -> on_ground=false -> on_ground=true cycle in the
-    bot's own broadcast `position` events -- and returns the count.
-    Deliberately counts a physical liftoff/land cycle, not e.g. a rise in
-    y alone: walking up stairs/slabs also raises y without the legs state
-    machine ever entering a real jump, so a y-only check would false-
-    positive there (see LegsNavigateNode's own jump-vs-step distinction).
+    bot's own broadcast `position` events that also gains real height
+    (see JUMP_MIN_HEIGHT_GAIN) -- and returns the count. Deliberately
+    counts a physical liftoff/land cycle, not e.g. a rise in y alone:
+    walking up stairs/slabs also raises y without the legs state machine
+    ever entering a real jump, so a y-only check on its own would
+    false-positive there (see LegsNavigateNode's own jump-vs-step
+    distinction) -- the on_ground transition is still the primary signal,
+    JUMP_MIN_HEIGHT_GAIN only filters ground-contact flicker riding on
+    that same transition, not a replacement for it.
 
     A single, reusable primitive rather than baking a jump-count
     assertion into any one caller -- built specifically so scenarios like
@@ -341,11 +380,25 @@ async def count_jumps(ctx: TestContext, during: Awaitable[None]) -> int:
     """
     jumps = 0
     was_on_ground = True
+    liftoff_y: float | None = None
+    max_y_since_liftoff: float | None = None
 
     def _on_position(pos: SelfPosition) -> None:
-        nonlocal jumps, was_on_ground
+        nonlocal jumps, was_on_ground, liftoff_y, max_y_since_liftoff
         if was_on_ground and not pos.on_ground:
-            jumps += 1
+            liftoff_y = pos.y
+            max_y_since_liftoff = pos.y
+        elif not was_on_ground and not pos.on_ground and max_y_since_liftoff is not None:
+            max_y_since_liftoff = max(max_y_since_liftoff, pos.y)
+        elif not was_on_ground and pos.on_ground:
+            if (
+                liftoff_y is not None
+                and max_y_since_liftoff is not None
+                and max_y_since_liftoff - liftoff_y >= JUMP_MIN_HEIGHT_GAIN
+            ):
+                jumps += 1
+            liftoff_y = None
+            max_y_since_liftoff = None
         was_on_ground = pos.on_ground
 
     ctx.self_position.add_listener(_on_position)

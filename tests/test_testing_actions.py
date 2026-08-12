@@ -189,12 +189,12 @@ async def test_goto_with_waypoints_counts_path_and_forbidden_hits():
     # wait needs at least one before it'll send anything).
     self_position.handle_event(ModEvent(type="position", data={"x": 0.0, "y": 0.0, "z": 0.0, "yaw": 0.0, "pitch": 0.0}))
     # A straight walk along x: 0 -> 1 -> 2 -> 3 -> 4, passing directly
-    # through the path waypoint block's own CENTER (x=2.5, see
+    # through the path waypoint block's own CENTER (2.5, 0.5, 0.5, see
     # goto_with_waypoints' own WAYPOINT_RADIUS docstring for why hits are
     # checked against a waypoint's real block center, not its raw
     # minimum-corner integer coordinate) and nowhere near the forbidden
     # one at x=10, ending within tolerance of the target at x=4.
-    steps = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (2.5, 0.0, 0.0), (3.0, 0.0, 0.0), (4.0, 0.0, 0.0)]
+    steps = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (2.5, 0.5, 0.5), (3.0, 0.0, 0.0), (4.0, 0.0, 0.0)]
     bridge = _GotoBridge(self_position, steps)
     ctx = TestContext(bridge=bridge, self_position=self_position, tracker=None, query_result=None)
 
@@ -222,7 +222,7 @@ async def test_goto_with_waypoints_uses_real_3d_distance_for_forbidden_hits():
     # column at a different height falsely counted as a hit.
     #
     # Flies at y=3 over a forbidden cell centered at y=1.5 -- 1.5 blocks of
-    # vertical clearance, deliberately well outside WAYPOINT_RADIUS (0.75)
+    # vertical clearance, deliberately well outside WAYPOINT_RADIUS (0.5)
     # even measured against the straight-line CHORD between consecutive
     # samples (not just the samples themselves -- see
     # goto_with_waypoints' own _segment_hits_sphere docstring for why hits
@@ -263,6 +263,58 @@ async def test_goto_with_waypoints_removes_its_listener_after_returning():
     # No listener should still be registered -- a leftover one would keep
     # tagging hits for whatever the NEXT test's own walk does.
     assert self_position._listeners == []
+
+
+@pytest.mark.asyncio
+async def test_count_jumps_counts_a_real_liftoff_land_cycle():
+    self_position = SelfPositionTracker()
+
+    async def _during() -> None:
+        for x, y, on_ground in [
+            (0.0, 0.0, True),
+            (0.5, 0.3, False),
+            (1.0, 0.5, False),
+            (1.5, 0.2, False),
+            (2.0, 0.0, True),
+        ]:
+            self_position.handle_event(
+                ModEvent(type="position", data={"x": x, "y": y, "z": 0.0, "yaw": 0.0, "pitch": 0.0, "on_ground": on_ground})
+            )
+
+    ctx = TestContext(bridge=None, self_position=self_position, tracker=None, query_result=None)
+    jumps = await actions.count_jumps(ctx, during=_during())
+
+    assert jumps == 1
+
+
+@pytest.mark.asyncio
+async def test_count_jumps_ignores_ground_contact_flicker():
+    # Regression test, per direct live report: goto_leaves_2 fired exactly
+    # ONE real jump (confirmed via the mod's own navigate[diag] log,
+    # jump=true exactly once) but count_jumps reported 3 -- because
+    # MinebotMod's position broadcast dedup deliberately excludes
+    # on_ground (see MinebotMod.maybeBroadcastPositionEvent's own
+    # docstring), so vanilla's own known onGround() flicker at a block
+    # edge rides along on ordinary movement broadcasts as spurious
+    # on_ground=false ticks with no real height gained at all.
+    self_position = SelfPositionTracker()
+
+    async def _during() -> None:
+        for x, y, on_ground in [
+            (0.0, -60.0, True),
+            (0.3, -60.0, False),  # flicker: no real height gained
+            (0.6, -60.0, True),
+            (0.9, -60.0, False),  # flicker: no real height gained
+            (1.2, -60.0, True),
+        ]:
+            self_position.handle_event(
+                ModEvent(type="position", data={"x": x, "y": y, "z": 0.0, "yaw": 0.0, "pitch": 0.0, "on_ground": on_ground})
+            )
+
+    ctx = TestContext(bridge=None, self_position=self_position, tracker=None, query_result=None)
+    jumps = await actions.count_jumps(ctx, during=_during())
+
+    assert jumps == 0
 
 
 class _StaticGotoBridge:
