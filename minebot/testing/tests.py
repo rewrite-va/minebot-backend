@@ -406,6 +406,21 @@ teardown_clear_goto_jump_2 = _make_schematic_teardown(JUMP2_SCHEMATIC_PATH, JUMP
 test_goto_jumps_across_wider_gap = _make_waypoint_goto_test(JUMP2_SCHEMATIC_PATH, JUMP2_SCHEMATIC_ANCHOR_X, JUMP2_SCHEMATIC_ANCHOR_Y, JUMP2_SCHEMATIC_ANCHOR_Z)
 
 
+# A longer course (8 blocks) combining both goto_jump's own "path"
+# checkpoint above a gap AND goto_jump_2's own "forbidden" gap columns --
+# same shared shape (_make_waypoint_goto_test), just a longer/more
+# demanding run: a required path waypoint at z=4, a 2-block forbidden gap
+# at z=2/z=3, and a separate forbidden marker at z=0 past the end.
+JUMP3_SCHEMATIC_PATH = Path(__file__).resolve().parent.parent.parent / "tests" / "fixtures" / "schematics" / "goto_jump_3.litematic"
+JUMP3_SCHEMATIC_ANCHOR_X = ORIGIN_X
+JUMP3_SCHEMATIC_ANCHOR_Y = ORIGIN_Y
+JUMP3_SCHEMATIC_ANCHOR_Z = ORIGIN_Z
+
+setup_goto_jump_3 = _make_schematic_setup(JUMP3_SCHEMATIC_PATH, JUMP3_SCHEMATIC_ANCHOR_X, JUMP3_SCHEMATIC_ANCHOR_Y, JUMP3_SCHEMATIC_ANCHOR_Z)
+teardown_clear_goto_jump_3 = _make_schematic_teardown(JUMP3_SCHEMATIC_PATH, JUMP3_SCHEMATIC_ANCHOR_X, JUMP3_SCHEMATIC_ANCHOR_Y, JUMP3_SCHEMATIC_ANCHOR_Z)
+test_goto_jumps_across_gap_with_checkpoint = _make_waypoint_goto_test(JUMP3_SCHEMATIC_PATH, JUMP3_SCHEMATIC_ANCHOR_X, JUMP3_SCHEMATIC_ANCHOR_Y, JUMP3_SCHEMATIC_ANCHOR_Z)
+
+
 # A genuinely blocked scenario: start on one side of a 2-tall, 1-wide
 # stone wall with no way around it in the schematic's own footprint, and a
 # magenta_wool "unreachable" marker on the far side -- see
@@ -486,6 +501,14 @@ def register_default_tests(registry: TestRegistry) -> None:
         func=test_goto_jumps_across_wider_gap,
         setup=setup_goto_jump_2,
         teardown=teardown_clear_goto_jump_2,
+        timeout_seconds=TELEPORT_TIMEOUT_SECONDS + SCHEMATIC_TIMEOUT_SECONDS + GOTO_TIMEOUT_SECONDS,
+    ))
+    registry.register(TestCase(
+        name="goto_jump_3",
+        description="Places a longer schematic with a required path checkpoint and a two-block forbidden gap, sends !goto across it, and asserts the bot walked through the checkpoint without falling into either forbidden column.",
+        func=test_goto_jumps_across_gap_with_checkpoint,
+        setup=setup_goto_jump_3,
+        teardown=teardown_clear_goto_jump_3,
         timeout_seconds=TELEPORT_TIMEOUT_SECONDS + SCHEMATIC_TIMEOUT_SECONDS + GOTO_TIMEOUT_SECONDS,
     ))
     registry.register(TestCase(
