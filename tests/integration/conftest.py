@@ -298,14 +298,30 @@ async def ingame_session():
     # detection turn a real jump-retry into permanent, ungoverned flight,
     # which previously looked exactly like a permanent physics wedge in
     # goto_leaves_2. Session-scoped (this fixture, not any individual
-    # test's own setup) since gamemode is world/session state.
-    log.info("integration session: switching to survival")
+    # test's own setup) since gamemode is world/session state. Saves
+    # whatever gamemode the world actually started in first and restores
+    # it in the `finally` below (not hardcoded back to "creative") --
+    # TestWorldBootstrap's own world generation already requests creative
+    # for THIS fixture's own disposable world, but this fixture is shared
+    # code any other session (a real LAN world with its own, possibly
+    # different, starting gamemode) could reasonably use too.
+    original_gamemode = await actions.query(ctx, "gamemode", timeout=CLIENT_STARTUP_TIMEOUT_SECONDS)
+    log.info("integration session: switching to survival (was %s)", original_gamemode)
     await actions.wait_for_gamemode(ctx, "survival", timeout=CLIENT_STARTUP_TIMEOUT_SECONDS)
     log.info("integration session: survival confirmed, starting tests")
 
     try:
         yield session
     finally:
+        # Best-effort -- swallow any failure (a dead control channel from
+        # a crashed client, a closed connection, ...) rather than letting
+        # a failed restore attempt mask whatever real exception the `try`
+        # body raised, or skip session.close() entirely below.
+        try:
+            log.info("integration session: restoring gamemode to %s", original_gamemode)
+            await actions.wait_for_gamemode(ctx, original_gamemode, timeout=CLIENT_STARTUP_TIMEOUT_SECONDS)
+        except Exception:
+            log.exception("integration session: failed to restore gamemode to %s", original_gamemode)
         await session.close()
 
 
