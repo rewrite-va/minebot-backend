@@ -11,7 +11,7 @@ from minebot.bot.inventory import InventoryController, register_inventory_action
 from minebot.bot.inventory_announcer import InventoryAnnouncer
 from minebot.bot.movement import MovementController, register_movement_actions
 from minebot.bot.player_intention import PlayerIntentionController
-from minebot.bot.query import register_query_action
+from minebot.bot.query import register_gamemode_action, register_query_action
 from minebot.bot.run_loop import run
 from minebot.bot.self_defense import SelfDefenseTrigger
 from minebot.bot.testing import register_testing_actions
@@ -57,6 +57,7 @@ async def run_bot(config: BotConfig) -> None:
     InventoryAnnouncer(bridge, inventory)  # registers itself as an inventory-change listener; not otherwise referenced
     register_help_action(actions)
     register_query_action(actions, bridge, query_result)
+    register_gamemode_action(actions, bridge)
 
     test_registry = TestRegistry()
     register_default_tests(test_registry)

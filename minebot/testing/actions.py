@@ -470,6 +470,41 @@ async def assert_state(ctx: TestContext, arg: str, expected: str, timeout: float
     assert actual == expected, f"expected {arg}={expected!r}, got {actual!r}"
 
 
+async def wait_for_gamemode(ctx: TestContext, mode: str, timeout: float) -> None:
+    """Sends `!gamemode <mode>` (ModBridge.send_gamemode) then polls
+    `!query gamemode` (query(ctx, "gamemode")) until it reads back `mode`,
+    confirming the change actually landed before returning -- a real
+    `/gamemode` command has the same fire-and-forget-then-poll shape
+    teleport()/send_teleport's own docstring already explains for why a
+    fixed delay isn't trustworthy here (real command latency, not
+    instant).
+
+    Exists specifically so the in-game test suite can force its own
+    session's world OUT of creative before running any real test --
+    confirmed live as a real bug (see MinebotMod's own "gamemode" case
+    docstring): a creative test world lets vanilla's own double-tap-
+    space-toggles-flying detection turn a real jump-retry (two jump-key
+    presses close enough together, itself found live as a separate real
+    bug in LegsNavigateNode's own run-up state handling) into the bot
+    permanently hovering with zero gravity -- structurally impossible in
+    survival, where that ability doesn't exist at all. Deliberately
+    session-scoped (see tests/integration/conftest.py's own
+    ingame_session fixture) rather than per-test: gamemode is world/
+    session state, not something any individual test's own setup/
+    teardown should need to think about.
+    """
+    await ctx.bridge.send_gamemode(mode)
+
+    async def _poll() -> None:
+        while True:
+            actual = await query(ctx, "gamemode", timeout=POLL_QUERY_TIMEOUT_SECONDS)
+            if actual == mode:
+                return
+            await asyncio.sleep(POLL_INTERVAL_SECONDS)
+
+    await asyncio.wait_for(_poll(), timeout=timeout)
+
+
 async def query_position(ctx: TestContext, timeout: float = QUERY_TIMEOUT_SECONDS) -> SelfPosition:
     """Sends `!query position` and returns the bot's real live position,
     read fresh on demand -- unlike `ctx.self_position.current` (only ever

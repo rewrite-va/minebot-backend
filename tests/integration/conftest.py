@@ -291,6 +291,18 @@ async def ingame_session():
         await asyncio.sleep(0.5)
     log.info("integration session: local player spawned, starting tests")
 
+    # Force the world's own player out of CREATIVE before running any real
+    # test -- see actions.wait_for_gamemode's own docstring and MinebotMod's
+    # "gamemode" case docstring for the real bug this fixes: a creative
+    # test world lets vanilla's own double-tap-space-toggles-flying
+    # detection turn a real jump-retry into permanent, ungoverned flight,
+    # which previously looked exactly like a permanent physics wedge in
+    # goto_leaves_2. Session-scoped (this fixture, not any individual
+    # test's own setup) since gamemode is world/session state.
+    log.info("integration session: switching to survival")
+    await actions.wait_for_gamemode(ctx, "survival", timeout=CLIENT_STARTUP_TIMEOUT_SECONDS)
+    log.info("integration session: survival confirmed, starting tests")
+
     try:
         yield session
     finally:

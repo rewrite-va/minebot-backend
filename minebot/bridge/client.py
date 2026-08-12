@@ -304,6 +304,21 @@ class ModBridge:
         """
         await self._send({"type": "teleport", "x": x, "y": y, "z": z})
 
+    async def send_gamemode(self, mode: str) -> None:
+        """Sends a structured `{"type": "gamemode", "mode": mode}` wire
+        message -- the mod's own "gamemode" case runs `/gamemode <mode>
+        @s`. `mode` is a real vanilla gamemode name ("survival",
+        "creative", ...). Fire-and-forget the same way send_teleport is --
+        the actual change only lands a moment later; callers that need to
+        KNOW it landed should poll `!query gamemode` afterward (see
+        testing/actions.py's own wait_for_gamemode, built specifically
+        because a creative test world lets vanilla's own double-tap-
+        space-toggles-flying detection turn a real jump-retry into
+        permanent, ungoverned flight -- see MinebotMod's own "gamemode"
+        case docstring for the full story).
+        """
+        await self._send({"type": "gamemode", "mode": mode})
+
     async def _drain_chat_queue(self) -> None:
         """Sends one queued chat message every 1/CHAT_RATE_PER_SECOND,
         forever, until cancelled (see close()'s own cleanup) -- a fixed-

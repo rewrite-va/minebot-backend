@@ -528,16 +528,6 @@ LEAVES2_SCHEMATIC_ANCHOR_Z = ORIGIN_Z
 setup_goto_leaves_2 = _make_schematic_setup(LEAVES2_SCHEMATIC_PATH, LEAVES2_SCHEMATIC_ANCHOR_X, LEAVES2_SCHEMATIC_ANCHOR_Y, LEAVES2_SCHEMATIC_ANCHOR_Z)
 teardown_clear_goto_leaves_2 = _make_schematic_teardown(LEAVES2_SCHEMATIC_PATH, LEAVES2_SCHEMATIC_ANCHOR_X, LEAVES2_SCHEMATIC_ANCHOR_Y, LEAVES2_SCHEMATIC_ANCHOR_Z)
 
-# Longer than the standard GOTO_TIMEOUT_SECONDS (5s) -- start sits in an
-# open pit at the room's center (no floor block under it at all in the
-# schematic itself), so the real route out involves more real ticks of
-# fall/recovery/replan than a normal flat-ground or single-gap-jump
-# course before ever reaching "end" (confirmed live: 5s wasn't enough
-# even after fixing the real requiresJump bug this schematic exposed --
-# see getMoveDiagonal's own comment in minebot-mod's Movements.java).
-LEAVES2_GOTO_TIMEOUT_SECONDS = 15.0
-
-
 async def test_goto_leaves_2_reaches_goal_with_one_jump(ctx: TestContext) -> None:
     """Sends !goto toward goto_leaves_2's own "end" marker and asserts the
     bot's real walked trail passed through the required "path" waypoint,
@@ -555,7 +545,7 @@ async def test_goto_leaves_2_reaches_goal_with_one_jump(ctx: TestContext) -> Non
             target_y=LEAVES2_SCHEMATIC_ANCHOR_Y + end.y,
             target_z=LEAVES2_SCHEMATIC_ANCHOR_Z + end.z,
             distance_tolerance=GOTO_ARRIVAL_TOLERANCE,
-            timeout=LEAVES2_GOTO_TIMEOUT_SECONDS,
+            timeout=GOTO_TIMEOUT_SECONDS,
             path=[_offset(*anchor, w) for w in schematic.waypoints.path],
             forbidden=[_offset(*anchor, w) for w in schematic.waypoints.forbidden],
         )
@@ -630,5 +620,5 @@ def register_default_tests(registry: TestRegistry) -> None:
         func=test_goto_leaves_2_reaches_goal_with_one_jump,
         setup=setup_goto_leaves_2,
         teardown=teardown_clear_goto_leaves_2,
-        timeout_seconds=TELEPORT_TIMEOUT_SECONDS + SCHEMATIC_TIMEOUT_SECONDS + LEAVES2_GOTO_TIMEOUT_SECONDS,
+        timeout_seconds=TELEPORT_TIMEOUT_SECONDS + SCHEMATIC_TIMEOUT_SECONDS + GOTO_TIMEOUT_SECONDS,
     ))

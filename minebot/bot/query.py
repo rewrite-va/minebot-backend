@@ -45,6 +45,31 @@ from minebot.bridge.query import QueryResultTracker
 QUERY_TIMEOUT_SECONDS = 5.0
 
 
+def register_gamemode_action(registry: ActionRegistry, bridge: ModBridge) -> None:
+    """!gamemode <mode> -- sends a real `/gamemode <mode> @s` (see
+    MinebotMod's own "gamemode" case docstring for why this exists as a
+    structured command rather than raw chat text: it's specifically what
+    fixed a real bug where a creative test/play session let vanilla's own
+    double-tap-space-toggles-flying detection turn an accidental double
+    jump-key-press into permanent, ungoverned flight). Fire-and-forget,
+    like the mod's own "gamemode" wire case -- pair with `!query gamemode`
+    (the generic query handler below already returns it, no separate code
+    needed) to confirm the change actually landed before relying on it.
+    """
+    async def handler(sender: str | None, mode: str) -> ActionResult:
+        await bridge.send_gamemode(mode)
+        return ActionResult(message=f"ok, requested gamemode {mode}")
+
+    registry.register(Action(
+        name="gamemode",
+        description="Change the bot's own gamemode (e.g. !gamemode survival, !gamemode creative).",
+        handler=handler,
+        params=[
+            ActionParam("mode", "string", "Gamemode to switch to: survival, creative, adventure, or spectator.", required=True),
+        ],
+    ))
+
+
 def register_query_action(registry: ActionRegistry, bridge: ModBridge, query_result: QueryResultTracker) -> None:
     async def handler(sender: str | None, arg: str, x: int | None = None, y: int | None = None, z: int | None = None) -> ActionResult:
         await bridge.send_query(arg, x=x, y=y, z=z)
