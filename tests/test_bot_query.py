@@ -22,6 +22,7 @@ from minebot.bridge.entities import EntityTracker
 from minebot.bridge.inventory import InventoryTracker
 from minebot.bridge.query import QueryResultTracker
 from minebot.bridge.self_position import SelfPositionTracker
+from minebot.testing.replay import ReplayRecorder
 from minebot.config import BotConfig
 from minebot.llm.controller import LLMController
 
@@ -76,7 +77,7 @@ async def test_query_command_reports_the_mods_result():
 
     run_task = asyncio.ensure_future(run(
         bridge, actions, tracker, InventoryTracker(), LLMController(bridge, actions), CONFIG,
-        SelfPositionTracker(), self_defense, query_result,
+        SelfPositionTracker(), self_defense, query_result, ReplayRecorder(),
     ))
     await asyncio.sleep(0.1)  # let the chat command dispatch, send, and get its reply
     run_task.cancel()
@@ -104,7 +105,7 @@ async def test_query_command_reports_mod_side_errors():
 
     run_task = asyncio.ensure_future(run(
         bridge, actions, tracker, InventoryTracker(), LLMController(bridge, actions), CONFIG,
-        SelfPositionTracker(), self_defense, query_result,
+        SelfPositionTracker(), self_defense, query_result, ReplayRecorder(),
     ))
     await asyncio.sleep(0.1)
     run_task.cancel()
@@ -132,7 +133,7 @@ async def test_query_position_reports_the_nested_position_object():
 
     run_task = asyncio.ensure_future(run(
         bridge, actions, tracker, InventoryTracker(), LLMController(bridge, actions), CONFIG,
-        SelfPositionTracker(), self_defense, query_result,
+        SelfPositionTracker(), self_defense, query_result, ReplayRecorder(),
     ))
     await asyncio.sleep(0.1)
     run_task.cancel()
@@ -160,7 +161,7 @@ async def test_query_block_reports_the_real_block_id():
 
     run_task = asyncio.ensure_future(run(
         bridge, actions, tracker, InventoryTracker(), LLMController(bridge, actions), CONFIG,
-        SelfPositionTracker(), self_defense, query_result,
+        SelfPositionTracker(), self_defense, query_result, ReplayRecorder(),
     ))
     await asyncio.sleep(0.1)
     run_task.cancel()

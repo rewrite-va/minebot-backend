@@ -421,6 +421,55 @@ teardown_clear_goto_jump_3 = _make_schematic_teardown(JUMP3_SCHEMATIC_PATH, JUMP
 test_goto_jumps_across_gap_with_checkpoint = _make_waypoint_goto_test(JUMP3_SCHEMATIC_PATH, JUMP3_SCHEMATIC_ANCHOR_X, JUMP3_SCHEMATIC_ANCHOR_Y, JUMP3_SCHEMATIC_ANCHOR_Z)
 
 
+# Another gap-jump course, same shared shape as goto_jump_3: a required
+# path checkpoint at z=4 above the gap and a wider (5-block, z=2..z=6)
+# forbidden gap run underneath it.
+JUMP4_SCHEMATIC_PATH = Path(__file__).resolve().parent.parent.parent / "tests" / "fixtures" / "schematics" / "goto_jump_4.litematic"
+JUMP4_SCHEMATIC_ANCHOR_X = ORIGIN_X
+JUMP4_SCHEMATIC_ANCHOR_Y = ORIGIN_Y
+JUMP4_SCHEMATIC_ANCHOR_Z = ORIGIN_Z
+
+setup_goto_jump_4 = _make_schematic_setup(JUMP4_SCHEMATIC_PATH, JUMP4_SCHEMATIC_ANCHOR_X, JUMP4_SCHEMATIC_ANCHOR_Y, JUMP4_SCHEMATIC_ANCHOR_Z)
+teardown_clear_goto_jump_4 = _make_schematic_teardown(JUMP4_SCHEMATIC_PATH, JUMP4_SCHEMATIC_ANCHOR_X, JUMP4_SCHEMATIC_ANCHOR_Y, JUMP4_SCHEMATIC_ANCHOR_Z)
+test_goto_jumps_across_gap_4 = _make_waypoint_goto_test(JUMP4_SCHEMATIC_PATH, JUMP4_SCHEMATIC_ANCHOR_X, JUMP4_SCHEMATIC_ANCHOR_Y, JUMP4_SCHEMATIC_ANCHOR_Z)
+
+
+# A gap wider than the bot's real jump range -- fills the "goto across a
+# gap wider than jump range" pending item (distinct from
+# goto_impossible_1's horizontal-wall case): only a magenta "unreachable"
+# marker on the far side, no "end"/"path"/"forbidden" waypoints, since the
+# gap itself (not a specific in-gap column) is what makes it unreachable.
+# Same test shape as goto_impossible_1 -- asserts the bot never arrives,
+# per explicit direction the test should fail if it does.
+JUMP5_SCHEMATIC_PATH = Path(__file__).resolve().parent.parent.parent / "tests" / "fixtures" / "schematics" / "goto_jump_5.litematic"
+JUMP5_SCHEMATIC_ANCHOR_X = ORIGIN_X
+JUMP5_SCHEMATIC_ANCHOR_Y = ORIGIN_Y
+JUMP5_SCHEMATIC_ANCHOR_Z = ORIGIN_Z
+
+setup_goto_jump_5 = _make_schematic_setup(JUMP5_SCHEMATIC_PATH, JUMP5_SCHEMATIC_ANCHOR_X, JUMP5_SCHEMATIC_ANCHOR_Y, JUMP5_SCHEMATIC_ANCHOR_Z)
+teardown_clear_goto_jump_5 = _make_schematic_teardown(JUMP5_SCHEMATIC_PATH, JUMP5_SCHEMATIC_ANCHOR_X, JUMP5_SCHEMATIC_ANCHOR_Y, JUMP5_SCHEMATIC_ANCHOR_Z)
+
+
+async def test_goto_never_crosses_gap_too_wide(ctx: TestContext) -> None:
+    """Sends !goto toward goto_jump_5's own magenta "unreachable" marker,
+    across a gap wider than the bot's real jump range, and asserts the
+    bot never actually gets there (see actions.assert_goto_never_arrives)
+    -- proves the mod recognizes the gap as unreachable rather than
+    attempting and failing the jump.
+    """
+    schematic = Schematic.from_file(JUMP5_SCHEMATIC_PATH)
+    unreachable = _one(schematic.waypoints.unreachable, "unreachable")
+
+    await actions.assert_goto_never_arrives(
+        ctx,
+        target_x=JUMP5_SCHEMATIC_ANCHOR_X + unreachable.x,
+        target_y=JUMP5_SCHEMATIC_ANCHOR_Y + unreachable.y,
+        target_z=JUMP5_SCHEMATIC_ANCHOR_Z + unreachable.z,
+        distance_tolerance=GOTO_ARRIVAL_TOLERANCE,
+        timeout=IMPOSSIBLE_GOTO_WINDOW_SECONDS,
+    )
+
+
 # A genuinely blocked scenario: start on one side of a 2-tall, 1-wide
 # stone wall with no way around it in the schematic's own footprint, and a
 # magenta_wool "unreachable" marker on the far side -- see
@@ -558,6 +607,56 @@ async def test_goto_leaves_2_reaches_goal_with_one_jump(ctx: TestContext) -> Non
     await actions.assert_jumps_done(ctx, during=_run(), count=1)
 
 
+# A stairs-climbing course -- start at the bottom (y=1), end 3 blocks
+# higher (y=4) up a run of stairs, forbidden markers lining the ground on
+# both sides of the staircase (falling off is a failure). Fills the
+# pending "goto up/down stairs or slabs" item: half-height terrain the
+# legs state machine should climb by stepping, not by triggering a real
+# jump (see count_jumps' own docstring for why a y-rise alone isn't
+# treated as a jump) -- this test asserts that directly with
+# assert_never_jumps on top of the usual path/forbidden waypoint checks.
+STAIRS_SCHEMATIC_PATH = Path(__file__).resolve().parent.parent.parent / "tests" / "fixtures" / "schematics" / "goto_stairs_1.litematic"
+STAIRS_SCHEMATIC_ANCHOR_X = ORIGIN_X
+STAIRS_SCHEMATIC_ANCHOR_Y = ORIGIN_Y
+STAIRS_SCHEMATIC_ANCHOR_Z = ORIGIN_Z
+
+setup_goto_stairs_1 = _make_schematic_setup(STAIRS_SCHEMATIC_PATH, STAIRS_SCHEMATIC_ANCHOR_X, STAIRS_SCHEMATIC_ANCHOR_Y, STAIRS_SCHEMATIC_ANCHOR_Z)
+teardown_clear_goto_stairs_1 = _make_schematic_teardown(STAIRS_SCHEMATIC_PATH, STAIRS_SCHEMATIC_ANCHOR_X, STAIRS_SCHEMATIC_ANCHOR_Y, STAIRS_SCHEMATIC_ANCHOR_Z)
+
+# Longer than the standard GOTO_TIMEOUT_SECONDS (5s) -- a 3-block climb up
+# a staircase run takes more real ticks than a flat-ground or single-gap-
+# jump course before reaching "end".
+STAIRS_GOTO_TIMEOUT_SECONDS = 10.0
+
+
+async def test_goto_climbs_stairs_without_jumping(ctx: TestContext) -> None:
+    """Sends !goto up goto_stairs_1's own staircase to the "end" marker
+    and asserts the bot's real walked trail never touched a forbidden
+    ground-level cell on either side AND never performed a real jump
+    climbing the stairs (see actions.assert_never_jumps).
+    """
+    schematic = Schematic.from_file(STAIRS_SCHEMATIC_PATH)
+    end = _one(schematic.waypoints.end, "end")
+    anchor = (STAIRS_SCHEMATIC_ANCHOR_X, STAIRS_SCHEMATIC_ANCHOR_Y, STAIRS_SCHEMATIC_ANCHOR_Z)
+
+    async def _run() -> None:
+        result = await actions.goto_with_waypoints(
+            ctx,
+            target_x=STAIRS_SCHEMATIC_ANCHOR_X + end.x,
+            target_y=STAIRS_SCHEMATIC_ANCHOR_Y + end.y,
+            target_z=STAIRS_SCHEMATIC_ANCHOR_Z + end.z,
+            distance_tolerance=GOTO_ARRIVAL_TOLERANCE,
+            timeout=STAIRS_GOTO_TIMEOUT_SECONDS,
+            path=[_offset(*anchor, w) for w in schematic.waypoints.path],
+            forbidden=[_offset(*anchor, w) for w in schematic.waypoints.forbidden],
+        )
+
+        for i, hits in enumerate(result.forbidden_hits):
+            assert hits == 0, f"walked through forbidden waypoint {schematic.waypoints.forbidden[i]}"
+
+    await actions.assert_never_jumps(ctx, during=_run())
+
+
 def register_default_tests(registry: TestRegistry) -> None:
     registry.register(TestCase(
         name="goto",
@@ -597,6 +696,30 @@ def register_default_tests(registry: TestRegistry) -> None:
         setup=setup_goto_jump_3,
         teardown=teardown_clear_goto_jump_3,
         timeout_seconds=TELEPORT_TIMEOUT_SECONDS + SCHEMATIC_TIMEOUT_SECONDS + GOTO_TIMEOUT_SECONDS,
+    ))
+    registry.register(TestCase(
+        name="goto_jump_4",
+        description="Places a longer schematic with a required path checkpoint and a five-block forbidden gap, sends !goto across it, and asserts the bot walked through the checkpoint without falling into any forbidden column.",
+        func=test_goto_jumps_across_gap_4,
+        setup=setup_goto_jump_4,
+        teardown=teardown_clear_goto_jump_4,
+        timeout_seconds=TELEPORT_TIMEOUT_SECONDS + SCHEMATIC_TIMEOUT_SECONDS + GOTO_TIMEOUT_SECONDS,
+    ))
+    registry.register(TestCase(
+        name="goto_jump_5",
+        description="Places a schematic with a gap wider than the bot's real jump range, sends !goto across it, and asserts the bot never reaches the far side.",
+        func=test_goto_never_crosses_gap_too_wide,
+        setup=setup_goto_jump_5,
+        teardown=teardown_clear_goto_jump_5,
+        timeout_seconds=TELEPORT_TIMEOUT_SECONDS + SCHEMATIC_TIMEOUT_SECONDS + IMPOSSIBLE_GOTO_WINDOW_SECONDS,
+    ))
+    registry.register(TestCase(
+        name="goto_stairs_1",
+        description="Places a staircase schematic, sends !goto up it, and asserts the bot reaches the top without falling off either side and without performing a real jump.",
+        func=test_goto_climbs_stairs_without_jumping,
+        setup=setup_goto_stairs_1,
+        teardown=teardown_clear_goto_stairs_1,
+        timeout_seconds=TELEPORT_TIMEOUT_SECONDS + SCHEMATIC_TIMEOUT_SECONDS + STAIRS_GOTO_TIMEOUT_SECONDS,
     ))
     registry.register(TestCase(
         name="goto_impossible",

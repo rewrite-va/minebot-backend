@@ -28,6 +28,7 @@ from minebot.bridge.client import ModBridge
 from minebot.bridge.entities import EntityTracker
 from minebot.bridge.query import QueryResultTracker
 from minebot.bridge.self_position import SelfPositionTracker
+from minebot.testing.replay import ReplayRecorder, now_utc, write_replay
 
 log = logging.getLogger("minebot.testing")
 
@@ -44,6 +45,14 @@ class TestContext:
     self_position: SelfPositionTracker
     tracker: EntityTracker
     query_result: QueryResultTracker
+    # None means "not recording" -- every existing call site that builds a
+    # TestContext keeps working unchanged; only callers that actually want
+    # a replay JSON written (see run_test_case below) need to pass one.
+    replay_recorder: ReplayRecorder | None = None
+    # The mod repo's own current commit (mod_version.expected_commit),
+    # threaded in here rather than read off the mod's self-reported `hello`
+    # event -- see run_test_case's own docstring for why.
+    mod_commit: str | None = None
 
 
 TestFunc = Callable[[TestContext], Awaitable[None]]
@@ -98,6 +107,20 @@ class TestOutcome:
     duration_seconds: float
 
 
+def _classify_outcome(name: str, start: float, timeout_seconds: float, exc: BaseException | None) -> TestOutcome:
+    """Shared pass/fail/detail classification -- used by both run_test_case
+    (to know what to write into a replay's own metadata) and TestRunner.
+    _run_one, so the two can't drift apart on what counts as a timeout vs a
+    plain failure.
+    """
+    duration = time.monotonic() - start
+    if exc is None:
+        return TestOutcome(name=name, passed=True, detail="ok", duration_seconds=duration)
+    if isinstance(exc, asyncio.TimeoutError):
+        return TestOutcome(name=name, passed=False, detail=f"timed out after {timeout_seconds:.0f}s", duration_seconds=duration)
+    return TestOutcome(name=name, passed=False, detail=str(exc), duration_seconds=duration)
+
+
 async def run_test_case(ctx: TestContext, test: TestCase) -> None:
     """Runs `test.setup` (if any) then `test.func`, both against `ctx`,
     inside ONE combined `test.timeout_seconds` budget -- the shared
@@ -125,24 +148,55 @@ async def run_test_case(ctx: TestContext, test: TestCase) -> None:
     primitives, or a plain AssertionError/RuntimeError) -- TestRunner
     catches it (see _run_one below), a pytest test lets it fail the test
     normally.
+
+    When ctx.replay_recorder is set, brackets the whole run with start()/
+    stop() and writes the buffered frames + placed-block layout out as one
+    replay JSON on the way out (pass, fail, or timeout alike) -- see
+    minebot.testing.replay's own docstring for why this lives here rather
+    than in TestRunner: it's the one place both entry points (!runtest and
+    the pytest integration suite) share.
     """
     async def _run() -> None:
         if test.setup is not None:
             await test.setup(ctx)
         await test.func(ctx)
 
+    start = time.monotonic()
+    if ctx.replay_recorder is not None:
+        ctx.replay_recorder.start()
+
+    exc: BaseException | None = None
     try:
-        await asyncio.wait_for(_run(), timeout=test.timeout_seconds)
-    except Exception:
-        if test.teardown is not None:
-            try:
+        try:
+            await asyncio.wait_for(_run(), timeout=test.timeout_seconds)
+        except Exception:
+            if test.teardown is not None:
+                try:
+                    await asyncio.wait_for(test.teardown(ctx), timeout=test.timeout_seconds)
+                except Exception:
+                    log.exception("!runtest: teardown for %s also failed (original failure below takes precedence)", test.name)
+            raise
+        else:
+            if test.teardown is not None:
                 await asyncio.wait_for(test.teardown(ctx), timeout=test.timeout_seconds)
-            except Exception:
-                log.exception("!runtest: teardown for %s also failed (original failure below takes precedence)", test.name)
+    except Exception as e:
+        exc = e
         raise
-    else:
-        if test.teardown is not None:
-            await asyncio.wait_for(test.teardown(ctx), timeout=test.timeout_seconds)
+    finally:
+        if ctx.replay_recorder is not None:
+            frames = ctx.replay_recorder.stop()
+            placed_blocks = ctx.replay_recorder.placed_blocks
+            outcome = _classify_outcome(test.name, start, test.timeout_seconds, exc)
+            write_replay(
+                test_name=test.name,
+                commit=ctx.mod_commit,
+                started_at=now_utc(),
+                passed=outcome.passed,
+                detail=outcome.detail,
+                duration_seconds=outcome.duration_seconds,
+                frames=frames,
+                placed_blocks=placed_blocks,
+            )
 
 
 class TestRegistry:
@@ -237,27 +291,23 @@ class TestRunner:
     async def _run_one(self, test: TestCase) -> TestOutcome:
         log.info("!runtest: starting %s", test.name)
         start = time.monotonic()
+        exc: BaseException | None = None
         try:
             await run_test_case(self._ctx, test)
-            duration = time.monotonic() - start
-            log.info("!runtest: %s PASSED (%.1fs)", test.name, duration)
-            return TestOutcome(name=test.name, passed=True, detail="ok", duration_seconds=duration)
-        except asyncio.TimeoutError:
-            duration = time.monotonic() - start
-            detail = f"timed out after {test.timeout_seconds:.0f}s"
-            log.warning("!runtest: %s FAILED (%.1fs) -- %s", test.name, duration, detail)
-            return TestOutcome(name=test.name, passed=False, detail=detail, duration_seconds=duration)
-        except Exception as exc:
-            duration = time.monotonic() - start
-            log.warning("!runtest: %s FAILED (%.1fs) -- %s", test.name, duration, exc)
-            return TestOutcome(name=test.name, passed=False, detail=str(exc), duration_seconds=duration)
+        except Exception as e:
+            exc = e
+
+        outcome = _classify_outcome(test.name, start, test.timeout_seconds, exc)
+        if outcome.passed:
+            log.info("!runtest: %s PASSED (%.1fs)", test.name, outcome.duration_seconds)
+        else:
+            log.warning("!runtest: %s FAILED (%.1fs) -- %s", test.name, outcome.duration_seconds, outcome.detail)
+
+        await self._ctx.bridge.send_chat(format_outcome(outcome))
+        return outcome
 
 
-def format_outcomes(outcomes: list[TestOutcome]) -> str:
-    if len(outcomes) == 1 and outcomes[0].detail.startswith("no such test"):
-        return outcomes[0].detail
-
-    passed = sum(1 for o in outcomes if o.passed)
-    lines = [f"{'PASS' if o.passed else 'FAIL'} {o.name} ({o.duration_seconds:.1f}s)" + ("" if o.passed else f": {o.detail}") for o in outcomes]
-    summary = f"{passed}/{len(outcomes)} passed"
-    return summary + " -- " + "; ".join(lines)
+def format_outcome(outcome: TestOutcome) -> str:
+    status = "PASS" if outcome.passed else "FAIL"
+    suffix = "" if outcome.passed else f": {outcome.detail}"
+    return f"{outcome.name} {status} ({outcome.duration_seconds:.1f}s){suffix}"

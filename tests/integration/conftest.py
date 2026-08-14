@@ -62,13 +62,18 @@ from minebot.bridge.client import ModBridge, ModEvent
 from minebot.bridge.entities import EntityTracker
 from minebot.bridge.query import QueryResultTracker
 from minebot.bridge.self_position import SelfPositionTracker
+from minebot.mod_version import expected_commit
 from minebot.testing import actions
+from minebot.testing.replay import ReplayRecorder
 from minebot.testing.runner import TestContext
 
 log = logging.getLogger("minebot.tests.integration")
 
 MOD_REPO_PATH = Path(os.environ.get("MINEBOT_MOD_REPO_PATH", "/home/colaila/git/mods/minebot-mod"))
 TEST_WORLD_NAME = os.environ.get("MINEBOT_TEST_WORLD", "minebot-test-world")
+# Opt-in -- most local/CI runs don't want the per-tick replay_frame traffic
+# or the resulting JSON files. Set MINEBOT_RECORD_REPLAY=true to record.
+RECORD_REPLAY = os.environ.get("MINEBOT_RECORD_REPLAY", "false").lower() in ("1", "true", "yes")
 
 # Real client boot + world load + control-channel handshake, confirmed
 # live to take well under this during minebot-mod's TESTING.md
@@ -143,7 +148,8 @@ def _terminate_client(process: subprocess.Popen) -> None:
 
 
 async def _read_events_forever(
-    events: AsyncIterator[ModEvent], tracker: EntityTracker, self_position: SelfPositionTracker, query_result: QueryResultTracker,
+    events: AsyncIterator[ModEvent], tracker: EntityTracker, self_position: SelfPositionTracker,
+    query_result: QueryResultTracker, replay_recorder: ReplayRecorder,
 ) -> None:
     """Minimal version of run_loop.py's own _read_events -- this suite has
     no chat-command dispatch to feed (nothing here is driven by chat, see
@@ -174,6 +180,8 @@ async def _read_events_forever(
             tracker.handle_event(event)
         elif event.type == "query_result":
             query_result.handle_event(event)
+        elif event.type == "replay_frame":
+            replay_recorder.handle_event(event)
 
 
 @pytest_asyncio.fixture(scope="session")
@@ -207,12 +215,15 @@ async def ingame_session():
     # rank GO_TO_DEATH_POSITION/PICKUP_ITEMS above GOTO, so the stale
     # death recovery simply never let !goto's own test ever take over).
     log.info("integration session: launching client (control port %s)", control_port)
+    gradlew_args = [
+        "./gradlew", "runClient",
+        f"-Pminebot.bootstrapTestWorld={TEST_WORLD_NAME}",
+        f"-Pminebot.controlPort={control_port}",
+    ]
+    if RECORD_REPLAY:
+        gradlew_args.append("-Pminebot.recordReplay=true")
     client_process = subprocess.Popen(
-        [
-            "./gradlew", "runClient",
-            f"-Pminebot.bootstrapTestWorld={TEST_WORLD_NAME}",
-            f"-Pminebot.controlPort={control_port}",
-        ],
+        gradlew_args,
         cwd=MOD_REPO_PATH,
         env=os.environ.copy(),
     )
@@ -240,13 +251,17 @@ async def ingame_session():
     tracker = EntityTracker()
     self_position = SelfPositionTracker()
     query_result = QueryResultTracker()
+    replay_recorder = ReplayRecorder()
     # Reuses the SAME `events` generator the `hello` check just consumed
     # from -- see _read_events_forever's own docstring for why a second,
     # independent bridge.events() call here would silently race it for
     # the same underlying connection instead.
-    reader_task = asyncio.ensure_future(_read_events_forever(events, tracker, self_position, query_result))
+    reader_task = asyncio.ensure_future(_read_events_forever(events, tracker, self_position, query_result, replay_recorder))
 
-    ctx = TestContext(bridge=bridge, self_position=self_position, tracker=tracker, query_result=query_result)
+    ctx = TestContext(
+        bridge=bridge, self_position=self_position, tracker=tracker, query_result=query_result,
+        replay_recorder=replay_recorder, mod_commit=expected_commit(str(MOD_REPO_PATH)),
+    )
     session = IngameSession(bridge=bridge, ctx=ctx, client_process=client_process, reader_task=reader_task)
 
     # `hello` only proves the control channel connected and the mod class

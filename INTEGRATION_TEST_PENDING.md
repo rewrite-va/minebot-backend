@@ -23,12 +23,14 @@ nothing that drives a real client/world.
 - [ ] `goto` through a path requiring the bot to BREAK a block out of the
       way (`BlockBreaker`/digging-while-pathing, not just walking around
       obstacles)
-- [ ] `goto` up/down stairs or slabs (half-height terrain, distinct from
-      a full-block jump)
-- [ ] `goto` across a gap wider than the bot's real jump range -- asserts
+- [x] `goto` across a longer course combining a required path checkpoint
+      and a five-block forbidden gap (`goto_jump_4`)
+- [x] `goto` up/down stairs or slabs (half-height terrain, distinct from
+      a full-block jump) (`goto_stairs_1`)
+- [x] `goto` across a gap wider than the bot's real jump range -- asserts
       the bot recognizes it as unreachable rather than attempting and
       failing the jump (distinct from `goto_impossible`'s wall-blocked
-      case)
+      case) (`goto_jump_5`)
 - [ ] `stop` mid-`goto` -- asserts the bot actually halts and every peer
       state machine (legs/hands/head/player_intention) returns to IDLE
       before its target is reached

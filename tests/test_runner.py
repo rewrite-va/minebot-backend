@@ -20,11 +20,15 @@ class _GamemodeBridge:
     save/switch/restore (see its own docstring) -- every send_query/
     send_gamemode call immediately queues a matching "survival"
     query_result event, so wait_for_gamemode's own poll loop resolves on
-    its first attempt without a real client ever being involved.
+    its first attempt without a real client ever being involved. Also
+    records every send_chat call -- TestRunner._run_one sends its own
+    PASS/FAIL line per test (see its own docstring), so tests that care
+    what got reported can inspect sent_chat directly.
     """
 
     def __init__(self, query_result: QueryResultTracker) -> None:
         self._query_result = query_result
+        self.sent_chat: list[str] = []
 
     async def send_query(self, arg: str, x: int | None = None, y: int | None = None, z: int | None = None) -> None:
         asyncio.get_event_loop().call_soon(
@@ -37,6 +41,9 @@ class _GamemodeBridge:
             self._query_result.handle_event,
             ModEvent(type="query_result", data={"arg": "gamemode", "result": mode}),
         )
+
+    async def send_chat(self, message: str) -> None:
+        self.sent_chat.append(message)
 
 
 def _make_context() -> TestContext:

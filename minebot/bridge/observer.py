@@ -17,13 +17,25 @@ import asyncio
 import json
 import logging
 import time
+from pathlib import PurePosixPath
 from typing import Any, Literal
 
 from websockets.asyncio.server import ServerConnection, serve
+from websockets.datastructures import Headers
+from websockets.http11 import Request, Response
 
 log = logging.getLogger("minebot.observer")
 
 Direction = Literal["sent", "received"]
+
+
+def _json_response(body: bytes) -> Response:
+    headers = Headers()
+    headers["Content-Type"] = "application/json"
+    # Frontend dev server runs on a different origin/port than this server
+    # -- a plain fetch() would otherwise be blocked by CORS.
+    headers["Access-Control-Allow-Origin"] = "*"
+    return Response(200, "OK", headers, body)
 
 
 class ObserverServer:
@@ -34,8 +46,58 @@ class ObserverServer:
         self._server = None
 
     async def start(self) -> None:
-        self._server = await serve(self._on_connection, self._host, self._port)
+        self._server = await serve(self._on_connection, self._host, self._port, process_request=self._process_request)
         log.info("wire-message observer listening on %s:%s", self._host, self._port)
+
+    def _process_request(self, connection: ServerConnection, request: Request) -> Response | None:
+        """Intercepts plain HTTP requests before the WS handshake -- lets
+        minebot-frontend's replay viewer fetch `GET /replays` (listing) and
+        `GET /replays/<filename>` (one full replay) off the SAME port the
+        live wire feed already uses, rather than standing up a second
+        server just for this. Returning None here (any other path) falls
+        through to the normal WS upgrade, unmodified.
+        """
+        if request.path == "/replays":
+            return self._list_replays()
+        if request.path.startswith("/replays/"):
+            filename = request.path.removeprefix("/replays/")
+            return self._get_replay(filename)
+        return None
+
+    def _replay_dir(self):
+        # Local import -- minebot.testing.replay's own ReplayRecorder
+        # type-hints ModEvent (from this module), so importing it at
+        # module scope here would be a real circular import.
+        from minebot.testing.replay import replay_output_dir
+
+        return replay_output_dir()
+
+    def _list_replays(self) -> Response:
+        replay_dir = self._replay_dir()
+        entries: list[dict[str, Any]] = []
+        if replay_dir.is_dir():
+            paths = sorted(replay_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+            for path in paths:
+                try:
+                    data = json.loads(path.read_text())
+                except (OSError, json.JSONDecodeError):
+                    log.warning("skipping unreadable/malformed replay file %s", path)
+                    continue
+                metadata = dict(data.get("metadata", {}))
+                metadata["filename"] = path.name
+                entries.append(metadata)
+
+        return _json_response(json.dumps(entries).encode())
+
+    def _get_replay(self, filename: str) -> Response:
+        # PurePosixPath.name strips any directory components a malicious/
+        # malformed request path might smuggle in (e.g. "../../etc/passwd")
+        # -- only a bare filename within replay_output_dir() is ever served.
+        safe_name = PurePosixPath(filename).name
+        path = self._replay_dir() / safe_name
+        if not safe_name.endswith(".json") or not path.is_file():
+            return Response(404, "Not Found", Headers(), b"")
+        return _json_response(path.read_bytes())
 
     async def close(self) -> None:
         if self._server is not None:

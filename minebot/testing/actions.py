@@ -755,6 +755,8 @@ async def place_schematic(ctx: TestContext, schematic: Schematic, anchor_x: int,
     world at all).
     """
     runs = _fill_runs(schematic)
+    if ctx.replay_recorder is not None:
+        ctx.replay_recorder.record_blocks(runs)
 
     async def _place() -> None:
         for x1, y1, z1, x2, y2, z2, block in runs:

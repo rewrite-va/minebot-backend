@@ -24,6 +24,8 @@ from minebot.bridge.self_position import SelfPositionTracker
 from minebot.config import BotConfig
 from minebot.llm.controller import LLMController
 from minebot.logging_setup import configure_logging
+from minebot.mod_version import expected_commit
+from minebot.testing.replay import ReplayRecorder
 from minebot.testing.runner import TestContext, TestRegistry, TestRunner
 from minebot.testing.tests import register_default_tests
 
@@ -59,15 +61,22 @@ async def run_bot(config: BotConfig) -> None:
     register_query_action(actions, bridge, query_result)
     register_gamemode_action(actions, bridge)
 
+    replay_recorder = ReplayRecorder()
     test_registry = TestRegistry()
     register_default_tests(test_registry)
-    test_runner = TestRunner(test_registry, TestContext(bridge=bridge, self_position=self_position, tracker=tracker, query_result=query_result))
+    test_runner = TestRunner(
+        test_registry,
+        TestContext(
+            bridge=bridge, self_position=self_position, tracker=tracker, query_result=query_result,
+            replay_recorder=replay_recorder, mod_commit=expected_commit(config.mod_repo_path),
+        ),
+    )
     register_testing_actions(actions, test_runner)
 
     llm = LLMController(bridge, actions)  # no provider configured yet -- see llm/controller.py
 
     try:
-        await run(bridge, actions, tracker, inventory, llm, config, self_position, self_defense, query_result)
+        await run(bridge, actions, tracker, inventory, llm, config, self_position, self_defense, query_result, replay_recorder)
     finally:
         await bridge.close()
         await observer.close()

@@ -27,6 +27,7 @@ from minebot.config import BotConfig
 from minebot.llm.controller import LLMController
 from minebot.llm.trigger import should_trigger_llm
 from minebot.mod_version import check_hello
+from minebot.testing.replay import ReplayRecorder
 from minebot.timing import log_timing, now
 
 log = logging.getLogger("minebot.run_loop")
@@ -42,6 +43,7 @@ async def run(
     self_position: SelfPositionTracker,
     self_defense: SelfDefenseTrigger,
     query_result: QueryResultTracker,
+    replay_recorder: ReplayRecorder,
 ) -> None:
     """Splits reading the mod's events from processing them into two
     concurrent tasks joined by a queue -- found live (back when !find
@@ -84,7 +86,7 @@ async def run(
     commands themselves finish executing in.
     """
     queue: asyncio.Queue[ModEvent] = asyncio.Queue()
-    reader = asyncio.ensure_future(_read_events(bridge, tracker, inventory, self_position, query_result, queue))
+    reader = asyncio.ensure_future(_read_events(bridge, tracker, inventory, self_position, query_result, replay_recorder, queue))
     current_command_task: asyncio.Task | None = None
 
     try:
@@ -135,6 +137,7 @@ async def _read_events(
     inventory: InventoryTracker,
     self_position: SelfPositionTracker,
     query_result: QueryResultTracker,
+    replay_recorder: ReplayRecorder,
     queue: asyncio.Queue[ModEvent],
 ) -> None:
     """Continuously drains bridge.events() -- this is the only coroutine
@@ -174,6 +177,8 @@ async def _read_events(
         elif event.type == "query_result":
             log.debug("query_result: %s", event.data)
             query_result.handle_event(event)
+        elif event.type == "replay_frame":
+            replay_recorder.handle_event(event)
         else:
             await queue.put(event)
 

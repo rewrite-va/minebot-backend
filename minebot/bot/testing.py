@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from minebot.actions.registry import ActionRegistry
 from minebot.actions.types import Action, ActionParam, ActionResult
-from minebot.testing.runner import TestRunner, format_outcomes
+from minebot.testing.runner import TestRunner
 
 
 def register_testing_actions(registry: ActionRegistry, runner: TestRunner) -> None:
@@ -36,7 +36,13 @@ def register_testing_actions(registry: ActionRegistry, runner: TestRunner) -> No
         # startup path never needs this override at all).
         run_name = None if name is None or name == "all" else name
         outcomes = await runner.run(run_name, stop_on_first_failure=stop_on_first_failure)
-        return ActionResult(message=format_outcomes(outcomes))
+        # Each test already sent its own PASS/FAIL chat line as it finished
+        # (see TestRunner._run_one) -- no summary message needed here. The
+        # "no such test" case is the one outcome that never goes through
+        # _run_one, so it still needs to be surfaced somehow.
+        if len(outcomes) == 1 and outcomes[0].detail.startswith("no such test"):
+            return ActionResult(message=outcomes[0].detail)
+        return ActionResult(message="")
 
     registry.register(Action(
         name="runtest",
