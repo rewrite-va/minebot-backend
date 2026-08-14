@@ -41,7 +41,7 @@ own start time, before assuming a logic bug.
 
 ## Three repos, one bot
 
-- **This repo** (`minebot`) -- Python backend. Runs the control-channel
+- **This repo** (`minebot-backend`) -- Python backend. Runs the control-channel
   WebSocket *server*; dispatches chat commands/LLM tool calls, tracks
   entity/inventory/health state. `minebot/bot/` = chat-command
   controllers (`movement.py`/`inventory.py`/`mining.py`/`combat.py`);

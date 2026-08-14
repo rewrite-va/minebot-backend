@@ -27,7 +27,7 @@ whole class of problem entirely, since there's no possibility of the physics
 being subtly wrong when it's the actual game's own code running.
 
 Two repos now make up this project:
-- **`/home/colaila/git/minebot`** (this repo) -- the Python side. No longer
+- **`/home/colaila/git/minebot-backend`** (this repo) -- the Python side. No longer
   speaks the Minecraft protocol at all; connects to the mod's local
   WebSocket and does chat-command parsing/dispatch and decision-making
   (currently: `!follow`/`!stop`).
