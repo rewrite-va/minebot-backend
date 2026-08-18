@@ -164,7 +164,32 @@ class SchematicBlock:
     x: int
     y: int
     z: int
-    block: str  # e.g. "minecraft:stone" -- palette Name, Properties dropped (unused so far)
+    block: str  # e.g. "minecraft:stone" -- palette Name only, no properties
+    # The palette entry's own "Properties" compound (facing, half, shape,
+    # waterlogged, ...) as a plain str->str dict, e.g. {"facing": "south",
+    # "half": "bottom", "shape": "straight"} -- empty (never None) for a
+    # block with no properties at all. Confirmed live as a real gap: this
+    # was previously dropped entirely, so /fill always placed every block
+    # in its bare registry-DEFAULT orientation regardless of how the
+    # schematic was actually built in Litematica -- harmless for
+    # orientation-independent blocks (stone), but silently wrong for
+    # anything a pathfinding move needs to reason about the real facing of
+    # (stairs' own FACING -- see Movements.getMoveStepUp's own docstring
+    # for the live goto_stairs_1 bug this caused: every placed oak_stairs
+    # came out facing whatever direction the block registers as default,
+    # never the "facing=south" the schematic's own author actually placed).
+    properties: dict[str, str] = field(default_factory=dict)
+
+    def blockstate_command_suffix(self) -> str:
+        """Renders `properties` as the bracketed `[key=value,...]` suffix
+        `/setblock`/`/fill` expect after the block id -- empty string when
+        there are no properties, so a caller can always just concatenate
+        `block + blockstate_command_suffix()` without a separate branch.
+        """
+        if not self.properties:
+            return ""
+        pairs = ",".join(f"{key}={value}" for key, value in self.properties.items())
+        return f"[{pairs}]"
 
 
 # Colored wool -> waypoint role, per explicit direction: build test
@@ -276,7 +301,11 @@ class Schematic:
         size = region["Size"]
         size_x, size_y, size_z = abs(size["x"]), abs(size["y"]), abs(size["z"])
 
-        palette = [entry["Name"] for entry in region["BlockStatePalette"]]
+        # Properties (facing/half/shape/waterlogged/...) is itself an NBT
+        # compound of plain string->string values when present, and simply
+        # absent from the entry at all for a block with no properties
+        # (e.g. minecraft:stone) -- .get(..., {}) covers both.
+        palette = [(entry["Name"], entry.get("Properties", {})) for entry in region["BlockStatePalette"]]
         bits = _bits_per_entry(len(palette))
         total_cells = size_x * size_y * size_z
         indices = _unpack_block_states(region["BlockStates"], bits, total_cells)
@@ -290,7 +319,7 @@ class Schematic:
                     # Matches LitematicaBlockStateContainer.getIndex exactly:
                     # y*sizeLayer + z*sizeX + x.
                     index = cy * size_layer + cz * size_x + cx
-                    name = palette[indices[index]]
+                    name, properties = palette[indices[index]]
                     if name == "minecraft:air":
                         continue
                     role = WAYPOINT_BLOCK_ROLES.get(name)
@@ -302,7 +331,7 @@ class Schematic:
                         # /fills them.
                         waypoints_by_role[role].append(Waypoint(x=cx, y=cy, z=cz))
                     else:
-                        blocks.append(SchematicBlock(x=cx, y=cy, z=cz, block=name))
+                        blocks.append(SchematicBlock(x=cx, y=cy, z=cz, block=name, properties=properties))
 
         waypoints = Waypoints(
             start=waypoints_by_role["start"],

@@ -71,9 +71,17 @@ log = logging.getLogger("minebot.tests.integration")
 
 MOD_REPO_PATH = Path(os.environ.get("MINEBOT_MOD_REPO_PATH", "/home/colaila/git/mods/minebot-mod"))
 TEST_WORLD_NAME = os.environ.get("MINEBOT_TEST_WORLD", "minebot-test-world")
-# Opt-in -- most local/CI runs don't want the per-tick replay_frame traffic
-# or the resulting JSON files. Set MINEBOT_RECORD_REPLAY=true to record.
-RECORD_REPLAY = os.environ.get("MINEBOT_RECORD_REPLAY", "false").lower() in ("1", "true", "yes")
+# Opt-in -- most local/CI runs don't want the per-tick replay_frame traffic,
+# the resulting JSON files, or the every-tick navigate[diag]/
+# navigate[collision] text logging (minebot-mod's TESTING.md "Live navigate
+# debugging"). ONE flag controls both: a debugging session investigating a
+# live jump/navigate bug always wants the replay (position/velocity/inputs
+# for minebot-frontend's viewer) AND the text log (jump-planning internals
+# -- jumpPlan/hasRunup/atLastSafeTick -- the replay schema doesn't carry) at
+# the same time; two separate env vars just meant it was easy to set one and
+# forget the other, producing a replay with 0 frames (confirmed live).
+DEBUG_NAVIGATE = os.environ.get("MINEBOT_DEBUG_NAVIGATE", "false").lower() in ("1", "true", "yes")
+RECORD_REPLAY = DEBUG_NAVIGATE
 
 # Real client boot + world load + control-channel handshake, confirmed
 # live to take well under this during minebot-mod's TESTING.md
@@ -222,6 +230,8 @@ async def ingame_session():
     ]
     if RECORD_REPLAY:
         gradlew_args.append("-Pminebot.recordReplay=true")
+    if DEBUG_NAVIGATE:
+        gradlew_args.append("-Pminebot.debugNavigate=true")
     client_process = subprocess.Popen(
         gradlew_args,
         cwd=MOD_REPO_PATH,

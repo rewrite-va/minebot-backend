@@ -40,11 +40,22 @@ class ReplayRecorder:
 
     _frames: list[dict[str, Any]] = field(default_factory=list)
     _placed_blocks: list[tuple[int, int, int, int, int, int, str]] = field(default_factory=list)
+    # Real-world-offset (x, y, z, role) points -- role is one of
+    # litematic.WAYPOINT_BLOCK_ROLES' own values ("start"/"path"/
+    # "forbidden"/"end"/"unreachable"), i.e. exactly what each wool color
+    # in the source schematic meant. Kept separate from _placed_blocks
+    # (which records the raw /fill runs a schematic places, including the
+    # wool blocks themselves) since a viewer wants to tell "this is scenery
+    # the bot walks on" apart from "this is an assertion marker" -- see
+    # goto_with_waypoints' own call site in actions.py for where these are
+    # captured, already offset the same way placed_blocks now is.
+    _waypoints: list[tuple[float, float, float, str]] = field(default_factory=list)
     _recording: bool = False
 
     def start(self) -> None:
         self._frames = []
         self._placed_blocks = []
+        self._waypoints = []
         self._recording = True
 
     def stop(self) -> list[dict[str, Any]]:
@@ -57,6 +68,10 @@ class ReplayRecorder:
     def placed_blocks(self) -> list[tuple[int, int, int, int, int, int, str]]:
         return self._placed_blocks
 
+    @property
+    def waypoints(self) -> list[tuple[float, float, float, str]]:
+        return self._waypoints
+
     def handle_event(self, event: ModEvent) -> None:
         if event.type != "replay_frame" or not self._recording:
             return
@@ -64,6 +79,9 @@ class ReplayRecorder:
 
     def record_blocks(self, runs: list[tuple[int, int, int, int, int, int, str]]) -> None:
         self._placed_blocks.extend(runs)
+
+    def record_waypoints(self, waypoints: list[tuple[float, float, float, str]]) -> None:
+        self._waypoints.extend(waypoints)
 
 
 def replay_output_dir() -> Path:
@@ -84,6 +102,7 @@ def write_replay(
     duration_seconds: float,
     frames: list[dict[str, Any]],
     placed_blocks: list[tuple[int, int, int, int, int, int, str]],
+    waypoints: list[tuple[float, float, float, str]] = (),
 ) -> Path:
     """Writes <test_name>_<commit>_<datetime>.json into replay_output_dir()
     and returns the path written. `commit` is expected to come from
@@ -110,6 +129,10 @@ def write_replay(
         "placed_blocks": [
             {"x1": x1, "y": y1, "z1": z1, "x2": x2, "z2": z2, "block": block}
             for x1, y1, z1, x2, y2, z2, block in placed_blocks
+        ],
+        "waypoints": [
+            {"x": x, "y": y, "z": z, "role": role}
+            for x, y, z, role in waypoints
         ],
         "frames": frames,
     }

@@ -230,6 +230,22 @@ async def goto_with_waypoints(
     """
     await _wait_for_initial_position(ctx)
 
+    if ctx.replay_recorder is not None:
+        # Real-world-offset already (see this function's own docstring) --
+        # the SAME coordinate space frames/placed_blocks now use, so a
+        # viewer can render every wool-marker role (what each schematic
+        # waypoint actually meant) directly against the bot's real trail,
+        # not just the bot's own live-replanned path (frame.path, a
+        # DIFFERENT thing -- the A* plan, not the test's own assertion
+        # markers). end/start/unreachable aren't parameters here (goto()
+        # takes a bare target_x/y/z, not a Waypoint) -- only path/forbidden
+        # are recorded from this call site; see goto_with_waypoints'
+        # per-test callers for start/end recording.
+        ctx.replay_recorder.record_waypoints(
+            [(w.x + 0.5, w.y + 0.5, w.z + 0.5, "path") for w in path]
+            + [(w.x + 0.5, w.y + 0.5, w.z + 0.5, "forbidden") for w in forbidden]
+        )
+
     path_hits = [0] * len(path)
     forbidden_hits = [0] * len(forbidden)
     # Tracks the previous sampled position so each new broadcast can be
@@ -709,13 +725,21 @@ def _fill_runs(schematic: Schematic) -> list[tuple[int, int, int, int, int, int,
     full 3D box-merge isn't worth the complexity until a real scenario
     actually needs it.
 
-    Returns (x1, y, z, x2, y, z, block) tuples, one per contiguous run,
-    in ascending (y, z, x) order -- deterministic, so tests calling this
-    directly get reproducible output.
+    Returns (x1, y, z, x2, y, z, block) tuples, one per contiguous run, in
+    ascending (y, z, x) order -- deterministic, so tests calling this
+    directly get reproducible output. `block` already includes the real
+    blockstate suffix (e.g. "minecraft:oak_stairs[facing=south,...]") when
+    the schematic block has properties -- see SchematicBlock.
+    blockstate_command_suffix's own docstring. A run only ever merges
+    cells that share the SAME block+properties, not just the same block
+    name -- two adjacent stairs blocks facing different directions must
+    stay two separate /fill commands, never silently collapsed into one
+    (which would place BOTH cells with whichever orientation happened to
+    be seen first).
     """
     by_row: dict[tuple[int, int], list[tuple[int, str]]] = {}
     for b in schematic.blocks:
-        by_row.setdefault((b.y, b.z), []).append((b.x, b.block))
+        by_row.setdefault((b.y, b.z), []).append((b.x, b.block + b.blockstate_command_suffix()))
 
     runs = []
     for (y, z), cells in sorted(by_row.items()):
@@ -756,7 +780,21 @@ async def place_schematic(ctx: TestContext, schematic: Schematic, anchor_x: int,
     """
     runs = _fill_runs(schematic)
     if ctx.replay_recorder is not None:
-        ctx.replay_recorder.record_blocks(runs)
+        # Anchor-offset, matching the real world coordinates the /fill
+        # commands below actually send -- ReplayFrame positions (self_x/y/z)
+        # are always real-world too, so recording schematic-LOCAL
+        # coordinates here (the raw `runs`) would silently put every placed
+        # block in a different coordinate space than the bot's own
+        # recorded trail, undetectable until a viewer actually tries to
+        # render both together (confirmed live: minebot-frontend's
+        # ReplayViewer3D drew every block ~60 blocks away from the bot,
+        # off-screen, since ORIGIN_Y=-60 while schematic-local y starts at
+        # 0).
+        offset_runs = [
+            (anchor_x + x1, anchor_y + y1, anchor_z + z1, anchor_x + x2, anchor_y + y2, anchor_z + z2, block)
+            for x1, y1, z1, x2, y2, z2, block in runs
+        ]
+        ctx.replay_recorder.record_blocks(offset_runs)
 
     async def _place() -> None:
         for x1, y1, z1, x2, y2, z2, block in runs:

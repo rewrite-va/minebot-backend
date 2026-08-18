@@ -186,6 +186,7 @@ async def run_test_case(ctx: TestContext, test: TestCase) -> None:
         if ctx.replay_recorder is not None:
             frames = ctx.replay_recorder.stop()
             placed_blocks = ctx.replay_recorder.placed_blocks
+            waypoints = ctx.replay_recorder.waypoints
             outcome = _classify_outcome(test.name, start, test.timeout_seconds, exc)
             write_replay(
                 test_name=test.name,
@@ -196,6 +197,7 @@ async def run_test_case(ctx: TestContext, test: TestCase) -> None:
                 duration_seconds=outcome.duration_seconds,
                 frames=frames,
                 placed_blocks=placed_blocks,
+                waypoints=waypoints,
             )
 
 

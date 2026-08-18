@@ -177,6 +177,35 @@ def _offset(anchor_x: float, anchor_y: float, anchor_z: float, waypoint: Waypoin
     return Waypoint(x=int(anchor_x) + waypoint.x, y=int(anchor_y) + waypoint.y, z=int(anchor_z) + waypoint.z)
 
 
+def _record_start_end_waypoints(
+    ctx: TestContext, schematic: Schematic, anchor_x: float, anchor_y: float, anchor_z: float,
+) -> None:
+    """Records a schematic's own "start"/"end" wool markers into the
+    replay recorder, real-world-offset and centered (+0.5 on every axis --
+    same reasoning goto_with_waypoints' own path/forbidden recording
+    uses), so minebot-frontend's replay viewer can render them alongside
+    the "path"/"forbidden" markers goto_with_waypoints already records
+    itself. Separate from that function (rather than folded into it)
+    because goto_with_waypoints only ever receives path/forbidden -- start
+    isn't even a goto_with_waypoints parameter -- so every call site that
+    HAS a start/end (which isn't all of them; the "unreachable"-target
+    tests don't) calls this once alongside its own goto_with_waypoints
+    call. Confirmed live as a real gap: a schematic's start/end were only
+    ever recorded from _make_waypoint_goto_test's own body, so a
+    standalone test calling goto_with_waypoints directly (goto_stairs_1,
+    goto_leaves_2) silently produced a replay with every "forbidden"/
+    "path" marker but no "start"/"end" at all.
+    """
+    if ctx.replay_recorder is None:
+        return
+    start = _one(schematic.waypoints.start, "start")
+    end = _one(schematic.waypoints.end, "end")
+    ctx.replay_recorder.record_waypoints([
+        (anchor_x + start.x + 0.5, anchor_y + start.y + 0.5, anchor_z + start.z + 0.5, "start"),
+        (anchor_x + end.x + 0.5, anchor_y + end.y + 0.5, anchor_z + end.z + 0.5, "end"),
+    ])
+
+
 def _make_schematic_setup(schematic_path: Path, anchor_x: float, anchor_y: float, anchor_z: float):
     """Builds a TestCase.setup for a schematic-driven scenario: reset to
     IDLE, teleport to HOLDING (well outside every schematic's own
@@ -269,31 +298,51 @@ def _make_schematic_teardown(schematic_path: Path, anchor_x: float, anchor_y: fl
     async def teardown(ctx: TestContext) -> None:
         await actions.reset_to_idle(ctx)
         schematic = Schematic.from_file(schematic_path)
+        holding_x, holding_y, holding_z = _block_center(HOLDING_X, HOLDING_Y, HOLDING_Z)
+        # Fire-and-forget /tp to HOLDING, sent BEFORE clearing (as well as
+        # again after -- see below) and never awaited/confirmed. Per
+        # explicit direction: confirmed live that clearing first left a
+        # real window where the bot could still be standing over the
+        # schematic's own footprint when /fill air ran, yanking its
+        # supporting blocks out from under it and dropping it straight
+        # through to the world's own void floor (goto_stairs_1, a
+        # 1-block-wide platform, made this especially easy to trigger --
+        # any real position still inside the small footprint at the exact
+        # moment of clearing loses its ground). Deliberately NOT
+        # actions.teleport() (which polls !query position until arrival or
+        # times out) -- that's exactly the blocking-on-confirmation shape
+        # that made an EARLIER version of this teardown's own
+        # teleport-before-clearing step unreliable (a still-active !goto
+        # fighting the /tp, a slow/lost query reply, ... left
+        # clear_schematic NEVER EVEN ATTEMPTED, leaking placed blocks with
+        # no cleanup at all). This fire-and-forget nudge costs nothing if
+        # it doesn't land in time -- clear_schematic below still runs
+        # unconditionally regardless -- but gives the bot a real chance to
+        # actually be gone before the blocks disappear, cutting the
+        # fall-through-the-void window down from "every single teardown"
+        # to "only the rare case this nudge itself doesn't land in time,"
+        # not eliminating the race outright (there is no way to eliminate
+        # it without reintroducing the same fragility a confirmed teleport
+        # already caused) but making it dramatically less likely.
+        # send_teleport, not send_console_command -- still fire-and-forget
+        # (see ModBridge.send_teleport's own docstring: it's the same
+        # unrated, unconfirmed `_send` shape), but ALSO zeros residual
+        # velocity/fall distance the instant it lands, unlike a raw `/tp`
+        # sent as chat text (see actions.teleport's own docstring for the
+        # real bug this avoids: leftover fall velocity from THIS test's
+        # own still-active goto surviving a plain /tp and silently
+        # skewing the NEXT test's own jump).
+        await ctx.bridge.send_teleport(holding_x, holding_y, holding_z)
         await actions.clear_schematic(
             ctx, schematic, anchor_x=int(anchor_x), anchor_y=int(anchor_y), anchor_z=int(anchor_z),
             timeout=SCHEMATIC_TIMEOUT_SECONDS,
         )
-        # Fire-and-forget /tp to HOLDING, sent LAST (after clearing, not
-        # before it) and never awaited/confirmed -- per explicit
-        # direction: a failed test should still leave the bot at HOLDING
-        # rather than wherever it ended up, so it doesn't sit in/near the
-        # NEXT test's own setup area (still mid-!goto, standing on the
-        # next schematic's own anchor, ...). Deliberately NOT
-        # actions.teleport() (which polls !query position until arrival
-        # or times out) -- that's exactly the blocking-on-confirmation
-        # shape that made the OLD teardown's own teleport-before-clearing
-        # step unreliable (see this function's own docstring above). This
-        # is a pure best-effort nudge: send the command, don't wait to
-        # see whether it landed, so it can never be the reason teardown
-        # itself fails or blocks. send_teleport, not send_console_command
-        # -- still fire-and-forget (see ModBridge.send_teleport's own
-        # docstring: it's the same unrated, unconfirmed `_send` shape),
-        # but ALSO zeros residual velocity/fall distance the instant it
-        # lands, unlike a raw `/tp` sent as chat text (see actions.
-        # teleport's own docstring for the real bug this avoids: leftover
-        # fall velocity from THIS test's own still-active goto surviving a
-        # plain /tp and silently skewing the NEXT test's own jump).
-        holding_x, holding_y, holding_z = _block_center(HOLDING_X, HOLDING_Y, HOLDING_Z)
+        # Sent again AFTER clearing too -- per explicit direction (see the
+        # first send's own comment above for why a failed test should
+        # still leave the bot at HOLDING rather than wherever it ended
+        # up), and because the first send above is a pure best-effort
+        # nudge with no confirmation it actually landed before clearing
+        # ran.
         await ctx.bridge.send_teleport(holding_x, holding_y, holding_z)
 
     return teardown
@@ -320,9 +369,13 @@ async def test_goto_arrives_on_schematic_block(ctx: TestContext) -> None:
 
     result = await actions.goto_with_waypoints(
         ctx,
-        target_x=SCHEMATIC_ANCHOR_X + end.x,
+        # +0.5 on x/z -- see test_goto_climbs_stairs_without_jumping's own
+        # call site for the real live bug (goto_stairs_1's own bot walking
+        # off a 1-block-wide platform) an uncentered raw-corner target
+        # caused.
+        target_x=SCHEMATIC_ANCHOR_X + end.x + 0.5,
         target_y=SCHEMATIC_ANCHOR_Y + end.y,
-        target_z=SCHEMATIC_ANCHOR_Z + end.z,
+        target_z=SCHEMATIC_ANCHOR_Z + end.z + 0.5,
         distance_tolerance=GOTO_ARRIVAL_TOLERANCE,
         timeout=GOTO_TIMEOUT_SECONDS,
         path=[_offset(SCHEMATIC_ANCHOR_X, SCHEMATIC_ANCHOR_Y, SCHEMATIC_ANCHOR_Z, w) for w in schematic.waypoints.path],
@@ -368,11 +421,25 @@ def _make_waypoint_goto_test(schematic_path: Path, anchor_x: float, anchor_y: fl
         end = _one(schematic.waypoints.end, "end")
         anchor = (anchor_x, anchor_y, anchor_z)
 
+        _record_start_end_waypoints(ctx, schematic, anchor_x, anchor_y, anchor_z)
+
+        # +0.5 on x/z (same _block_center reasoning as every teleport target
+        # in this file) -- a bare integer end.x/end.z is the target block's
+        # own MINIMUM CORNER, not its middle. Confirmed live as a real,
+        # independent bug on goto_stairs_1: its landing platform is only
+        # ONE block wide in x (block x=1, footprint x in [1,2)), so a !goto
+        # aimed at the raw corner x=1.0 lands the bot's own center right on
+        # the platform's edge -- any further steering correction toward the
+        # exact target (even a fraction of a block) crosses out of the
+        # supported column entirely, walking the bot off the edge and
+        # falling. y is deliberately NOT offset -- same reasoning
+        # _block_center's own docstring gives: standing on a block's real
+        # top surface is already the correct Y with no offset needed.
         result = await actions.goto_with_waypoints(
             ctx,
-            target_x=anchor_x + end.x,
+            target_x=anchor_x + end.x + 0.5,
             target_y=anchor_y + end.y,
-            target_z=anchor_z + end.z,
+            target_z=anchor_z + end.z + 0.5,
             distance_tolerance=GOTO_ARRIVAL_TOLERANCE,
             timeout=GOTO_TIMEOUT_SECONDS,
             path=[_offset(*anchor, w) for w in schematic.waypoints.path],
@@ -587,12 +654,17 @@ async def test_goto_leaves_2_reaches_goal_with_one_jump(ctx: TestContext) -> Non
     end = _one(schematic.waypoints.end, "end")
     anchor = (LEAVES2_SCHEMATIC_ANCHOR_X, LEAVES2_SCHEMATIC_ANCHOR_Y, LEAVES2_SCHEMATIC_ANCHOR_Z)
 
+    _record_start_end_waypoints(ctx, schematic, *anchor)
+
     async def _run() -> None:
         result = await actions.goto_with_waypoints(
             ctx,
-            target_x=LEAVES2_SCHEMATIC_ANCHOR_X + end.x,
+            # +0.5 on x/z -- see test_goto_climbs_stairs_without_jumping's
+            # own call site for the real live bug an uncentered raw-corner
+            # target caused.
+            target_x=LEAVES2_SCHEMATIC_ANCHOR_X + end.x + 0.5,
             target_y=LEAVES2_SCHEMATIC_ANCHOR_Y + end.y,
-            target_z=LEAVES2_SCHEMATIC_ANCHOR_Z + end.z,
+            target_z=LEAVES2_SCHEMATIC_ANCHOR_Z + end.z + 0.5,
             distance_tolerance=GOTO_ARRIVAL_TOLERANCE,
             timeout=GOTO_TIMEOUT_SECONDS,
             path=[_offset(*anchor, w) for w in schematic.waypoints.path],
@@ -639,12 +711,25 @@ async def test_goto_climbs_stairs_without_jumping(ctx: TestContext) -> None:
     end = _one(schematic.waypoints.end, "end")
     anchor = (STAIRS_SCHEMATIC_ANCHOR_X, STAIRS_SCHEMATIC_ANCHOR_Y, STAIRS_SCHEMATIC_ANCHOR_Z)
 
+    _record_start_end_waypoints(ctx, schematic, *anchor)
+
     async def _run() -> None:
+        # +0.5 on x/z -- a bare integer end.x/end.z is the target block's
+        # own MINIMUM CORNER, not its middle (same _block_center reasoning
+        # every teleport target in this file already uses). Confirmed live
+        # as a real bug: goto_stairs_1's landing platform is only ONE
+        # block wide in x (footprint x in [1,2)), so a !goto aimed at the
+        # raw corner x=1.0 lands the bot's own center right on the
+        # platform's edge -- any further steering correction toward the
+        # exact target crosses out of the supported column entirely,
+        # walking the bot off the edge and falling to the void floor. y is
+        # deliberately NOT offset -- standing on a block's real top
+        # surface is already the correct Y with no offset needed.
         result = await actions.goto_with_waypoints(
             ctx,
-            target_x=STAIRS_SCHEMATIC_ANCHOR_X + end.x,
+            target_x=STAIRS_SCHEMATIC_ANCHOR_X + end.x + 0.5,
             target_y=STAIRS_SCHEMATIC_ANCHOR_Y + end.y,
-            target_z=STAIRS_SCHEMATIC_ANCHOR_Z + end.z,
+            target_z=STAIRS_SCHEMATIC_ANCHOR_Z + end.z + 0.5,
             distance_tolerance=GOTO_ARRIVAL_TOLERANCE,
             timeout=STAIRS_GOTO_TIMEOUT_SECONDS,
             path=[_offset(*anchor, w) for w in schematic.waypoints.path],
