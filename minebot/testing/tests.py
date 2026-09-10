@@ -742,6 +742,50 @@ async def test_goto_climbs_stairs_without_jumping(ctx: TestContext) -> None:
     await actions.assert_never_jumps(ctx, during=_run())
 
 
+# A small water room -- "start" stands on a dry gap between two shallow
+# (1-block-deep) water pockets, "end" sits in a separate dry room past
+# them. Exercises Movements' own liquid-cost handling (see
+# minebot-mod/.../pathfinding/Movements.java's LIQUID_COST/
+# LIQUID_SURFACE_COST): the water here is surface-only (open air directly
+# above every water tile, never fully submerged), so the bot should still
+# be willing to cross it rather than getting stuck treating it as
+# impassable. "forbidden" sits past the far wall/void edge, catching a
+# bot that overshoots "end" rather than stopping there.
+WATER1_SCHEMATIC_PATH = Path(__file__).resolve().parent.parent.parent / "tests" / "fixtures" / "schematics" / "goto_water_1.litematic"
+WATER1_SCHEMATIC_ANCHOR_X = ORIGIN_X
+WATER1_SCHEMATIC_ANCHOR_Y = ORIGIN_Y
+WATER1_SCHEMATIC_ANCHOR_Z = ORIGIN_Z
+
+setup_goto_water_1 = _make_schematic_setup(WATER1_SCHEMATIC_PATH, WATER1_SCHEMATIC_ANCHOR_X, WATER1_SCHEMATIC_ANCHOR_Y, WATER1_SCHEMATIC_ANCHOR_Z)
+teardown_clear_goto_water_1 = _make_schematic_teardown(WATER1_SCHEMATIC_PATH, WATER1_SCHEMATIC_ANCHOR_X, WATER1_SCHEMATIC_ANCHOR_Y, WATER1_SCHEMATIC_ANCHOR_Z)
+
+
+async def test_goto_crosses_water(ctx: TestContext) -> None:
+    """Sends !goto across goto_water_1's shallow water pockets to the
+    "end" marker and asserts the bot actually reaches it without ever
+    touching the "forbidden" cell past the far edge.
+    """
+    schematic = Schematic.from_file(WATER1_SCHEMATIC_PATH)
+    end = _one(schematic.waypoints.end, "end")
+    anchor = (WATER1_SCHEMATIC_ANCHOR_X, WATER1_SCHEMATIC_ANCHOR_Y, WATER1_SCHEMATIC_ANCHOR_Z)
+
+    _record_start_end_waypoints(ctx, schematic, *anchor)
+
+    result = await actions.goto_with_waypoints(
+        ctx,
+        target_x=WATER1_SCHEMATIC_ANCHOR_X + end.x + 0.5,
+        target_y=WATER1_SCHEMATIC_ANCHOR_Y + end.y,
+        target_z=WATER1_SCHEMATIC_ANCHOR_Z + end.z + 0.5,
+        distance_tolerance=GOTO_ARRIVAL_TOLERANCE,
+        timeout=GOTO_TIMEOUT_SECONDS,
+        path=[_offset(*anchor, w) for w in schematic.waypoints.path],
+        forbidden=[_offset(*anchor, w) for w in schematic.waypoints.forbidden],
+    )
+
+    for i, hits in enumerate(result.forbidden_hits):
+        assert hits == 0, f"walked through forbidden waypoint {schematic.waypoints.forbidden[i]}"
+
+
 def register_default_tests(registry: TestRegistry) -> None:
     registry.register(TestCase(
         name="goto",
@@ -805,6 +849,14 @@ def register_default_tests(registry: TestRegistry) -> None:
         setup=setup_goto_stairs_1,
         teardown=teardown_clear_goto_stairs_1,
         timeout_seconds=TELEPORT_TIMEOUT_SECONDS + SCHEMATIC_TIMEOUT_SECONDS + STAIRS_GOTO_TIMEOUT_SECONDS,
+    ))
+    registry.register(TestCase(
+        name="goto_water_1",
+        description="Places a shallow-water schematic, sends !goto across it, and asserts the bot reaches the far side without overshooting into the forbidden cell past the edge.",
+        func=test_goto_crosses_water,
+        setup=setup_goto_water_1,
+        teardown=teardown_clear_goto_water_1,
+        timeout_seconds=TELEPORT_TIMEOUT_SECONDS + SCHEMATIC_TIMEOUT_SECONDS + GOTO_TIMEOUT_SECONDS,
     ))
     registry.register(TestCase(
         name="goto_impossible",
